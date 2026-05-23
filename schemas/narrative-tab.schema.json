@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://otto.local/schemas/narrative-tab.schema.json",
+  "title": "NarrativeTab",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary_paragraph", "evidence_ids"],
+  "properties": {
+    "summary_paragraph": { "type": "string" },
+    "what_this_process_involves": { "type": "string" },
+    "top_risks": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "friction_signals": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "recommended_drilldown_reason": { "type": "string" },
+    "evidence_ids": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "format": "uuid" }
+    }
+  }
+}

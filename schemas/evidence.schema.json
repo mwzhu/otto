@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://otto.local/schemas/evidence.schema.json",
+  "title": "Evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["source_type", "evidence_label", "confidence"],
+  "properties": {
+    "source_type": {
+      "type": "string",
+      "enum": ["transcript_segment", "screen_event", "document_chunk", "user_correction", "agent_inference"]
+    },
+    "source_id": { "type": "string", "format": "uuid" },
+    "evidence_label": {
+      "type": "string",
+      "enum": ["observed", "stated_operator", "stated_director", "documented", "inferred", "confirmed", "corrected"]
+    },
+    "span_start": { "type": "integer", "minimum": 0 },
+    "span_end": { "type": "integer", "minimum": 0 },
+    "quote": { "type": "string" },
+    "summary": { "type": "string" },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+  }
+}

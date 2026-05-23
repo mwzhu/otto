@@ -1,0 +1,7 @@
+Process: Promotion Management
+Owner: Revenue Operations
+Systems: Salesforce, Google Sheets, Slack
+Frequency: weekly
+Pain points: manual spreadsheet cleanup and approval delays.
+Risk: only one analyst knows the exception rules.
+Documentation: SOP is partial and stored in a shared drive.

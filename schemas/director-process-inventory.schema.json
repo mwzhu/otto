@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://otto.local/schemas/director-process-inventory.schema.json",
+  "title": "DirectorProcessInventory",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["candidate_processes"],
+  "properties": {
+    "candidate_processes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["proposed_name", "confidence", "evidence_ids"],
+        "properties": {
+          "proposed_name": { "type": "string", "minLength": 1 },
+          "proposed_function": { "type": "string" },
+          "frequency": { "type": "string" },
+          "complexity_hint": { "type": "string" },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "evidence_ids": {
+            "type": "array",
+            "items": { "type": "string", "format": "uuid" }
+          }
+        }
+      }
+    }
+  }
+}

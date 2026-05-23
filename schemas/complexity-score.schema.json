@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://otto.local/schemas/complexity-score.schema.json",
+  "title": "ComplexityScore",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["total", "factors"],
+  "properties": {
+    "total": { "type": "number", "minimum": 0, "maximum": 100 },
+    "factors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "score", "evidence_ids"],
+        "properties": {
+          "name": { "type": "string" },
+          "score": { "type": "number", "minimum": 0 },
+          "assumption": { "type": "string" },
+          "evidence_ids": {
+            "type": "array",
+            "items": { "type": "string", "format": "uuid" }
+          }
+        }
+      }
+    }
+  }
+}

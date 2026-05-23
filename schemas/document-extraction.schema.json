@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://otto.local/schemas/document-extraction.schema.json",
+  "title": "DocumentExtraction",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["claims", "candidate_processes"],
+  "properties": {
+    "claims": {
+      "type": "array",
+      "items": { "$ref": "claim.schema.json" }
+    },
+    "candidate_processes": {
+      "type": "array",
+      "items": { "$ref": "director-process-inventory.schema.json#/properties/candidate_processes/items" }
+    }
+  }
+}

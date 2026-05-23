@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://otto.local/schemas/probe-intent-ranking.schema.json",
+  "title": "ProbeIntentRanking",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ranked_intents"],
+  "properties": {
+    "ranked_intents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["probe_id", "target_slot", "score", "reason"],
+        "properties": {
+          "probe_id": { "type": "string" },
+          "target_slot": { "type": "string" },
+          "score": { "type": "number" },
+          "reason": { "type": "string" },
+          "style_hint": { "type": "string" }
+        }
+      }
+    }
+  }
+}

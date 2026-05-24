@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1779383489090,
+      "tag": "0000_phase0_foundations",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1779469880000,
+      "tag": "0001_phase1_director_intake",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1779579000000,
+      "tag": "0002_workspace_data_tier_real",
+      "breakpoints": true
+    }
+  ]
+}

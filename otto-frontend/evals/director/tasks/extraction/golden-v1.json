@@ -1,0 +1,2861 @@
+{
+  "dataset": "director-extraction-golden-v1",
+  "version": 1,
+  "description": "Twenty realistic director-interview utterances labeled with ideal slot extraction outputs. This dataset is scoped to extraction accuracy only: slot status, slot value correctness, and slot precision.",
+  "notes": [
+    "Each task is a single-turn extraction case unless otherwise noted.",
+    "expected.slotValues are grader-friendly checks against JSON.stringify(slot_states.value).",
+    "perfectOutput.slot_updates is the human-readable reference answer for the ideal extraction.",
+    "Values use director-layer slot paths from lib/interview/director/slot-schema.ts."
+  ],
+  "tasks": [
+    {
+      "id": "extraction-common-001-promo-management",
+      "category": "common",
+      "description": "Director names a process, cadence, systems of record, and a shadow spreadsheet.",
+      "turns": [
+        "We run promotion management every Monday. Salesforce is our system of record, but pricing gets finalized in a shared Google Sheet before it goes to NetSuite."
+      ],
+      "expected": {
+        "slots": {
+          "scope.boundaries": "filled",
+          "frequency.volume": "filled",
+          "systems.systems_of_record": "filled"
+        },
+        "slotValues": {
+          "scope.boundaries": {
+            "mustContain": [
+              "Promotion Management"
+            ],
+            "mustNotContain": [
+              "Renewal Review",
+              "Demand Forecasting"
+            ]
+          },
+          "frequency.volume": {
+            "mustContain": [
+              "every Monday"
+            ],
+            "mustNotContain": [
+              "monthly",
+              "daily"
+            ]
+          },
+          "systems.systems_of_record": {
+            "mustContain": [
+              "Salesforce",
+              "Google Sheet",
+              "NetSuite"
+            ],
+            "mustNotContain": [
+              "Workday",
+              "Slack"
+            ]
+          }
+        },
+        "forbiddenSlotFills": [
+          "risk.spofs",
+          "controls.compliance"
+        ]
+      },
+      "perfectOutput": {
+        "slot_updates": [
+          {
+            "slot_path": "scope.boundaries",
+            "status": "filled",
+            "confidence": 0.9,
+            "value": {
+              "process_names": [
+                "Promotion Management"
+              ]
+            }
+          },
+          {
+            "slot_path": "frequency.volume",
+            "status": "filled",
+            "confidence": 0.86,
+            "value": {
+              "frequency": "every Monday"
+            }
+          },
+          {
+            "slot_path": "systems.systems_of_record",
+            "status": "filled",
+            "confidence": 0.9,
+            "value": {
+              "systems": [
+                "Salesforce",
+                "Google Sheets",
+                "NetSuite"
+              ],
+              "systems_of_record": [
+                "Salesforce"
+              ],
+              "shadow_systems": [
+                "Google Sheets"
+              ]
+            }
+          }
+        ]
+      },
+      "expectedState": "pass"
+    },
+    {
+      "id": "extraction-context-002-renewal-review-pronoun",
+      "category": "common",
+      "description": "Multi-turn context: second utterance uses a pronoun and must attach owner/volume/handoff to the process from turn one.",
+      "turns": [
+        "Renewal review is one of our bigger workflows; it starts when Salesforce flags an account 90 days before contract end.",
+        "RevOps handles it, about 80 a week, and Finance only gets involved when discount approvals are over 20 percent."
+      ],
+      "expected": {
+        "slots": {
+          "scope.boundaries": "filled",
+          "ownership.roles": "filled",
+          "frequency.volume": "filled",
+          "systems.systems_of_record": "filled",
+          "handoffs.dependencies": "filled"
+        },
+        "slotValues": {
+          "scope.boundaries": {
+            "mustContain": [
+              "Renewal Review",
+              "Salesforce",
+              "90 days before contract end"
+            ],
+            "mustNotContain": [
+              "Demand Forecasting",
+              "Month-end Close",
+              "Unrelated Process",
+              "Generic Workflow"
+            ]
+          },
+          "ownership.roles": {
+            "mustContain": [
+              "RevOps",
+              "Finance"
+            ],
+            "mustNotContain": [
+              "Engineering",
+              "Support Ops",
+              "Legal"
+            ],
+            "aliases": {
+              "Revenue Operations": [
+                "RevOps"
+              ]
+            }
+          },
+          "frequency.volume": {
+            "mustContain": [
+              "80",
+              "week"
+            ],
+            "mustNotContain": [
+              "monthly",
+              "daily"
+            ]
+          },
+          "systems.systems_of_record": {
+            "mustContain": [
+              "Salesforce"
+            ],
+            "mustNotContain": [
+              "NetSuite",
+              "Workday",
+              "ServiceNow"
+            ]
+          },
+          "handoffs.dependencies": {
+            "mustContain": [
+              "Finance",
+              "discount approvals",
+              "20 percent"
+            ],
+            "mustNotContain": [
+              "Legal",
+              "Engineering"
+            ]
+          }
+        },
+        "forbiddenSlotFills": [
+          "risk.spofs",
+          "controls.compliance",
+          "documentation.maturity"
+        ],
+        "candidates": [
+          "Renewal Review"
+        ],
+        "systems": [
+          "Salesforce"
+        ],
+        "peopleOrRoles": [
+          "Revenue Operations",
+          "Finance"
+        ]
+      },
+      "perfectOutput": {
+        "slot_updates": [
+          {
+            "slot_path": "scope.boundaries",
+            "status": "filled",
+            "confidence": 0.9,
+            "value": {
+              "process_names": [
+                "Renewal Review"
+              ],
+              "trigger": "Salesforce flags an account 90 days before contract end"
+            }
+          },
+          {
+            "slot_path": "systems.systems_of_record",
+            "status": "filled",
+            "confidence": 0.86,
+            "value": {
+              "systems": [
+                "Salesforce"
+              ]
+            }
+          },
+          {
+            "slot_path": "ownership.roles",
+            "status": "filled",
+            "confidence": 0.84,
+            "value": {
+              "owner_role": "Revenue Operations",
+              "roles": [
+                "Revenue Operations",
+                "Finance"
+              ],
+              "raw_mentions": [
+                "RevOps"
+              ]
+            }
+          },
+          {
+            "slot_path": "frequency.volume",
+            "status": "filled",
+            "confidence": 0.86,
+            "value": {
+              "volume": "about 80 a week"
+            }
+          },
+          {
+            "slot_path": "handoffs.dependencies",
+            "status": "filled",
+            "confidence": 0.8,
+            "value": {
+              "handoffs": [
+                {
+                  "to_role": "Finance",
+                  "condition": "discount approvals are over 20 percent"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "expectedState": "pass"
+    },
+    {
+      "id": "extraction-common-003-customer-escalation",
+      "category": "common",
+      "description": "Director describes a support process with pain points and handoffs.",
+      "turns": [
+        "Customer escalation intake starts when a Zendesk ticket is marked urgent. Support Ops triages it, then Engineering gets pulled in through Jira if there is a product defect. The painful part is duplicate entry between Zendesk and Jira."
+      ],
+      "expected": {
+        "slots": {
+          "scope.boundaries": "filled",
+          "ownership.roles": "filled",
+          "systems.systems_of_record": "filled",
+          "handoffs.dependencies": "filled",
+          "friction.pain_points": "filled"
+        },
+        "slotValues": {
+          "scope.boundaries": {
+            "mustContain": [
+              "Customer Escalation Intake",
+              "Zendesk ticket",
+              "urgent"
+            ],
+            "mustNotContain": [
+              "Renewal Review",
+              "Employee Onboarding"
+            ]
+          },
+          "ownership.roles": {
+            "mustContain": [
+              "Support Ops",
+              "Engineering"
+            ],
+            "mustNotContain": [
+              "Revenue Operations",
+              "Finance"
+            ]
+          },
+          "systems.systems_of_record": {
+            "mustContain": [
+              "Zendesk",
+              "Jira"
+            ],
+            "mustNotContain": [
+              "Salesforce",
+              "NetSuite"
+            ]
+          },
+          "handoffs.dependencies": {
+            "mustContain": [
+              "Engineering",
+              "product defect",
+              "Jira"
+            ],
+            "mustNotContain": [
+              "Finance",
+              "Legal"
+            ]
+          },
+          "friction.pain_points": {
+            "mustContain": [
+              "duplicate entry",
+              "Zendesk",
+              "Jira"
+            ],
+            "mustNotContain": [
+              "manual spreadsheet cleanup",
+              "budget approval"
+            ]
+          }
+        },
+        "forbiddenSlotFills": [
+          "metrics.kpis",
+          "risk.spofs",
+          "controls.compliance"
+        ]
+      },
+      "perfectOutput": {
+        "slot_updates": [
+          {
+            "slot_path": "scope.boundaries",
+            "status": "filled",
+            "confidence": 0.9,
+            "value": {
+              "process_names": [
+                "Customer Escalation Intake"
+              ],
+              "trigger": "Zendesk ticket is marked urgent"
+            }
+          },
+          {
+            "slot_path": "ownership.roles",
+            "status": "filled",
+            "confidence": 0.86,
+            "value": {
+              "roles": [
+                "Support Ops",
+                "Engineering"
+              ]
+            }
+          },
+          {
+            "slot_path": "systems.systems_of_record",
+            "status": "filled",
+            "confidence": 0.88,
+            "value": {
+              "systems": [
+                "Zendesk",
+                "Jira"
+              ]
+            }
+          },
+          {
+            "slot_path": "handoffs.dependencies",
+            "status": "filled",
+            "confidence": 0.82,
+            "value": {
+              "handoffs": [
+                {
+                  "from_role": "Support Ops",
+                  "to_role": "Engineering",
+                  "condition": "product defect",
+                  "system": "Jira"
+                }
+              ]
+            }
+          },
+          {
+            "slot_path": "friction.pain_points",
+            "status": "filled",
+            "confidence": 0.88,
+            "value": {
+              "pain_points": [
+                "duplicate entry between Zendesk and Jira"
+              ]
+            }
+          }
+        ]
+      },
+      "expectedState": "pass"
+    },
+    {
+      "id": "extraction-edge-004-hedged-month-end-close",
+      "category": "edge",
+      "description": "Hedged frequency should be partial while definite systems and controls are filled.",
+      "turns": [
+        "Month-end close is run by Accounting, I think it's monthly but I'd need to confirm the exact cadence. NetSuite is definitely the system, the checklist is in Excel, and manual journal entries require controller approval."
+      ],
+      "expected": {
+        "slots": {
+          "scope.boundaries": "filled",
+          "ownership.roles": "partial",
+          "frequency.volume": "partial",
+          "systems.systems_of_record": "filled",
+          "documentation.maturity": "filled",
+          "controls.compliance": "filled"
+        },
+        "slotValues": {
+          "scope.boundaries": {
+            "mustContain": [
+              "Month-end Close"
+            ],
+            "mustNotContain": [
+              "Payroll",
+              "Regulatory Reporting",
+              "Unrelated Process",
+              "Generic Workflow"
+            ]
+          },
+          "ownership.roles": {
+            "mustContain": [
+              "Accounting"
+            ],
+            "mustNotContain": [
+              "Finance",
+              "Controller",
+              "Engineering",
+              "Legal"
+            ]
+          },
+          "frequency.volume": {
+            "mustContain": [
+              "monthly",
+              "need to confirm"
+            ],
+            "mustNotContain": [
+              "weekly",
+              "daily"
+            ]
+          },
+          "systems.systems_of_record": {
+            "mustContain": [
+              "NetSuite",
+              "Excel"
+            ],
+            "mustNotContain": [
+              "Workday",
+              "Salesforce",
+              "ServiceNow"
+            ]
+          },
+          "documentation.maturity": {
+            "mustContain": [
+              "checklist",
+              "Excel"
+            ],
+            "mustNotContain": [
+              "Notion",
+              "SOP",
+              "fully documented",
+              "Confluence"
+            ]
+          },
+          "controls.compliance": {
+            "mustContain": [
+              "manual journal entries",
+              "controller approval"
+            ],
+            "mustNotContain": [
+              "SOX",
+              "CFO approval",
+              "HIPAA"
+            ]
+          }
+        },
+        "forbiddenSlotFills": [
+          "risk.spofs",
+          "priority.executive_priority",
+          "variants.exceptions"
+        ],
+        "candidates": [
+          "Month-end Close"
+        ],
+        "systems": [
+          "NetSuite",
+          "Excel"
+        ],
+        "peopleOrRoles": [
+          "Accounting",
+          "Controller"
+        ]
+      },
+      "perfectOutput": {
+        "slot_updates": [
+          {
+            "slot_path": "scope.boundaries",
+            "status": "filled",
+            "confidence": 0.9,
+            "value": {
+              "process_names": [
+                "Month-end Close"
+              ]
+            }
+          },
+          {
+            "slot_path": "ownership.roles",
+            "status": "partial",
+            "confidence": 0.68,
+            "value": {
+              "owner_role_signal": "Accounting",
+              "uncertainty": "role title not specified"
+            }
+          },
+          {
+            "slot_path": "frequency.volume",
+            "status": "partial",
+            "confidence": 0.58,
+            "value": {
+              "frequency_signal": "monthly",
+              "uncertainty": "director said exact cadence needs confirmation"
+            }
+          },
+          {
+            "slot_path": "systems.systems_of_record",
+            "status": "filled",
+            "confidence": 0.9,
+            "value": {
+              "systems": [
+                "NetSuite",
+                "Excel"
+              ]
+            }
+          },
+          {
+            "slot_path": "documentation.maturity",
+            "status": "filled",
+            "confidence": 0.82,
+            "value": {
+              "documentation": [
+                "checklist is in Excel"
+              ]
+            }
+          },
+          {
+            "slot_path": "controls.compliance",
+            "status": "filled",
+            "confidence": 0.88,
+            "value": {
+              "controls": [
+                "manual journal entries require controller approval"
+              ]
+            }
+          }
+        ]
+      },
+      "expectedState": "pass"
+    },
+    {
+      "id": "extraction-common-005-procurement-approval",
+      "category": "common",
+      "description": "Procurement process includes boundaries, approvals, handoffs, and friction.",
+      "turns": [
+        "Purchase request approval starts with a department manager submitting a request in Coupa. Procurement reviews vendor risk, Legal reviews anything over $50k, and delays usually happen waiting for budget owner approval."
+      ],
+      "expected": {
+        "slots": {
+          "scope.boundaries": "filled",
+          "ownership.roles": "filled",
+          "systems.systems_of_record": "filled",
+          "handoffs.dependencies": "filled",
+          "controls.compliance": "filled",
+          "friction.pain_points": "filled"
+        },
+        "slotValues": {
+          "scope.boundaries": {
+            "mustContain": [
+              "Purchase Request Approval",
+              "department manager",
+              "request"
+            ],
+            "mustNotContain": [
+              "Invoice Exception Handling",
+              "Renewal Review"
+            ]
+          },
+          "ownership.roles": {
+            "mustContain": [
+              "Procurement",
+              "Legal",
+              "budget owner"
+            ],
+            "mustNotContain": [
+              "Support Ops",
+              "Engineering"
+            ]
+          },
+          "systems.systems_of_record": {
+            "mustContain": [
+              "Coupa"
+            ],
+            "mustNotContain": [
+              "Salesforce",
+              "NetSuite"
+            ]
+          },
+          "handoffs.dependencies": {
+            "mustContain": [
+              "Legal",
+              "$50k",
+              "budget owner approval"
+            ],
+            "mustNotContain": [
+              "Engineering",
+              "Support Ops"
+            ]
+          },
+          "controls.compliance": {
+            "mustContain": [
+              "vendor risk",
+              "$50k"
+            ],
+            "mustNotContain": [
+              "SOX",
+              "HIPAA"
+            ]
+          },
+          "friction.pain_points": {
+            "mustContain": [
+              "delays",
+              "budget owner approval"
+            ],
+            "mustNotContain": [
+              "duplicate entry",
+              "missing PO"
+            ]
+          }
+        },
+        "forbiddenSlotFills": [
+          "people.key_people",
+          "metrics.kpis",
+          "risk.spofs"
+        ]
+      },
+      "perfectOutput": {
+        "slot_updates": [
+          {
+            "slot_path": "scope.boundaries",
+            "status": "filled",
+            "confidence": 0.9,
+            "value": {
+              "process_names": [
+                "Purchase Request Approval"
+              ],
+              "trigger": "department manager submits a request in Coupa"
+            }
+          },
+          {
+            "slot_path": "ownership.roles",
+            "status": "filled",
+            "confidence": 0.86,
+            "value": {
+              "roles": [
+                "Department Manager",
+                "Procurement",
+                "Legal",
+                "Budget Owner"
+              ]
+            }
+          },
+          {
+            "slot_path": "systems.systems_of_record",
+            "status": "filled",
+            "confidence": 0.84,
+            "value": {
+              "systems": [
+                "Coupa"
+              ]
+            }
+          },
+          {
+            "slot_path": "handoffs.dependencies",
+            "status": "filled",
+            "confidence": 0.84,
+            "value": {
+              "handoffs": [
+                {
+                  "to_role": "Procurement",
+                  "work": "vendor risk review"
+                },
+                {
+                  "to_role": "Legal",
+                  "condition": "anything over $50k"
+                },
+                {
+                  "to_role": "Budget Owner",
+                  "work": "approval"
+                }
+              ]
+            }
+          },
+          {
+            "slot_path": "controls.compliance",
+            "status": "filled",
+            "confidence": 0.8,
+            "value": {
+              "controls": [
+                "Procurement reviews vendor risk",
+                "Legal reviews anything over $50k"
+              ]
+            }
+          },
+          {
+            "slot_path": "friction.pain_points",
+            "status": "filled",
+            "confidence": 0.84,
+            "value": {
+              "pain_points": [
+                "delays waiting for budget owner approval"
+              ]
+            }
+          }
+        ]
+      },
+      "expectedState": "pass"
+    },
+    {
+      "id": "extraction-common-006-demand-forecasting",
+      "category": "common",
+      "description": "Planning process with inputs, systems, volume, KPIs, and variants.",
+      "turns": [
+        "Demand forecasting is monthly. Planning pulls sales history from Snowflake, then category managers adjust the forecast in Excel for new launches. Forecast accuracy and stockout rate are the two KPIs we track."
+      ],
+      "expected": {
+        "slots": {
+          "scope.boundaries": "filled",
+          "frequency.volume": "filled",
+          "systems.systems_of_record": "filled",
+          "ownership.roles": "filled",
+          "metrics.kpis": "filled",
+          "variants.exceptions": "filled"
+        },
+        "slotValues": {
+          "scope.boundaries": {
+            "mustContain": [
+              "Demand Forecasting"
+            ],
+            "mustNotContain": [
+              "Promotion Management",
+              "Renewal Review"
+            ]
+          },
+          "frequency.volume": {
+            "mustContain": [
+              "monthly"
+            ],
+            "mustNotContain": [
+              "weekly",
+              "daily"
+            ]
+          },
+          "systems.systems_of_record": {
+            "mustContain": [
+              "Snowflake",
+              "Excel"
+            ],
+            "mustNotContain": [
+              "Salesforce",
+              "NetSuite"
+            ]
+          },
+          "ownership.roles": {
+            "mustContain": [
+              "Planning",
+              "category managers"
+            ],
+            "mustNotContain": [
+              "Finance",
+              "Support Ops"
+            ]
+          },
+          "metrics.kpis": {
+            "mustContain": [
+              "Forecast accuracy",
+              "stockout rate"
+            ],
+            "mustNotContain": [
+              "renewal cycle time",
+              "time to containment"
+            ]
+          },
+          "variants.exceptions": {
+            "mustContain": [
+              "new launches"
+            ],
+            "mustNotContain": [
+              "urgent cases",
+              "manual approval"
+            ]
+          }
+        },
+        "forbiddenSlotFills": [
+          "people.key_people",
+          "risk.spofs",
+          "controls.compliance"
+        ]
+      },
+      "perfectOutput": {
+        "slot_updates": [
+          {
+            "slot_path": "scope.boundaries",
+            "status": "filled",
+            "confidence": 0.9,
+            "value": {
+              "process_names": [
+                "Demand Forecasting"
+              ]
+            }
+          },
+          {
+            "slot_path": "frequency.volume",
+            "status": "filled",
+            "confidence": 0.88,
+            "value": {
+              "frequency": "monthly"
+            }
+          },
+          {
+            "slot_path": "systems.systems_of_record",
+            "status": "filled",
+            "confidence": 0.88,
+            "value": {
+              "systems": [
+                "Snowflake",
+                "Excel"
+              ]
+            }
+          },
+          {
+            "slot_path": "ownership.roles",
+            "status": "filled",
+            "confidence": 0.84,
+            "value": {
+              "roles": [
+                "Planning",
+                "Category Managers"
+              ]
+            }
+          },
+          {
+            "slot_path": "metrics.kpis",
+            "status": "filled",
+            "confidence": 0.9,
+            "value": {
+              "kpis": [
+                "forecast accuracy",
+                "stockout rate"
+              ]
+            }
+          },
+          {
+            "slot_path": "variants.exceptions",
+            "status": "filled",
+            "confidence": 0.78,
+            "value": {
+              "variants": [
+                "category managers adjust the forecast in Excel for new launches"
+              ]
+            }
+          }
+        ]
+      },
+      "expectedState": "pass"
+    },
+    {
+      "id": "extraction-common-007-employee-onboarding",
+      "category": "common",
+      "description": "HR process with owner, systems, handoffs, controls, and documentation.",
+      "turns": [
+        "Employee onboarding is owned by People Ops. The workflow begins when a signed offer hits Workday, then IT provisions Okta and a laptop, and hiring managers complete a checklist in Notion. We run it for about 25 new hires a month."
+      ],
+      "expected": {
+        "slots": {
+          "scope.boundaries": "filled",
+          "ownership.roles": "filled",
+          "frequency.volume": "filled",
+          "systems.systems_of_record": "filled",
+          "handoffs.dependencies": "filled",
+          "documentation.maturity": "filled"
+        },
+        "slotValues": {
+          "scope.boundaries": {
+            "mustContain": [
+              "Employee Onboarding",
+              "signed offer",
+              "Workday"
+            ],
+            "mustNotContain": [
+              "Payroll Exception Review",
+              "Purchase Request Approval"
+            ]
+          },
+          "ownership.roles": {
+            "mustContain": [
+              "People Ops",
+              "IT",
+              "hiring managers"
+            ],
+            "mustNotContain": [
+              "Finance",
+              "Procurement"
+            ]
+          },
+          "frequency.volume": {
+            "mustContain": [
+              "25 new hires",
+              "month"
+            ],
+            "mustNotContain": [
+              "weekly",
+              "daily"
+            ]
+          },
+          "systems.systems_of_record": {
+            "mustContain": [
+              "Workday",
+              "Okta",
+              "Notion"
+            ],
+            "mustNotContain": [
+              "Salesforce",
+              "NetSuite"
+            ]
+          },
+          "handoffs.dependencies": {
+            "mustContain": [
+              "IT",
+              "laptop",
+              "hiring managers"
+            ],
+            "mustNotContain": [
+              "Legal",
+              "Finance"
+            ]
+          },
+          "documentation.maturity": {
+            "mustContain": [
+              "checklist",
+              "Notion"
+            ],
+            "mustNotContain": [
+              "Excel pricing sheet",
+              "SOP"
+            ]
+          }
+        },
+        "forbiddenSlotFills": [
+          "friction.pain_points",
+          "risk.spofs",
+          "controls.compliance"
+        ]
+      },
+      "perfectOutput": {
+        "slot_updates": [
+          {
+            "slot_path": "scope.boundaries",
+            "status": "filled",
+            "confidence": 0.9,
+            "value": {
+              "process_names": [
+                "Employee Onboarding"
+              ],
+              "trigger": "signed offer hits Workday"
+            }
+          },
+          {
+            "slot_path": "ownership.roles",
+            "status": "filled",
+            "confidence": 0.88,
+            "value": {
+              "owner_role": "People Ops",
+              "roles": [
+                "People Ops",
+                "IT",
+                "Hiring Managers"
+              ]
+            }
+          },
+          {
+            "slot_path": "frequency.volume",
+            "status": "filled",
+            "confidence": 0.9,
+            "value": {
+              "volume": "about 25 new hires a month"
+            }
+          },
+          {
+            "slot_path": "systems.systems_of_record",
+            "status": "filled",
+            "confidence": 0.88,
+            "value": {
+              "systems": [
+                "Workday",
+                "Okta",
+                "Notion"
+              ]
+            }
+          },
+          {
+            "slot_path": "handoffs.dependencies",
+            "status": "filled",
+            "confidence": 0.84,
+            "value": {
+              "handoffs": [
+                {
+                  "to_role": "IT",
+                  "work": "provisions Okta and laptop"
+                },
+                {
+                  "to_role": "Hiring Managers",
+                  "work": "complete checklist in Notion"
+                }
+              ]
+            }
+          },
+          {
+            "slot_path": "documentation.maturity",
+            "status": "filled",
+            "confidence": 0.82,
+            "value": {
+              "documentation": [
+                "hiring manager checklist in Notion"
+              ]
+            }
+          }
+        ]
+      },
+      "expectedState": "pass"
+    },
+    {
+      "id": "extraction-common-008-invoice-exception",
+      "category": "common",
+      "description": "AP exception process with systems, owner, pain point, and SPOF risk.",
+      "turns": [
+        "Invoice exception handling sits with AP Operations. About 40 invoices a day get kicked out of NetSuite because the PO or receipt is missing, and Maria is the only person who knows which warehouse managers to chase."
+      ],
+      "expected": {
+        "slots": {
+          "scope.boundaries": "filled",
+          "ownership.roles": "filled",
+          "frequency.volume": "filled",
+          "systems.systems_of_record": "filled",
+          "people.key_people": "filled",
+          "friction.pain_points": "filled",
+          "risk.spofs": "filled",
+          "handoffs.dependencies": "filled"
+        },
+        "slotValues": {
+          "scope.boundaries": {
+            "mustContain": [
+              "Invoice Exception Handling"
+            ],
+            "mustNotContain": [
+              "Month-end Close",
+              "Credit Release"
+            ]
+          },
+          "ownership.roles": {
+            "mustContain": [
+              "AP Operations"
+            ],
+            "mustNotContain": [
+              "Sales",
+              "Finance"
+            ]
+          },
+          "people.key_people": {
+            "mustContain": [
+              "Maria"
+            ],
+            "mustNotContain": [
+              "Jordan",
+              "Priya"
+            ]
+          },
+          "frequency.volume": {
+            "mustContain": [
+              "40 invoices",
+              "day"
+            ],
+            "mustNotContain": [
+              "weekly",
+              "monthly"
+            ]
+          },
+          "systems.systems_of_record": {
+            "mustContain": [
+              "NetSuite"
+            ],
+            "mustNotContain": [
+              "Salesforce",
+              "Workday"
+            ]
+          },
+          "friction.pain_points": {
+            "mustContain": [
+              "PO",
+              "receipt",
+              "missing"
+            ],
+            "mustNotContain": [
+              "discount approval",
+              "customer data"
+            ]
+          },
+          "risk.spofs": {
+            "mustContain": [
+              "Maria",
+              "only person",
+              "warehouse managers"
+            ],
+            "mustNotContain": [
+              "backup owner",
+              "fully documented"
+            ]
+          },
+          "handoffs.dependencies": {
+            "mustContain": [
+              "warehouse managers"
+            ],
+            "mustNotContain": [
+              "Legal",
+              "Engineering"
+            ]
+          }
+        },
+        "forbiddenSlotFills": [
+          "metrics.kpis",
+          "controls.compliance",
+          "documentation.maturity"
+        ]
+      },
+      "perfectOutput": {
+        "slot_updates": [
+          {
+            "slot_path": "scope.boundaries",
+            "status": "filled",
+            "confidence": 0.9,
+            "value": {
+              "process_names": [
+                "Invoice Exception Handling"
+              ]
+            }
+          },
+          {
+            "slot_path": "ownership.roles",
+            "status": "filled",
+            "confidence": 0.86,
+            "value": {
+              "owner_role": "AP Operations",
+              "roles": [
+                "AP Operations",
+                "Warehouse Managers"
+              ]
+            }
+          },
+          {
+            "slot_path": "people.key_people",
+            "status": "filled",
+            "confidence": 0.84,
+            "value": {
+              "people": [
+                {
+                  "name": "Maria",
+                  "relationship": "single point of failure for warehouse manager chase paths"
+                }
+              ]
+            }
+          },
+          {
+            "slot_path": "frequency.volume",
+            "status": "filled",
+            "confidence": 0.9,
+            "value": {
+              "volume": "about 40 invoices a day"
+            }
+          },
+          {
+            "slot_path": "systems.systems_of_record",
+            "status": "filled",
+            "confidence": 0.86,
+            "value": {
+              "systems": [
+                "NetSuite"
+              ]
+            }
+          },
+          {
+            "slot_path": "friction.pain_points",
+            "status": "filled",
+            "confidence": 0.88,
+            "value": {
+              "pain_points": [
+                "invoices kicked out because PO or receipt is missing"
+              ]
+            }
+          },
+          {
+            "slot_path": "risk.spofs",
+            "status": "filled",
+            "confidence": 0.9,
+            "value": {
+              "spofs": [
+                "Maria is the only person who knows which warehouse managers to chase"
+              ]
+            }
+          },
+          {
+            "slot_path": "handoffs.dependencies",
+            "status": "filled",
+            "confidence": 0.78,
+            "value": {
+              "dependencies": [
+                "warehouse managers"
+              ]
+            }
+          }
+        ]
+      },
+      "expectedState": "pass"
+    },
+    {
+      "id": "extraction-edge-009-system-only-overtrigger",
+      "category": "edge",
+      "description": "System context only; should not invent a process.",
+      "turns": [
+        "We mostly use Salesforce as our CRM, and Slack is where people talk about account issues."
+      ],
+      "expected": {
+        "slots": {
+          "systems.systems_of_record": "filled",
+          "scope.boundaries": "empty",
+          "frequency.volume": "empty",
+          "friction.pain_points": "empty"
+        },
+        "slotValues": {
+          "systems.systems_of_record": {
+            "mustContain": [
+              "Salesforce",
+              "Slack"
+            ],
+            "mustNotContain": [
+              "process",
+              "workflow",
+              "NetSuite"
+            ]
+          }
+        },
+        "forbiddenSlotFills": [
+          "scope.boundaries",
+          "frequency.volume",
+          "friction.pain_points"
+        ],
+        "forbiddenCandidates": [
+          "Salesforce",
+          "Slack",
+          "Account Issues"
+        ]
+      },
+      "perfectOutput": {
+        "slot_updates": [
+          {
+            "slot_path": "systems.systems_of_record",
+            "status": "filled",
+            "confidence": 0.76,
+            "value": {
+              "systems": [
+                "Salesforce",
+                "Slack"
+              ]
+            }
+          }
+        ]
+      },
+      "expectedState": "pass"
+    },
+    {
+      "id": "extraction-edge-010-no-process-unknown",
+      "category": "edge",
+      "description": "Director explicitly lacks process detail; should mark unknown rather than invent.",
+      "turns": [
+        "I don't actually know who owns that process or how often it happens. I would need to check with the operations team."
+      ],
+      "expected": {
+        "slots": {
+          "ownership.roles": "asked_unknown",
+          "frequency.volume": "asked_unknown",
+          "scope.boundaries": "empty"
+        },
+        "forbiddenSlotFills": [
+          "scope.boundaries",
+          "systems.systems_of_record",
+          "friction.pain_points",
+          "risk.spofs"
+        ],
+        "forbiddenCandidates": [
+          "Operations Team"
+        ],
+        "slotValues": {
+          "ownership.roles": {
+            "mustContain": [
+              "unknown",
+              "does not know who owns"
+            ],
+            "mustNotContain": [
+              "Operations Team",
+              "Revenue Operations"
+            ]
+          },
+          "frequency.volume": {
+            "mustContain": [
+              "unknown",
+              "does not know how often"
+            ],
+            "mustNotContain": [
+              "weekly",
+              "monthly"
+            ]
+          }
+        }
+      },
+      "perfectOutput": {
+        "slot_updates": [
+          {
+            "slot_path": "ownership.roles",
+            "status": "asked_unknown",
+            "confidence": 0.9,
+            "value": {
+              "unknown_reason": "director does not know who owns it"
+            }
+          },
+          {
+            "slot_path": "frequency.volume",
+            "status": "asked_unknown",
+            "confidence": 0.9,
+            "value": {
+              "unknown_reason": "director does not know how often it happens"
+            }
+          }
+        ]
+      },
+      "expectedState": "pass"
+    },
+    {
+      "id": "extraction-edge-011-multi-process-breadth",
+      "category": "edge",
+      "description": "Director names three processes in one utterance; all should be captured as breadth inventory.",
+      "turns": [
+        "My team owns renewals, customer escalations, and demand forecasting. Renewals are weekly, escalations happen daily, and forecasting is monthly."
+      ],
+      "expected": {
+        "slots": {
+          "scope.boundaries": "filled",
+          "ownership.roles": "filled",
+          "frequency.volume": "filled"
+        },
+        "slotValues": {
+          "scope.boundaries": {
+            "mustContain": [
+              "renewals",
+              "customer escalations",
+              "demand forecasting"
+            ],
+            "mustNotContain": [
+              "Promotion Management",
+              "Month-end Close"
+            ]
+          },
+          "ownership.roles": {
+            "mustContain": [
+              "my team"
+            ],
+            "mustNotContain": [
+              "Finance",
+              "Engineering"
+            ]
+          },
+          "frequency.volume": {
+            "mustContain": [
+              "weekly",
+              "daily",
+              "monthly"
+            ],
+            "mustNotContain": [
+              "quarterly",
+              "annually"
+            ]
+          }
+        },
+        "candidates": [
+          "Renewals",
+          "Customer Escalations",
+          "Demand Forecasting"
+        ],
+        "maxCandidateCount": 3,
+        "forbiddenSlotFills": [
+          "systems.systems_of_record",
+          "risk.spofs",
+          "controls.compliance"
+        ]
+      },
+      "perfectOutput": {
+        "slot_updates": [
+          {
+            "slot_path": "scope.boundaries",
+            "status": "filled",
+            "confidence": 0.88,
+            "value": {
+              "process_names": [
+                "Renewals",
+                "Customer Escalations",
+                "Demand Forecasting"
+              ]
+            }
+          },
+          {
+            "slot_path": "ownership.roles",
+            "status": "filled",
+            "confidence": 0.72,
+            "value": {
+              "owner_role": "director's team"
+            }
+          },
+          {
+            "slot_path": "frequency.volume",
+            "status": "filled",
+            "confidence": 0.86,
+            "value": {
+              "frequencies": {
+                "Renewals": "weekly",
+                "Customer Escalations": "daily",
+                "Demand Forecasting": "monthly"
+              }
+            }
+          }
+        ]
+      },
+      "expectedState": "expected_fail",
+      "trackingIssue": "PLAN.md gap 7.1: runDirectorTurn only handles the first recordProcess tool call"
+    },
+    {
+      "id": "extraction-edge-012-aliases-sfdc-gsheets",
+      "category": "edge",
+      "description": "Common aliases should be accepted in value labels.",
+      "turns": [
+        "Renewals start in SFDC, then the team updates a G Sheet that Finance uses for the weekly forecast."
+      ],
+      "expected": {
+        "slots": {
+          "scope.boundaries": "filled",
+          "systems.systems_of_record": "filled",
+          "ownership.roles": "partial",
+          "handoffs.dependencies": "filled",
+          "frequency.volume": "filled"
+        },
+        "slotValues": {
+          "scope.boundaries": {
+            "mustContain": [
+              "Renewals"
+            ],
+            "mustNotContain": [
+              "Demand Forecasting",
+              "Payroll"
+            ]
+          },
+          "systems.systems_of_record": {
+            "mustContain": [
+              "Salesforce",
+              "Google Sheets"
+            ],
+            "aliases": {
+              "Salesforce": [
+                "SFDC"
+              ],
+              "Google Sheets": [
+                "G Sheet",
+                "GSheet",
+                "Google Sheet"
+              ]
+            },
+            "mustNotContain": [
+              "NetSuite",
+              "Workday"
+            ]
+          },
+          "ownership.roles": {
+            "mustContain": [
+              "Finance"
+            ],
+            "mustNotContain": [
+              "Engineering",
+              "Legal"
+            ]
+          },
+          "handoffs.dependencies": {
+            "mustContain": [
+              "Finance",
+              "weekly forecast"
+            ],
+            "mustNotContain": [
+              "Engineering",
+              "Legal"
+            ]
+          },
+          "frequency.volume": {
+            "mustContain": [
+              "weekly"
+            ],
+            "mustNotContain": [
+              "monthly",
+              "daily"
+            ]
+          }
+        },
+        "aliases": {
+          "Salesforce": [
+            "SFDC"
+          ],
+          "Google Sheets": [
+            "G Sheet",
+            "GSheet",
+            "Google Sheet"
+          ]
+        },
+        "forbiddenSlotFills": [
+          "risk.spofs",
+          "controls.compliance",
+          "documentation.maturity"
+        ]
+      },
+      "perfectOutput": {
+        "slot_updates": [
+          {
+            "slot_path": "scope.boundaries",
+            "status": "filled",
+            "confidence": 0.84,
+            "value": {
+              "process_names": [
+                "Renewals"
+              ]
+            }
+          },
+          {
+            "slot_path": "systems.systems_of_record",
+            "status": "filled",
+            "confidence": 0.86,
+            "value": {
+              "systems": [
+                "Salesforce",
+                "Google Sheets"
+              ],
+              "raw_mentions": [
+                "SFDC",
+                "G Sheet"
+              ]
+            }
+          },
+          {
+            "slot_path": "ownership.roles",
+            "status": "partial",
+            "confidence": 0.66,
+            "value": {
+              "roles": [
+                "Finance"
+              ]
+            }
+          },
+          {
+            "slot_path": "handoffs.dependencies",
+            "status": "filled",
+            "confidence": 0.76,
+            "value": {
+              "dependencies": [
+                "Finance uses the Google Sheet for the weekly forecast"
+              ]
+            }
+          },
+          {
+            "slot_path": "frequency.volume",
+            "status": "filled",
+            "confidence": 0.76,
+            "value": {
+              "frequency": "weekly forecast"
+            }
+          }
+        ]
+      },
+      "expectedState": "pass"
+    },
+    {
+      "id": "extraction-edge-013-negative-control-not-a-process",
+      "category": "edge",
+      "description": "Meeting cadence without a business process should not become a candidate process.",
+      "turns": [
+        "We have a weekly leadership meeting where people talk through metrics, but it is not really a workflow and there is no system involved."
+      ],
+      "expected": {
+        "slots": {
+          "scope.boundaries": "empty",
+          "frequency.volume": "partial",
+          "metrics.kpis": "partial",
+          "systems.systems_of_record": "asked_unknown"
+        },
+        "slotValues": {
+          "frequency.volume": {
+            "mustContain": [
+              "weekly"
+            ],
+            "mustNotContain": [
+              "daily",
+              "monthly"
+            ]
+          },
+          "metrics.kpis": {
+            "mustContain": [
+              "metrics"
+            ],
+            "mustNotContain": [
+              "renewal cycle time",
+              "stockout rate"
+            ]
+          },
+          "systems.systems_of_record": {
+            "mustContain": [
+              "no system involved"
+            ],
+            "mustNotContain": [
+              "Salesforce",
+              "NetSuite"
+            ]
+          }
+        },
+        "forbiddenSlotFills": [
+          "friction.pain_points",
+          "risk.spofs",
+          "handoffs.dependencies"
+        ],
+        "forbiddenCandidates": [
+          "Weekly Leadership Meeting",
+          "Leadership Meeting",
+          "Metrics Review"
+        ]
+      },
+      "perfectOutput": {
+        "slot_updates": [
+          {
+            "slot_path": "frequency.volume",
+            "status": "partial",
+            "confidence": 0.62,
+            "value": {
+              "frequency_signal": "weekly leadership meeting"
+            }
+          },
+          {
+            "slot_path": "metrics.kpis",
+            "status": "partial",
+            "confidence": 0.58,
+            "value": {
+              "metric_signal": "people talk through metrics"
+            }
+          },
+          {
+            "slot_path": "systems.systems_of_record",
+            "status": "asked_unknown",
+            "confidence": 0.86,
+            "value": {
+              "unknown_reason": "director said there is no system involved"
+            }
+          }
+        ]
+      },
+      "expectedState": "pass"
+    },
+    {
+      "id": "extraction-edge-014-contradiction-frequency",
+      "category": "edge",
+      "description": "Single utterance contains corrected frequency; ideal output preserves correction without conflicting status.",
+      "turns": [
+        "The inventory reconciliation used to run monthly, sorry, it is weekly now. Warehouse Ops owns it and they do the review in NetSuite."
+      ],
+      "expected": {
+        "slots": {
+          "scope.boundaries": "filled",
+          "frequency.volume": "filled",
+          "ownership.roles": "filled",
+          "systems.systems_of_record": "filled"
+        },
+        "slotValues": {
+          "scope.boundaries": {
+            "mustContain": [
+              "Inventory Reconciliation"
+            ],
+            "mustNotContain": [
+              "Promotion Management",
+              "Renewal Review"
+            ]
+          },
+          "frequency.volume": {
+            "mustContain": [
+              "weekly"
+            ],
+            "mustNotContain": [
+              "monthly now",
+              "daily"
+            ]
+          },
+          "ownership.roles": {
+            "mustContain": [
+              "Warehouse Ops"
+            ],
+            "mustNotContain": [
+              "Finance",
+              "Support Ops"
+            ]
+          },
+          "systems.systems_of_record": {
+            "mustContain": [
+              "NetSuite"
+            ],
+            "mustNotContain": [
+              "Salesforce",
+              "Workday"
+            ]
+          }
+        },
+        "forbiddenSlotFills": [
+          "friction.pain_points",
+          "risk.spofs",
+          "controls.compliance"
+        ]
+      },
+      "perfectOutput": {
+        "slot_updates": [
+          {
+            "slot_path": "scope.boundaries",
+            "status": "filled",
+            "confidence": 0.9,
+            "value": {
+              "process_names": [
+                "Inventory Reconciliation"
+              ]
+            }
+          },
+          {
+            "slot_path": "frequency.volume",
+            "status": "filled",
+            "confidence": 0.86,
+            "value": {
+              "frequency": "weekly",
+              "superseded_in_utterance": "monthly"
+            }
+          },
+          {
+            "slot_path": "ownership.roles",
+            "status": "filled",
+            "confidence": 0.88,
+            "value": {
+              "owner_role": "Warehouse Ops"
+            }
+          },
+          {
+            "slot_path": "systems.systems_of_record",
+            "status": "filled",
+            "confidence": 0.86,
+            "value": {
+              "systems": [
+                "NetSuite"
+              ]
+            }
+          }
+        ]
+      },
+      "expectedState": "pass"
+    },
+    {
+      "id": "extraction-highstakes-015-payroll-compliance",
+      "category": "high_stakes",
+      "description": "Payroll process with compliance exposure and strict control.",
+      "turns": [
+        "Payroll exception review is high-risk for us. HR Ops owns it, it runs biweekly in Workday, and any off-cycle payment over $5,000 needs CFO approval because of SOX controls."
+      ],
+      "expected": {
+        "slots": {
+          "scope.boundaries": "filled",
+          "ownership.roles": "filled",
+          "frequency.volume": "filled",
+          "systems.systems_of_record": "filled",
+          "controls.compliance": "filled",
+          "priority.executive_priority": "filled"
+        },
+        "slotValues": {
+          "scope.boundaries": {
+            "mustContain": [
+              "Payroll Exception Review"
+            ],
+            "mustNotContain": [
+              "Prior Authorization",
+              "Safety Incident Reporting"
+            ]
+          },
+          "ownership.roles": {
+            "mustContain": [
+              "HR Ops",
+              "CFO"
+            ],
+            "mustNotContain": [
+              "Patient Access",
+              "Legal"
+            ]
+          },
+          "frequency.volume": {
+            "mustContain": [
+              "biweekly"
+            ],
+            "mustNotContain": [
+              "monthly",
+              "daily"
+            ]
+          },
+          "systems.systems_of_record": {
+            "mustContain": [
+              "Workday"
+            ],
+            "mustNotContain": [
+              "Epic",
+              "NetSuite"
+            ]
+          },
+          "controls.compliance": {
+            "mustContain": [
+              "off-cycle payment",
+              "$5,000",
+              "CFO approval",
+              "SOX"
+            ],
+            "mustNotContain": [
+              "HIPAA",
+              "controller approval"
+            ]
+          },
+          "priority.executive_priority": {
+            "mustContain": [
+              "high-risk"
+            ],
+            "mustNotContain": [
+              "low-risk",
+              "not important"
+            ]
+          }
+        },
+        "forbiddenSlotFills": [
+          "friction.pain_points",
+          "risk.spofs",
+          "documentation.maturity"
+        ]
+      },
+      "perfectOutput": {
+        "slot_updates": [
+          {
+            "slot_path": "scope.boundaries",
+            "status": "filled",
+            "confidence": 0.92,
+            "value": {
+              "process_names": [
+                "Payroll Exception Review"
+              ]
+            }
+          },
+          {
+            "slot_path": "ownership.roles",
+            "status": "filled",
+            "confidence": 0.88,
+            "value": {
+              "owner_role": "HR Ops",
+              "roles": [
+                "HR Ops",
+                "CFO"
+              ]
+            }
+          },
+          {
+            "slot_path": "frequency.volume",
+            "status": "filled",
+            "confidence": 0.88,
+            "value": {
+              "frequency": "biweekly"
+            }
+          },
+          {
+            "slot_path": "systems.systems_of_record",
+            "status": "filled",
+            "confidence": 0.88,
+            "value": {
+              "systems": [
+                "Workday"
+              ]
+            }
+          },
+          {
+            "slot_path": "controls.compliance",
+            "status": "filled",
+            "confidence": 0.94,
+            "value": {
+              "controls": [
+                "off-cycle payment over $5,000 needs CFO approval"
+              ],
+              "compliance_exposure": [
+                "SOX controls"
+              ]
+            }
+          },
+          {
+            "slot_path": "priority.executive_priority",
+            "status": "filled",
+            "confidence": 0.82,
+            "value": {
+              "priority_signal": "high-risk"
+            }
+          }
+        ]
+      },
+      "expectedState": "pass"
+    },
+    {
+      "id": "extraction-highstakes-016-patient-prior-auth",
+      "category": "high_stakes",
+      "description": "Healthcare operations process with PHI/compliance risk, SLAs, and exception handling.",
+      "turns": [
+        "Prior authorization for oncology meds is handled by Patient Access. It runs daily in Epic and CoverMyMeds. Missing clinical notes can delay treatment, and HIPAA requires that only authorized staff access the patient record."
+      ],
+      "expected": {
+        "slots": {
+          "scope.boundaries": "filled",
+          "ownership.roles": "filled",
+          "frequency.volume": "filled",
+          "systems.systems_of_record": "filled",
+          "friction.pain_points": "filled",
+          "controls.compliance": "filled",
+          "priority.executive_priority": "filled"
+        },
+        "slotValues": {
+          "scope.boundaries": {
+            "mustContain": [
+              "Prior Authorization",
+              "oncology meds"
+            ],
+            "mustNotContain": [
+              "Payroll Exception Review",
+              "Security Incident Triage"
+            ]
+          },
+          "ownership.roles": {
+            "mustContain": [
+              "Patient Access"
+            ],
+            "mustNotContain": [
+              "HR Ops",
+              "SOC"
+            ]
+          },
+          "frequency.volume": {
+            "mustContain": [
+              "daily"
+            ],
+            "mustNotContain": [
+              "weekly",
+              "monthly"
+            ]
+          },
+          "systems.systems_of_record": {
+            "mustContain": [
+              "Epic",
+              "CoverMyMeds"
+            ],
+            "mustNotContain": [
+              "Workday",
+              "PagerDuty"
+            ]
+          },
+          "friction.pain_points": {
+            "mustContain": [
+              "Missing clinical notes",
+              "delay treatment"
+            ],
+            "mustNotContain": [
+              "budget owner approval",
+              "duplicate entry"
+            ]
+          },
+          "controls.compliance": {
+            "mustContain": [
+              "HIPAA",
+              "authorized staff",
+              "patient record"
+            ],
+            "mustNotContain": [
+              "SOX",
+              "VP Finance approval"
+            ]
+          },
+          "priority.executive_priority": {
+            "mustContain": [
+              "delay treatment"
+            ],
+            "mustNotContain": [
+              "low priority",
+              "$100k"
+            ]
+          }
+        },
+        "forbiddenSlotFills": [
+          "risk.spofs",
+          "documentation.maturity",
+          "variants.exceptions"
+        ]
+      },
+      "perfectOutput": {
+        "slot_updates": [
+          {
+            "slot_path": "scope.boundaries",
+            "status": "filled",
+            "confidence": 0.92,
+            "value": {
+              "process_names": [
+                "Prior Authorization for Oncology Medications"
+              ]
+            }
+          },
+          {
+            "slot_path": "ownership.roles",
+            "status": "filled",
+            "confidence": 0.9,
+            "value": {
+              "owner_role": "Patient Access"
+            }
+          },
+          {
+            "slot_path": "frequency.volume",
+            "status": "filled",
+            "confidence": 0.88,
+            "value": {
+              "frequency": "daily"
+            }
+          },
+          {
+            "slot_path": "systems.systems_of_record",
+            "status": "filled",
+            "confidence": 0.9,
+            "value": {
+              "systems": [
+                "Epic",
+                "CoverMyMeds"
+              ]
+            }
+          },
+          {
+            "slot_path": "friction.pain_points",
+            "status": "filled",
+            "confidence": 0.88,
+            "value": {
+              "pain_points": [
+                "missing clinical notes can delay treatment"
+              ]
+            }
+          },
+          {
+            "slot_path": "controls.compliance",
+            "status": "filled",
+            "confidence": 0.94,
+            "value": {
+              "compliance_exposure": [
+                "HIPAA",
+                "patient record access"
+              ],
+              "controls": [
+                "only authorized staff access the patient record"
+              ]
+            }
+          },
+          {
+            "slot_path": "priority.executive_priority",
+            "status": "filled",
+            "confidence": 0.84,
+            "value": {
+              "priority_signal": "missing notes can delay treatment"
+            }
+          }
+        ]
+      },
+      "expectedState": "pass"
+    },
+    {
+      "id": "extraction-highstakes-017-security-incident",
+      "category": "high_stakes",
+      "description": "Security incident process with severity, systems, handoffs, and SLA.",
+      "turns": [
+        "Security incident triage starts in PagerDuty when a Sev1 alert fires. The SOC owns the first 15 minutes, then Legal and Communications join if customer data may be exposed. We track time to containment."
+      ],
+      "expected": {
+        "slots": {
+          "scope.boundaries": "filled",
+          "ownership.roles": "filled",
+          "systems.systems_of_record": "filled",
+          "handoffs.dependencies": "filled",
+          "metrics.kpis": "filled",
+          "controls.compliance": "filled",
+          "priority.executive_priority": "filled"
+        },
+        "slotValues": {
+          "scope.boundaries": {
+            "mustContain": [
+              "Security Incident Triage",
+              "Sev1 alert"
+            ],
+            "mustNotContain": [
+              "Credit Release",
+              "Payroll Exception Review"
+            ]
+          },
+          "ownership.roles": {
+            "mustContain": [
+              "SOC",
+              "Legal",
+              "Communications"
+            ],
+            "mustNotContain": [
+              "AR",
+              "HR Ops"
+            ]
+          },
+          "systems.systems_of_record": {
+            "mustContain": [
+              "PagerDuty"
+            ],
+            "mustNotContain": [
+              "NetSuite",
+              "Workday"
+            ]
+          },
+          "handoffs.dependencies": {
+            "mustContain": [
+              "Legal",
+              "Communications",
+              "customer data"
+            ],
+            "mustNotContain": [
+              "Finance",
+              "Budget Owner"
+            ]
+          },
+          "metrics.kpis": {
+            "mustContain": [
+              "time to containment"
+            ],
+            "mustNotContain": [
+              "forecast accuracy",
+              "renewal cycle time"
+            ]
+          },
+          "controls.compliance": {
+            "mustContain": [
+              "customer data",
+              "exposed"
+            ],
+            "mustNotContain": [
+              "HIPAA",
+              "SOX"
+            ]
+          },
+          "priority.executive_priority": {
+            "mustContain": [
+              "Sev1"
+            ],
+            "mustNotContain": [
+              "low priority",
+              "routine"
+            ]
+          }
+        },
+        "forbiddenSlotFills": [
+          "friction.pain_points",
+          "risk.spofs",
+          "documentation.maturity"
+        ]
+      },
+      "perfectOutput": {
+        "slot_updates": [
+          {
+            "slot_path": "scope.boundaries",
+            "status": "filled",
+            "confidence": 0.92,
+            "value": {
+              "process_names": [
+                "Security Incident Triage"
+              ],
+              "trigger": "Sev1 alert fires in PagerDuty"
+            }
+          },
+          {
+            "slot_path": "ownership.roles",
+            "status": "filled",
+            "confidence": 0.88,
+            "value": {
+              "owner_role": "SOC",
+              "roles": [
+                "SOC",
+                "Legal",
+                "Communications"
+              ]
+            }
+          },
+          {
+            "slot_path": "systems.systems_of_record",
+            "status": "filled",
+            "confidence": 0.86,
+            "value": {
+              "systems": [
+                "PagerDuty"
+              ]
+            }
+          },
+          {
+            "slot_path": "handoffs.dependencies",
+            "status": "filled",
+            "confidence": 0.86,
+            "value": {
+              "handoffs": [
+                {
+                  "from_role": "SOC",
+                  "to_roles": [
+                    "Legal",
+                    "Communications"
+                  ],
+                  "condition": "customer data may be exposed"
+                }
+              ],
+              "sla": "SOC owns the first 15 minutes"
+            }
+          },
+          {
+            "slot_path": "metrics.kpis",
+            "status": "filled",
+            "confidence": 0.88,
+            "value": {
+              "kpis": [
+                "time to containment"
+              ]
+            }
+          },
+          {
+            "slot_path": "controls.compliance",
+            "status": "filled",
+            "confidence": 0.82,
+            "value": {
+              "compliance_exposure": [
+                "customer data may be exposed"
+              ]
+            }
+          },
+          {
+            "slot_path": "priority.executive_priority",
+            "status": "filled",
+            "confidence": 0.84,
+            "value": {
+              "priority_signal": "Sev1 alert"
+            }
+          }
+        ]
+      },
+      "expectedState": "pass"
+    },
+    {
+      "id": "extraction-highstakes-018-regulatory-reporting",
+      "category": "high_stakes",
+      "description": "Regulatory reporting with compliance controls, deadline, systems, and SPOF.",
+      "turns": [
+        "Quarterly regulatory reporting is owned by Compliance Operations. Data comes from Snowflake, gets reconciled in Excel, and must be filed by the 10th business day. Priya is the only reviewer who knows the regulator's exception format."
+      ],
+      "expected": {
+        "slots": {
+          "scope.boundaries": "filled",
+          "ownership.roles": "filled",
+          "frequency.volume": "filled",
+          "systems.systems_of_record": "filled",
+          "controls.compliance": "filled",
+          "risk.spofs": "filled",
+          "documentation.maturity": "partial"
+        },
+        "slotValues": {
+          "scope.boundaries": {
+            "mustContain": [
+              "Quarterly Regulatory Reporting"
+            ],
+            "mustNotContain": [
+              "Demand Forecasting",
+              "Safety Incident Reporting"
+            ]
+          },
+          "ownership.roles": {
+            "mustContain": [
+              "Compliance Operations"
+            ],
+            "mustNotContain": [
+              "EHS",
+              "Patient Access"
+            ]
+          },
+          "frequency.volume": {
+            "mustContain": [
+              "Quarterly",
+              "10th business day"
+            ],
+            "mustNotContain": [
+              "daily",
+              "weekly only"
+            ]
+          },
+          "systems.systems_of_record": {
+            "mustContain": [
+              "Snowflake",
+              "Excel"
+            ],
+            "mustNotContain": [
+              "Epic",
+              "Workday"
+            ]
+          },
+          "controls.compliance": {
+            "mustContain": [
+              "regulatory reporting",
+              "filed",
+              "10th business day"
+            ],
+            "mustNotContain": [
+              "HIPAA",
+              "SOX payroll"
+            ]
+          },
+          "risk.spofs": {
+            "mustContain": [
+              "Priya",
+              "only reviewer",
+              "exception format"
+            ],
+            "mustNotContain": [
+              "backup reviewer",
+              "fully documented"
+            ]
+          },
+          "documentation.maturity": {
+            "mustContain": [
+              "regulator's exception format"
+            ],
+            "mustNotContain": [
+              "Confluence SOP",
+              "Notion checklist"
+            ]
+          }
+        },
+        "forbiddenSlotFills": [
+          "friction.pain_points",
+          "handoffs.dependencies",
+          "metrics.kpis"
+        ]
+      },
+      "perfectOutput": {
+        "slot_updates": [
+          {
+            "slot_path": "scope.boundaries",
+            "status": "filled",
+            "confidence": 0.92,
+            "value": {
+              "process_names": [
+                "Quarterly Regulatory Reporting"
+              ]
+            }
+          },
+          {
+            "slot_path": "ownership.roles",
+            "status": "filled",
+            "confidence": 0.9,
+            "value": {
+              "owner_role": "Compliance Operations"
+            }
+          },
+          {
+            "slot_path": "frequency.volume",
+            "status": "filled",
+            "confidence": 0.9,
+            "value": {
+              "frequency": "quarterly",
+              "deadline": "10th business day"
+            }
+          },
+          {
+            "slot_path": "systems.systems_of_record",
+            "status": "filled",
+            "confidence": 0.88,
+            "value": {
+              "systems": [
+                "Snowflake",
+                "Excel"
+              ]
+            }
+          },
+          {
+            "slot_path": "controls.compliance",
+            "status": "filled",
+            "confidence": 0.92,
+            "value": {
+              "compliance_exposure": [
+                "regulatory filing"
+              ],
+              "controls": [
+                "must be filed by the 10th business day"
+              ]
+            }
+          },
+          {
+            "slot_path": "risk.spofs",
+            "status": "filled",
+            "confidence": 0.9,
+            "value": {
+              "spofs": [
+                "Priya is the only reviewer who knows the regulator's exception format"
+              ]
+            }
+          },
+          {
+            "slot_path": "documentation.maturity",
+            "status": "partial",
+            "confidence": 0.66,
+            "value": {
+              "tacit_knowledge": [
+                "regulator's exception format known by Priya"
+              ]
+            }
+          }
+        ]
+      },
+      "expectedState": "pass"
+    },
+    {
+      "id": "extraction-highstakes-019-messy-credit-hold-release",
+      "category": "high_stakes",
+      "description": "Messy high-stakes utterance with restart, correction, hedging, systems, escalation, and approval threshold.",
+      "turns": [
+        "So credit holds, actually we call it credit release now -- AR owns it. It runs, um, several times a day I think. NetSuite for sure, Sales pings in Slack when orders are blocked, and if it's over $100k, no release until VP Finance approves."
+      ],
+      "expected": {
+        "slots": {
+          "scope.boundaries": "filled",
+          "ownership.roles": "filled",
+          "frequency.volume": "partial",
+          "systems.systems_of_record": "filled",
+          "handoffs.dependencies": "filled",
+          "controls.compliance": "filled",
+          "priority.executive_priority": "filled"
+        },
+        "slotValues": {
+          "scope.boundaries": {
+            "mustContain": [
+              "Credit Release"
+            ],
+            "mustNotContain": [
+              "Credit Holds",
+              "Renewal Review",
+              "Unrelated Process",
+              "Generic Workflow"
+            ]
+          },
+          "ownership.roles": {
+            "mustContain": [
+              "AR",
+              "Sales",
+              "VP Finance"
+            ],
+            "mustNotContain": [
+              "Legal",
+              "Engineering"
+            ]
+          },
+          "frequency.volume": {
+            "mustContain": [
+              "several times a day",
+              "I think"
+            ],
+            "mustNotContain": [
+              "monthly",
+              "weekly",
+              "daily"
+            ]
+          },
+          "systems.systems_of_record": {
+            "mustContain": [
+              "NetSuite",
+              "Slack"
+            ],
+            "mustNotContain": [
+              "Salesforce",
+              "Workday",
+              "ServiceNow"
+            ]
+          },
+          "handoffs.dependencies": {
+            "mustContain": [
+              "Sales",
+              "Slack",
+              "orders are blocked"
+            ],
+            "mustNotContain": [
+              "Legal",
+              "customer data",
+              "Engineering"
+            ]
+          },
+          "controls.compliance": {
+            "mustContain": [
+              "$100k",
+              "VP Finance approves"
+            ],
+            "mustNotContain": [
+              "SOX",
+              "CFO approval",
+              "HIPAA"
+            ]
+          },
+          "priority.executive_priority": {
+            "mustContain": [
+              "orders are blocked",
+              "$100k"
+            ],
+            "mustNotContain": [
+              "Sev1",
+              "HIPAA",
+              "low priority",
+              "not important"
+            ]
+          }
+        },
+        "forbiddenSlotFills": [
+          "risk.spofs",
+          "documentation.maturity",
+          "metrics.kpis"
+        ],
+        "candidates": [
+          "Credit Release"
+        ],
+        "systems": [
+          "NetSuite",
+          "Slack"
+        ],
+        "peopleOrRoles": [
+          "AR",
+          "Sales",
+          "VP Finance"
+        ]
+      },
+      "perfectOutput": {
+        "slot_updates": [
+          {
+            "slot_path": "scope.boundaries",
+            "status": "filled",
+            "confidence": 0.86,
+            "value": {
+              "process_names": [
+                "Credit Release"
+              ],
+              "superseded_name_in_utterance": "Credit Holds"
+            }
+          },
+          {
+            "slot_path": "ownership.roles",
+            "status": "filled",
+            "confidence": 0.86,
+            "value": {
+              "owner_role": "AR",
+              "roles": [
+                "AR",
+                "Sales",
+                "VP Finance"
+              ]
+            }
+          },
+          {
+            "slot_path": "frequency.volume",
+            "status": "partial",
+            "confidence": 0.62,
+            "value": {
+              "frequency_signal": "several times a day",
+              "uncertainty": "director said I think"
+            }
+          },
+          {
+            "slot_path": "systems.systems_of_record",
+            "status": "filled",
+            "confidence": 0.88,
+            "value": {
+              "systems": [
+                "NetSuite",
+                "Slack"
+              ]
+            }
+          },
+          {
+            "slot_path": "handoffs.dependencies",
+            "status": "filled",
+            "confidence": 0.84,
+            "value": {
+              "handoffs": [
+                {
+                  "from_role": "Sales",
+                  "to_role": "AR",
+                  "channel": "Slack",
+                  "condition": "orders are blocked"
+                }
+              ]
+            }
+          },
+          {
+            "slot_path": "controls.compliance",
+            "status": "filled",
+            "confidence": 0.88,
+            "value": {
+              "controls": [
+                "orders over $100k cannot be released until VP Finance approves"
+              ]
+            }
+          },
+          {
+            "slot_path": "priority.executive_priority",
+            "status": "filled",
+            "confidence": 0.82,
+            "value": {
+              "priority_signal": "blocked orders and approvals over $100k"
+            }
+          }
+        ]
+      },
+      "expectedState": "pass"
+    },
+    {
+      "id": "extraction-highstakes-020-safety-incident-reporting",
+      "category": "high_stakes",
+      "description": "Safety incident reporting with compliance deadline, escalation, and documentation.",
+      "turns": [
+        "Warehouse safety incident reporting is owned by EHS. Supervisors log incidents in Intelex within 24 hours, serious injuries go to Legal immediately, and OSHA recordability is reviewed weekly by the EHS manager."
+      ],
+      "expected": {
+        "slots": {
+          "scope.boundaries": "filled",
+          "ownership.roles": "filled",
+          "frequency.volume": "filled",
+          "systems.systems_of_record": "filled",
+          "handoffs.dependencies": "filled",
+          "controls.compliance": "filled",
+          "metrics.kpis": "partial",
+          "priority.executive_priority": "filled"
+        },
+        "slotValues": {
+          "scope.boundaries": {
+            "mustContain": [
+              "Warehouse Safety Incident Reporting"
+            ],
+            "mustNotContain": [
+              "Security Incident Triage",
+              "Prior Authorization"
+            ]
+          },
+          "ownership.roles": {
+            "mustContain": [
+              "EHS",
+              "Supervisors",
+              "Legal",
+              "EHS manager"
+            ],
+            "mustNotContain": [
+              "SOC",
+              "Patient Access"
+            ]
+          },
+          "frequency.volume": {
+            "mustContain": [
+              "within 24 hours",
+              "weekly"
+            ],
+            "mustNotContain": [
+              "monthly close",
+              "biweekly"
+            ]
+          },
+          "systems.systems_of_record": {
+            "mustContain": [
+              "Intelex"
+            ],
+            "mustNotContain": [
+              "PagerDuty",
+              "Epic"
+            ]
+          },
+          "handoffs.dependencies": {
+            "mustContain": [
+              "Legal",
+              "serious injuries",
+              "immediately"
+            ],
+            "mustNotContain": [
+              "Finance",
+              "Communications"
+            ]
+          },
+          "controls.compliance": {
+            "mustContain": [
+              "OSHA",
+              "recordability",
+              "within 24 hours"
+            ],
+            "mustNotContain": [
+              "SOX",
+              "HIPAA"
+            ]
+          },
+          "metrics.kpis": {
+            "mustContain": [
+              "OSHA recordability"
+            ],
+            "mustNotContain": [
+              "time to containment",
+              "renewal cycle time"
+            ]
+          },
+          "priority.executive_priority": {
+            "mustContain": [
+              "serious injuries",
+              "OSHA"
+            ],
+            "mustNotContain": [
+              "low priority",
+              "routine"
+            ]
+          }
+        },
+        "forbiddenSlotFills": [
+          "friction.pain_points",
+          "risk.spofs",
+          "variants.exceptions"
+        ]
+      },
+      "perfectOutput": {
+        "slot_updates": [
+          {
+            "slot_path": "scope.boundaries",
+            "status": "filled",
+            "confidence": 0.92,
+            "value": {
+              "process_names": [
+                "Warehouse Safety Incident Reporting"
+              ]
+            }
+          },
+          {
+            "slot_path": "ownership.roles",
+            "status": "filled",
+            "confidence": 0.9,
+            "value": {
+              "owner_role": "EHS",
+              "roles": [
+                "EHS",
+                "Supervisors",
+                "Legal",
+                "EHS Manager"
+              ]
+            }
+          },
+          {
+            "slot_path": "frequency.volume",
+            "status": "filled",
+            "confidence": 0.86,
+            "value": {
+              "sla": "incidents logged within 24 hours",
+              "review_frequency": "weekly OSHA recordability review"
+            }
+          },
+          {
+            "slot_path": "systems.systems_of_record",
+            "status": "filled",
+            "confidence": 0.88,
+            "value": {
+              "systems": [
+                "Intelex"
+              ]
+            }
+          },
+          {
+            "slot_path": "handoffs.dependencies",
+            "status": "filled",
+            "confidence": 0.86,
+            "value": {
+              "handoffs": [
+                {
+                  "from_role": "Supervisors",
+                  "to_role": "Legal",
+                  "condition": "serious injuries",
+                  "timing": "immediately"
+                }
+              ]
+            }
+          },
+          {
+            "slot_path": "controls.compliance",
+            "status": "filled",
+            "confidence": 0.94,
+            "value": {
+              "controls": [
+                "Supervisors log incidents within 24 hours",
+                "OSHA recordability reviewed weekly"
+              ],
+              "compliance_exposure": [
+                "OSHA recordability"
+              ]
+            }
+          },
+          {
+            "slot_path": "metrics.kpis",
+            "status": "partial",
+            "confidence": 0.7,
+            "value": {
+              "metric_signal": "OSHA recordability"
+            }
+          },
+          {
+            "slot_path": "priority.executive_priority",
+            "status": "filled",
+            "confidence": 0.84,
+            "value": {
+              "priority_signal": "serious injuries and OSHA recordability"
+            }
+          }
+        ]
+      },
+      "expectedState": "pass"
+    }
+  ]
+}

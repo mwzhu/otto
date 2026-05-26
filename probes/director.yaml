@@ -1,0 +1,208 @@
+version: 1
+agent: director_voice_consultant
+description: >
+  Probe library for the director voice interview. The brain chooses intents;
+  the deterministic controller enforces cooldown_seconds and max_fires before
+  the voice layer phrases a single next question.
+
+probes:
+  - id: director-remit
+    type: orient
+    intent: discover_function
+    triggers:
+      - greeting
+      - unknown_director_remit
+      - meta_question_after_orientation
+    target_slots:
+      - function.name
+    cooldown_seconds: 45
+    max_fires: 3
+    expected_shape: Function or remit name with business outcomes when available.
+    base_priority: 110
+    phrasings:
+      - What part of the business do you oversee?
+      - What function or team are you responsible for?
+
+  - id: process-inventory
+    type: inventory
+    intent: discover_processes
+    triggers:
+      - remit_known
+      - no_candidate_processes
+      - low_info_recovery
+    target_slots:
+      - process.inventory
+    cooldown_seconds: 60
+    max_fires: 3
+    expected_shape: List of recurring processes or operating cadences.
+    base_priority: 105
+    phrasings:
+      - What are the main recurring processes your team owns?
+      - What are the three to six things your team is asked to handle most often?
+
+  - id: scope-boundaries
+    type: expand
+    intent: define_process_boundary
+    triggers:
+      - focus_process_selected
+      - missing_boundary
+    target_slots:
+      - scope.boundaries
+    cooldown_seconds: 75
+    max_fires: 2
+    expected_shape: A named process plus start and end conditions.
+    base_priority: 100
+    phrasings:
+      - Which process should we focus on first?
+      - Where does this process start?
+
+  - id: owner-role
+    type: expand
+    intent: capture_owner_roles
+    triggers:
+      - focus_process_selected
+      - missing_accountability
+    target_slots:
+      - ownership.roles
+    cooldown_seconds: 75
+    max_fires: 2
+    expected_shape: Accountable role/team and participating teams.
+    base_priority: 95
+    phrasings:
+      - Who is accountable for that process?
+      - Who owns the outcome?
+
+  - id: systems-of-record
+    type: expand
+    intent: capture_systems
+    triggers:
+      - focus_process_selected
+      - missing_systems
+      - spreadsheet_or_shadow_tool_mentioned
+    target_slots:
+      - systems.systems_of_record
+    cooldown_seconds: 75
+    max_fires: 2
+    expected_shape: Systems of record, spreadsheets, and shadow tools.
+    base_priority: 90
+    phrasings:
+      - Which systems of record or spreadsheets does the team rely on for this?
+      - What systems or shadow tools does the team live in for this work?
+
+  - id: business-outcome
+    type: expand
+    intent: capture_outcome
+    triggers:
+      - focus_process_selected
+      - missing_business_outcome
+    target_slots:
+      - outcomes.business_outcomes
+    cooldown_seconds: 75
+    max_fires: 2
+    expected_shape: Business outcome, decision, or measurable result.
+    base_priority: 85
+    phrasings:
+      - What outcome is this process supposed to produce for the business?
+      - What decision or result depends on this process working well?
+
+  - id: frequency-volume
+    type: expand
+    intent: quantify_frequency_volume
+    triggers:
+      - focus_process_selected
+      - missing_frequency_or_volume
+    target_slots:
+      - frequency.volume
+    cooldown_seconds: 75
+    max_fires: 2
+    expected_shape: Cadence and rough transaction/person/team volume.
+    base_priority: 80
+    phrasings:
+      - How often does this happen?
+      - Roughly how many cases are involved?
+
+  - id: handoff-dependencies
+    type: enrich
+    intent: capture_dependencies
+    triggers:
+      - focus_process_core_covered
+      - handoff_mentioned
+      - dependency_mentioned
+    target_slots:
+      - handoffs.dependencies
+    cooldown_seconds: 90
+    max_fires: 2
+    expected_shape: Upstream input, downstream consumer, or handoff point.
+    base_priority: 74
+    phrasings:
+      - What upstream inputs does this depend on?
+      - Where are the important handoffs into or out of this process?
+
+  - id: process-metrics
+    type: enrich
+    intent: capture_metrics
+    triggers:
+      - focus_process_core_covered
+      - metric_mentioned
+      - missing_kpis
+    target_slots:
+      - metrics.kpis
+    cooldown_seconds: 90
+    max_fires: 2
+    expected_shape: KPI, SLA, target, or reviewed metric.
+    base_priority: 72
+    phrasings:
+      - How do you measure whether this process is working well?
+      - What metric would tell you this process is healthy or drifting?
+
+  - id: pain-points
+    type: enrich
+    intent: capture_friction
+    triggers:
+      - pain_mentioned
+      - rework_mentioned
+      - bottleneck_mentioned
+      - focus_process_core_covered
+    target_slots:
+      - friction.pain_points
+    cooldown_seconds: 90
+    max_fires: 2
+    expected_shape: Bottleneck, rework, exception, delay, or manual cleanup.
+    base_priority: 70
+    phrasings:
+      - Where does the work slow down, break, or require manual cleanup today?
+      - What part of this creates the most rework or waiting?
+
+  - id: spof-risk
+    type: enrich
+    intent: capture_risk_spof
+    triggers:
+      - single_person_dependency_mentioned
+      - fragile_workaround_mentioned
+      - tribal_knowledge_mentioned
+    target_slots:
+      - risk.spofs
+    cooldown_seconds: 120
+    max_fires: 2
+    expected_shape: Named role/person dependency, fragile workaround, or tribal knowledge.
+    base_priority: 60
+    phrasings:
+      - Is any part of this dependent on one person or one fragile workaround?
+      - What would break if the person who knows this best were unavailable?
+
+  - id: documentation-maturity
+    type: enrich
+    intent: capture_documentation
+    triggers:
+      - documentation_mentioned
+      - tribal_knowledge_mentioned
+      - closeout_gap
+    target_slots:
+      - documentation.maturity
+    cooldown_seconds: 120
+    max_fires: 2
+    expected_shape: SOP, runbook, wiki, or source-of-truth signal.
+    base_priority: 55
+    phrasings:
+      - Where does the source of truth live?
+      - If someone new had to run this, where would they look?

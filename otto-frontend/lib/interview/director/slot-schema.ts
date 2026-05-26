@@ -15,9 +15,27 @@ export type DirectorSlotDefinition = {
 
 export const directorSlotDefinitions: DirectorSlotDefinition[] = [
   {
+    path: "function.name",
+    label: "Director remit and business function",
+    priority: 110,
+    mustFire: true,
+  },
+  {
+    path: "process.inventory",
+    label: "High-level process inventory",
+    priority: 105,
+    mustFire: true,
+  },
+  {
     path: "scope.boundaries",
     label: "Scope and boundaries",
     priority: 100,
+    mustFire: true,
+  },
+  {
+    path: "outcomes.business_outcomes",
+    label: "Business outcomes",
+    priority: 98,
     mustFire: true,
   },
   {
@@ -61,4 +79,14 @@ export function slotPriority(slotPath: string) {
     directorSlotDefinitions.find((definition) => definition.path === slotPath)
       ?.priority ?? 10
   );
+}
+
+export function isDirectorSlotPath(slotPath: string) {
+  return directorSlotDefinitions.some((definition) => definition.path === slotPath);
+}
+
+export function assertDirectorSlotPath(slotPath: string) {
+  if (!isDirectorSlotPath(slotPath)) {
+    throw new Error(`Unknown director slot path: ${slotPath}`);
+  }
 }

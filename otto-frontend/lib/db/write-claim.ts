@@ -42,30 +42,42 @@ export type WriteClaimResult = {
   superseded_claim_id: string | null;
 };
 
+export type ClaimWriteTx = Parameters<
+  Parameters<ReturnType<typeof getDb>["transaction"]>[0]
+>[0];
+
 export async function writeClaim(
   input: WriteClaimInput,
 ): Promise<{ body: WriteClaimResult; statusCode: number; idempotent: boolean }> {
   const db = getDb();
   return db.transaction(async (tx) => {
     await setOrgContext(tx, input.orgId);
-    const cached = await getIdempotentResponse(tx, {
-      orgId: input.orgId,
-      key: input.idempotencyKey,
-      route: input.route,
-      requestHash: input.requestHash,
-    });
-    if (cached.hit) {
-      return {
-        body: cached.responseJson as WriteClaimResult,
-        statusCode: cached.statusCode,
-        idempotent: true,
-      };
-    }
+    return writeClaimInTransaction(tx, input);
+  });
+}
 
-    await lockParentRow(tx, input);
-    const shouldSupersede = !multiValueClaimFields.has(input.field);
-    const priorRows = shouldSupersede
-      ? await tx.execute<{ id: string }>(sql`
+export async function writeClaimInTransaction(
+  tx: ClaimWriteTx,
+  input: WriteClaimInput,
+): Promise<{ body: WriteClaimResult; statusCode: number; idempotent: boolean }> {
+  const cached = await getIdempotentResponse(tx, {
+    orgId: input.orgId,
+    key: input.idempotencyKey,
+    route: input.route,
+    requestHash: input.requestHash,
+  });
+  if (cached.hit) {
+    return {
+      body: cached.responseJson as WriteClaimResult,
+      statusCode: cached.statusCode,
+      idempotent: true,
+    };
+  }
+
+  await lockParentRow(tx, input);
+  const shouldSupersede = !multiValueClaimFields.has(input.field);
+  const priorRows = shouldSupersede
+    ? await tx.execute<{ id: string }>(sql`
       SELECT id
       FROM claims
       WHERE org_id = ${input.orgId}
@@ -77,27 +89,27 @@ export async function writeClaim(
         AND superseded_by_claim_id IS NULL
       FOR UPDATE
     `)
-      : { rows: [] as { id: string }[] };
-    const priorClaimId = priorRows.rows[0]?.id ?? null;
-    const newClaimId = randomUUID();
+    : { rows: [] as { id: string }[] };
+  const priorClaimId = priorRows.rows[0]?.id ?? null;
+  const newClaimId = randomUUID();
 
-    if (priorClaimId) {
-      await tx.execute(sql`
+  if (priorClaimId) {
+    await tx.execute(sql`
         UPDATE claims
         SET status = 'superseded',
             superseded_by_claim_id = ${newClaimId},
             updated_at = now()
         WHERE id = ${priorClaimId}
       `);
-    }
+  }
 
-    const insertedRows = await tx.execute<{
-      id: string;
-      subject_type: string;
-      subject_id: string;
-      field: string;
-      value: unknown;
-    }>(sql`
+  const insertedRows = await tx.execute<{
+    id: string;
+    subject_type: string;
+    subject_id: string;
+    field: string;
+    value: unknown;
+  }>(sql`
       INSERT INTO claims (
         id,
         org_id,
@@ -124,12 +136,12 @@ export async function writeClaim(
       )
       RETURNING id, subject_type, subject_id, field, value
     `);
-    const inserted = insertedRows.rows[0];
+  const inserted = insertedRows.rows[0];
 
-    await updateProjection(tx, input);
+  await updateProjection(tx, input);
 
-    for (const evidenceId of input.evidenceIds) {
-      await tx.execute(sql`
+  for (const evidenceId of input.evidenceIds) {
+    await tx.execute(sql`
         INSERT INTO claim_evidence (claim_id, evidence_id)
         SELECT ${inserted.id}, id
         FROM evidence
@@ -138,9 +150,9 @@ export async function writeClaim(
           AND workspace_id = ${input.workspaceId}
         ON CONFLICT DO NOTHING
       `);
-    }
+  }
 
-    await tx.execute(sql`
+  await tx.execute(sql`
       INSERT INTO audit_log (
         org_id,
         workspace_id,
@@ -166,28 +178,27 @@ export async function writeClaim(
       )
     `);
 
-    const body: WriteClaimResult = {
-      claim: {
-        id: inserted.id,
-        subject_type: inserted.subject_type,
-        subject_id: inserted.subject_id,
-        field: inserted.field,
-        value: inserted.value,
-        status: "active",
-        superseded_by_claim_id: null,
-      },
-      superseded_claim_id: priorClaimId,
-    };
-    await storeIdempotentResponse(tx, {
-      orgId: input.orgId,
-      key: input.idempotencyKey,
-      route: input.route,
-      requestHash: input.requestHash,
-      responseJson: body,
-      statusCode: 201,
-    });
-    return { body, statusCode: 201, idempotent: false };
+  const body: WriteClaimResult = {
+    claim: {
+      id: inserted.id,
+      subject_type: inserted.subject_type,
+      subject_id: inserted.subject_id,
+      field: inserted.field,
+      value: inserted.value,
+      status: "active",
+      superseded_by_claim_id: null,
+    },
+    superseded_claim_id: priorClaimId,
+  };
+  await storeIdempotentResponse(tx, {
+    orgId: input.orgId,
+    key: input.idempotencyKey,
+    route: input.route,
+    requestHash: input.requestHash,
+    responseJson: body,
+    statusCode: 201,
   });
+  return { body, statusCode: 201, idempotent: false };
 }
 
 async function lockParentRow(
@@ -381,6 +392,7 @@ const multiValueClaimFields = new Set([
   "pain_point",
   "risk",
   "kpi",
+  "business_outcome",
   "upstream_dependency",
   "downstream_dependency",
   "used_in_process",

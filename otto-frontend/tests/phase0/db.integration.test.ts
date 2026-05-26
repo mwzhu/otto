@@ -16,8 +16,14 @@ const evidenceId = "55555555-5555-5555-8555-555555555555";
 
 let connectionString = "";
 let appClient: Client;
+const hasDocker = canUseDocker();
+const requiresDocker = process.env.CI === "true" || process.env.OTTO_REQUIRE_DOCKER_TESTS === "true";
 
-describe("Phase 0 database integration", () => {
+if (requiresDocker && !hasDocker) {
+  throw new Error("Docker is required for database integration tests in CI.");
+}
+
+describe.skipIf(!hasDocker)("Phase 0 database integration", () => {
   beforeAll(async () => {
     ensureDocker();
     cleanupContainer();
@@ -201,7 +207,18 @@ async function seedOrgGraph(client: Client) {
 }
 
 function ensureDocker() {
-  execFileSync("docker", ["version"], { stdio: "ignore" });
+  if (!hasDocker) {
+    throw new Error("Docker is required for database integration tests.");
+  }
+}
+
+function canUseDocker() {
+  try {
+    execFileSync("docker", ["version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function waitForPostgres() {

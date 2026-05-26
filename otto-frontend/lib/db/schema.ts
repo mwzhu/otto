@@ -291,6 +291,7 @@ export const captureSessions = pgTable(
     captureType: captureTypeEnum("capture_type").notNull(),
     frameEgressDir: text("frame_egress_dir"),
     recordingUrl: text("recording_url"),
+    metadataJson: jsonb("metadata_json").default(sql`'{}'::jsonb`).notNull(),
     startedAt: timestamp("started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     ...timestamps,
@@ -340,11 +341,14 @@ export const transcriptSegments = pgTable(
       .notNull(),
     speaker: text("speaker").notNull(),
     speakerRole: text("speaker_role"),
+    turnIndex: integer("turn_index"),
     startMs: integer("start_ms").notNull(),
     endMs: integer("end_ms").notNull(),
     text: text("text").notNull(),
+    timingSource: text("timing_source"),
     embedding: vector("embedding", { dimensions: 1536 }),
     confidence: numeric("confidence", { precision: 4, scale: 3 }),
+    metadataJson: jsonb("metadata_json").default(sql`'{}'::jsonb`).notNull(),
     redactedAt: timestamp("redacted_at", { withTimezone: true }),
     ...timestamps,
   },
@@ -804,6 +808,7 @@ export const agentDecisionLog = pgTable(
     promptTemplateId: text("prompt_template_id"),
     promptTemplateVersion: text("prompt_template_version"),
     toolCalls: jsonb("tool_calls"),
+    deliveryJson: jsonb("delivery_json"),
     model: text("model"),
     tokenCountInput: integer("token_count_input"),
     tokenCountOutput: integer("token_count_output"),
@@ -822,10 +827,82 @@ export const agentDecisionLog = pgTable(
       table.captureSessionId,
       table.tsStart,
     ),
+    captureTurnStageIdx: uniqueIndex("agent_decision_log_capture_turn_stage_idx")
+      .on(table.captureSessionId, table.turnIndex, table.stageName)
+      .where(sql`capture_session_id IS NOT NULL
+        AND turn_index IS NOT NULL
+        AND stage_name IS NOT NULL`),
     synthesisStageIdx: index("agent_decision_log_synthesis_stage_idx").on(
       table.synthesisRunId,
       table.stageName,
     ),
+  }),
+);
+
+export const interviewState = pgTable(
+  "interview_state",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id").references(() => organizations.id).notNull(),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id).notNull(),
+    captureSessionId: uuid("capture_session_id")
+      .references(() => captureSessions.id)
+      .notNull(),
+    currentPhase: text("current_phase").default("orient").notNull(),
+    focusCandidateProcessId: uuid("focus_candidate_process_id").references(
+      () => candidateProcesses.id,
+    ),
+    focusProcessId: uuid("focus_process_id").references(() => processes.id),
+    priorIntent: text("prior_intent"),
+    lowInfoTurnCount: integer("low_info_turn_count").default(0).notNull(),
+    lastNewSlotTurnIndex: integer("last_new_slot_turn_index"),
+    phaseHistory: jsonb("phase_history").default(sql`'[]'::jsonb`).notNull(),
+    ...timestamps,
+  },
+  (table) => ({
+    captureIdx: uniqueIndex("interview_state_capture_session_id_idx").on(
+      table.captureSessionId,
+    ),
+    orgIdx: index("interview_state_org_id_idx").on(table.orgId),
+    workspaceIdx: index("interview_state_workspace_id_idx").on(table.workspaceId),
+  }),
+);
+
+export const probeFirings = pgTable(
+  "probe_firings",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id").references(() => organizations.id).notNull(),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id).notNull(),
+    captureSessionId: uuid("capture_session_id")
+      .references(() => captureSessions.id)
+      .notNull(),
+    probeId: text("probe_id").notNull(),
+    targetSlot: text("target_slot"),
+    targetCandidateProcessId: uuid("target_candidate_process_id").references(
+      () => candidateProcesses.id,
+    ),
+    turnIndex: integer("turn_index").notNull(),
+    firedAt: timestamp("fired_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    styleHint: text("style_hint"),
+    resolvedStatusAfter: text("resolved_status_after"),
+    ...timestamps,
+  },
+  (table) => ({
+    captureProbeIdx: index("probe_firings_capture_probe_idx").on(
+      table.captureSessionId,
+      table.probeId,
+      table.firedAt,
+    ),
+    captureTurnProbeIdx: uniqueIndex("probe_firings_capture_turn_probe_idx").on(
+      table.captureSessionId,
+      table.turnIndex,
+      table.probeId,
+    ),
+    orgIdx: index("probe_firings_org_id_idx").on(table.orgId),
+    workspaceIdx: index("probe_firings_workspace_id_idx").on(table.workspaceId),
   }),
 );
 

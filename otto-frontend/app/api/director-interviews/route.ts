@@ -18,7 +18,9 @@ export const runtime = "nodejs";
 const bodySchema = z.object({
   workspace_id: z.string().uuid(),
   language: z.string().min(2).max(16).default("en"),
-});
+  consent_acknowledged: z.literal(true),
+  consent_text_version: z.string().min(1).max(64).default("director_voice_v1"),
+}).strict();
 
 export async function POST(request: Request) {
   try {
@@ -48,6 +50,14 @@ export async function POST(request: Request) {
             orgId: auth.orgId,
             workspaceId: body.workspace_id,
             captureType: "director_interview",
+            metadataJson: {
+              language: body.language,
+              director_user_id: auth.userId,
+              consent_acknowledged: body.consent_acknowledged,
+              consent_text_version: body.consent_text_version,
+              consent_acknowledged_at: new Date().toISOString(),
+              audio_recording_default: "off",
+            },
             startedAt: new Date(),
           })
           .returning()
@@ -63,6 +73,10 @@ export async function POST(request: Request) {
         metadataJson: {
           idempotency_key: idempotencyKey,
           language: body.language,
+          director_user_id: auth.userId,
+          consent_acknowledged: body.consent_acknowledged,
+          consent_text_version: body.consent_text_version,
+          audio_recording_default: "off",
         },
       });
 

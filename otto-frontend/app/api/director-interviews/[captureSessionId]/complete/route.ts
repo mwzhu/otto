@@ -1,31 +1,35 @@
-import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { getDb, setOrgContext } from "@/lib/db/client";
-import { auditLog, captureSessions } from "@/lib/db/schema";
 import { requireAuth, ensureWorkspaceRole } from "@/lib/auth/session";
 import {
-  ApiError,
   apiError,
   apiJson,
   readJsonWithHash,
   requireIdempotencyKey,
 } from "@/lib/http/json";
 import {
-  getIdempotentResponse,
+  clearPendingIdempotentRequest,
+  reserveIdempotentRequest,
   storeIdempotentResponse,
 } from "@/lib/db/idempotency";
-import { directorInterviewCompletedEventName, inngest } from "@/lib/inngest/client";
+import {
+  completeDirectorInterviewInTransaction,
+  sendDirectorCompletionEvent,
+} from "@/lib/interview/director/completion";
 
 export const runtime = "nodejs";
 
 const bodySchema = z.object({
   workspace_id: z.string().uuid(),
-});
+}).strict();
 
 export async function POST(
   request: Request,
   ctx: { params: Promise<{ captureSessionId: string }> },
 ) {
+  let pendingIdempotency:
+    | { orgId: string; key: string; route: string; requestHash: string }
+    | null = null;
   try {
     const { captureSessionId } = await ctx.params;
     const auth = await requireAuth(request);
@@ -37,68 +41,86 @@ export async function POST(
 
     const result = await getDb().transaction(async (tx) => {
       await setOrgContext(tx, auth.orgId);
-      const cached = await getIdempotentResponse(tx, {
+      const cached = await reserveIdempotentRequest(tx, {
         orgId: auth.orgId,
         key: idempotencyKey,
         route,
         requestHash: hash,
       });
       if (cached.hit) {
-        return { body: cached.responseJson, statusCode: cached.statusCode };
+        return {
+          body: cached.responseJson,
+          statusCode: cached.statusCode,
+          eventData: null,
+          storeIdempotency: false,
+        };
       }
-
-      const rows = await tx
-        .update(captureSessions)
-        .set({ completedAt: new Date(), updatedAt: new Date() })
-        .where(
-          and(
-            eq(captureSessions.id, captureSessionId),
-            eq(captureSessions.orgId, auth.orgId),
-            eq(captureSessions.workspaceId, body.workspace_id),
-            eq(captureSessions.captureType, "director_interview"),
-          ),
-        )
-        .returning();
-      const captureSession = rows[0];
-      if (!captureSession) {
-        throw new ApiError(404, "not_found", "Director interview not found.");
-      }
-
-      await tx.insert(auditLog).values({
-        orgId: auth.orgId,
-        workspaceId: body.workspace_id,
-        userId: auth.userId,
-        eventType: "capture.director_interview.completed",
-        subjectType: "capture_session",
-        subjectId: captureSession.id,
-        metadataJson: { idempotency_key: idempotencyKey },
-      });
-
-      await inngest.send({
-        name: directorInterviewCompletedEventName,
-        data: {
-          orgId: auth.orgId,
-          workspaceId: body.workspace_id,
-          captureSessionId: captureSession.id,
-          userId: auth.userId,
-          idempotencyKey,
-        },
-      });
-
-      const response = { capture_session: captureSession };
-      await storeIdempotentResponse(tx, {
+      pendingIdempotency = {
         orgId: auth.orgId,
         key: idempotencyKey,
         route,
         requestHash: hash,
-        responseJson: response,
-        statusCode: 200,
+      };
+
+      const completion = await completeDirectorInterviewInTransaction(tx, {
+        orgId: auth.orgId,
+        workspaceId: body.workspace_id,
+        captureSessionId,
+        userId: auth.userId,
+        idempotencyKey,
+        source: "browser",
       });
-      return { body: response, statusCode: 200 };
+
+      return {
+        ...completion,
+        storeIdempotency: true,
+      };
     });
+
+    if (result.eventData) {
+      await sendDirectorCompletionEvent(result.eventData);
+    }
+    if (result.storeIdempotency) {
+      await getDb().transaction(async (tx) => {
+        await setOrgContext(tx, auth.orgId);
+        await storeIdempotentResponse(tx, {
+          orgId: auth.orgId,
+          key: idempotencyKey,
+          route,
+          requestHash: hash,
+          responseJson: result.body,
+          statusCode: result.statusCode,
+        });
+      });
+      pendingIdempotency = null;
+    }
 
     return apiJson(result.body, { status: result.statusCode });
   } catch (error) {
+    if (pendingIdempotency) {
+      await clearPending(pendingIdempotency);
+    }
     return apiError(error);
+  }
+}
+
+async function clearPending(input: {
+  orgId: string;
+  key: string;
+  route: string;
+  requestHash: string;
+}) {
+  try {
+    await getDb().transaction(async (tx) => {
+      await setOrgContext(tx, input.orgId);
+      await clearPendingIdempotentRequest(tx, {
+        orgId: input.orgId,
+        key: input.key,
+        route: input.route,
+        requestHash: input.requestHash,
+      });
+    });
+  } catch {
+    // Preserve the original route error.
   }
 }

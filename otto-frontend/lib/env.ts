@@ -3,9 +3,16 @@ import "server-only";
 import { z } from "zod";
 
 const boolEnv = z
-  .enum(["true", "false", "1", "0"])
-  .optional()
-  .transform((value) => value === "true" || value === "1");
+  .preprocess(
+    (value) => (typeof value === "string" ? value.trim().toLowerCase() : value),
+    z.enum(["true", "false", "1", "0", "yes", "no"]).optional(),
+  )
+  .transform((value) => value === "true" || value === "1" || value === "yes");
+
+const directorPlannerRuntimeEnv = z.preprocess(
+  (value) => (typeof value === "string" ? value.trim().toLowerCase() : value),
+  z.enum(["python", "next"]).optional(),
+);
 
 export const serverEnvSchema = z.object({
   NODE_ENV: z
@@ -29,11 +36,25 @@ export const serverEnvSchema = z.object({
   LIVEKIT_URL: z.string().url().optional(),
   LIVEKIT_API_KEY: z.string().optional(),
   LIVEKIT_API_SECRET: z.string().optional(),
+  LIVEKIT_AGENT_NAME: z.string().optional(),
   LIVEKIT_AGENT_SERVICE_TOKEN: z.string().optional(),
+  OTTO_INTERNAL_API_BASE_URL: z.string().url().optional(),
+  OTTO_USE_LIVEKIT_INFERENCE: boolEnv,
+  OTTO_DIRECTOR_PREFLIGHT_STRICT: boolEnv,
+  OTTO_DIRECTOR_PLANNER_RUNTIME: directorPlannerRuntimeEnv,
+  OTTO_VENDOR_PRIVACY_ACK: boolEnv,
+  OTTO_DEEPGRAM_NO_STORE_ACK: boolEnv,
+  OTTO_CARTESIA_NO_RETENTION_ACK: boolEnv,
+  OTTO_ANTHROPIC_RAW_LOGGING_OFF_ACK: boolEnv,
+  DEEPGRAM_API_KEY: z.string().optional(),
+  CARTESIA_API_KEY: z.string().optional(),
   INNGEST_EVENT_KEY: z.string().optional(),
   INNGEST_SIGNING_KEY: z.string().optional(),
   ANTHROPIC_API_KEY: z.string().optional(),
   ANTHROPIC_MODEL: z.string().optional(),
+  DIRECTOR_BRAIN_MODEL: z.string().optional(),
+  DIRECTOR_VOICE_MODEL: z.string().optional(),
+  SYNTHESIS_PLANNER_MODEL: z.string().optional(),
   LLAMAPARSE_API_KEY: z.string().optional(),
   LLAMAPARSE_API_URL: z.string().url().optional(),
   UNSTRUCTURED_API_KEY: z.string().optional(),

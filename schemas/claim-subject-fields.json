@@ -1,0 +1,89 @@
+{
+  "$schema": "./claim-subject-fields.schema.json",
+  "version": 1,
+  "allowed": [
+    {
+      "subject_type": "process",
+      "fields": [
+        { "field": "frequency", "value_schema": { "type": ["string", "object"] } },
+        { "field": "business_outcome", "value_schema": { "type": ["string", "object"] } },
+        { "field": "description", "value_schema": { "type": ["string", "object"] } },
+        { "field": "volume", "value_schema": { "type": ["string", "object", "number"] } },
+        { "field": "documentation_maturity", "value_schema": { "type": ["string", "object"] } },
+        { "field": "complexity_signal", "value_schema": { "type": ["string", "object"] } },
+        { "field": "pain_point", "value_schema": { "type": ["string", "object"] } },
+        { "field": "risk", "value_schema": { "type": ["string", "object"] } },
+        { "field": "kpi", "value_schema": { "type": ["string", "object"] } },
+        { "field": "upstream_dependency", "value_schema": { "type": ["string", "object"] } },
+        { "field": "downstream_dependency", "value_schema": { "type": ["string", "object"] } },
+        { "field": "handoff", "value_schema": { "type": ["string", "object"] } },
+        { "field": "process_relationship", "value_schema": { "type": ["string", "object"] } },
+        { "field": "control", "value_schema": { "type": ["string", "object"] } },
+        { "field": "exec_priority", "value_schema": { "type": ["string", "object", "number"] } },
+        { "field": "variant", "value_schema": { "type": ["string", "object", "array"] } }
+      ]
+    },
+    {
+      "subject_type": "candidate_process",
+      "fields": [
+        { "field": "frequency", "value_schema": { "type": ["string", "object"] } },
+        { "field": "business_outcome", "value_schema": { "type": ["string", "object"] } },
+        { "field": "description", "value_schema": { "type": ["string", "object"] } },
+        { "field": "volume", "value_schema": { "type": ["string", "object", "number"] } },
+        { "field": "documentation_maturity", "value_schema": { "type": ["string", "object"] } },
+        { "field": "complexity_signal", "value_schema": { "type": ["string", "object"] } },
+        { "field": "pain_point", "value_schema": { "type": ["string", "object"] } },
+        { "field": "risk", "value_schema": { "type": ["string", "object"] } },
+        { "field": "kpi", "value_schema": { "type": ["string", "object"] } },
+        { "field": "upstream_dependency", "value_schema": { "type": ["string", "object"] } },
+        { "field": "downstream_dependency", "value_schema": { "type": ["string", "object"] } },
+        { "field": "handoff", "value_schema": { "type": ["string", "object"] } },
+        { "field": "process_relationship", "value_schema": { "type": ["string", "object"] } },
+        { "field": "control", "value_schema": { "type": ["string", "object"] } },
+        { "field": "exec_priority", "value_schema": { "type": ["string", "object", "number"] } },
+        { "field": "variant", "value_schema": { "type": ["string", "object", "array"] } },
+        { "field": "proposed_name", "value_schema": { "type": "string" } },
+        { "field": "complexity_hint", "value_schema": { "type": "string" } }
+      ]
+    },
+    {
+      "subject_type": "system",
+      "fields": [
+        { "field": "vendor", "value_schema": { "type": "string" } },
+        {
+          "field": "used_in_process",
+          "value_schema": {
+            "type": "object",
+            "required": ["candidate_process_id"]
+          }
+        },
+        { "field": "source_of_truth", "value_schema": { "type": ["boolean", "object"] } },
+        { "field": "shadow_system", "value_schema": { "type": ["boolean", "object"] } }
+      ]
+    },
+    {
+      "subject_type": "role",
+      "fields": [
+        { "field": "owns_process", "value_schema": { "type": ["string", "object"] } },
+        { "field": "participates_in_process", "value_schema": { "type": ["string", "object"] } },
+        { "field": "handoff_target", "value_schema": { "type": ["string", "object"] } }
+      ]
+    },
+    {
+      "subject_type": "person",
+      "fields": [
+        { "field": "role", "value_schema": { "type": "string" } },
+        { "field": "manager", "value_schema": { "type": ["string", "object"] } },
+        { "field": "single_point_of_failure", "value_schema": { "type": ["boolean", "object"] } }
+      ]
+    },
+    {
+      "subject_type": "process_version",
+      "fields": [
+        { "field": "summary", "value_schema": { "type": "string" } },
+        { "field": "steps", "value_schema": { "type": ["array", "object"] } },
+        { "field": "evidence_coverage", "value_schema": { "type": "object" } }
+      ]
+    }
+  ]
+}

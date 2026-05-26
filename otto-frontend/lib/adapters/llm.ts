@@ -1,8 +1,9 @@
 import { withRetry, type RetryOptions } from "@/lib/adapters/retry";
 import { getServerEnv } from "@/lib/env";
 import {
-  anthropicInterviewModel,
-  MODEL_PRICING_CENTS_PER_MTOK,
+  anthropicMaxTokensForPrompt,
+  anthropicModelForPrompt,
+  anthropicPricingForModel,
 } from "@/lib/ai/models";
 import { z } from "zod";
 
@@ -16,6 +17,11 @@ export type GenerateOpts = PromptedCall & {
   input: string;
   static_input?: string;
   dynamic_input?: string;
+  anthropic_tool?: {
+    name: string;
+    description: string;
+    input_schema: Record<string, unknown>;
+  };
 };
 
 export type Generation = {
@@ -25,6 +31,8 @@ export type Generation = {
   prompt_template_version: string;
   token_count_input: number;
   token_count_output: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
   cost_cents: number;
   latency_ms: number;
   cache_hit: boolean;
@@ -58,6 +66,8 @@ export async function generate(opts: GenerateOpts): Promise<Generation> {
       prompt_template_version: opts.prompt_template_version ?? "1",
       token_count_input: estimateTokens(input),
       token_count_output: estimateTokens(text),
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
       cost_cents: 0,
       latency_ms: Math.max(1, Date.now() - started),
       cache_hit: false,
@@ -164,7 +174,7 @@ async function generateAnthropic(
   started: number,
 ): Promise<Generation> {
   const env = getServerEnv();
-  const model = anthropicInterviewModel(env);
+  const model = anthropicModelForPrompt(env, opts.prompt_template_id);
   const content = [
     opts.static_input
       ? {
@@ -186,15 +196,35 @@ async function generateAnthropic(
     },
     body: JSON.stringify({
       model,
-      max_tokens: 1200,
+      max_tokens: anthropicMaxTokensForPrompt(opts.prompt_template_id),
       messages: [{ role: "user", content }],
+      ...(opts.anthropic_tool
+        ? {
+            tools: [
+              {
+                name: opts.anthropic_tool.name,
+                description: opts.anthropic_tool.description,
+                input_schema: opts.anthropic_tool.input_schema,
+              },
+            ],
+            tool_choice: {
+              type: "tool",
+              name: opts.anthropic_tool.name,
+            },
+          }
+        : {}),
     }),
   });
   if (!response.ok) {
     throw new Error(`Anthropic request failed: ${response.status}`);
   }
   const body = (await response.json()) as {
-    content?: Array<{ type: string; text?: string }>;
+    content?: Array<{
+      type: string;
+      text?: string;
+      name?: string;
+      input?: unknown;
+    }>;
     usage?: {
       input_tokens?: number;
       output_tokens?: number;
@@ -202,13 +232,23 @@ async function generateAnthropic(
       cache_read_input_tokens?: number;
     };
   };
-  const text =
-    body.content?.find((block) => block.type === "text")?.text?.trim() ?? "";
+  const toolUse = opts.anthropic_tool
+    ? body.content?.find(
+        (block) =>
+          block.type === "tool_use" &&
+          block.name === opts.anthropic_tool?.name &&
+          block.input !== undefined,
+      )
+    : undefined;
+  const text = toolUse
+    ? JSON.stringify(toolUse.input)
+    : body.content?.find((block) => block.type === "text")?.text?.trim() ?? "";
   const inputTokens =
     body.usage?.input_tokens ??
     estimateTokens([opts.static_input, opts.dynamic_input, opts.input].join("\n"));
   const outputTokens = body.usage?.output_tokens ?? estimateTokens(text);
   const cacheReadTokens = body.usage?.cache_read_input_tokens ?? 0;
+  const cacheCreationTokens = body.usage?.cache_creation_input_tokens ?? 0;
   return {
     text,
     model,
@@ -216,11 +256,14 @@ async function generateAnthropic(
     prompt_template_version: opts.prompt_template_version ?? "1",
     token_count_input: inputTokens,
     token_count_output: outputTokens,
+    cache_read_input_tokens: cacheReadTokens,
+    cache_creation_input_tokens: cacheCreationTokens,
     cost_cents: estimateAnthropicCostCents({
+      model,
       inputTokens,
       outputTokens,
       cacheReadTokens,
-      cacheCreationTokens: body.usage?.cache_creation_input_tokens ?? 0,
+      cacheCreationTokens,
     }),
     latency_ms: Math.max(1, Date.now() - started),
     cache_hit: cacheReadTokens > 0,
@@ -244,13 +287,14 @@ function safeParseJson(text: string):
 }
 
 function estimateAnthropicCostCents(input: {
+  model: string;
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
 }) {
   const billableInput = Math.max(0, input.inputTokens - input.cacheReadTokens);
-  const pricing = MODEL_PRICING_CENTS_PER_MTOK.claudeSonnet;
+  const pricing = anthropicPricingForModel(input.model);
   const cents =
     (billableInput / 1_000_000) * pricing.input +
     (input.cacheCreationTokens / 1_000_000) * pricing.cacheWrite5m +

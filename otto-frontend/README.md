@@ -19,7 +19,33 @@ npm run db:migrate
 npm run lint
 npm run test
 npm run build
+npm run eval:director:smoke
+npm run eval:director:container
 ```
+
+## Director Voice Production Proof
+
+The browser voice path is backed by the Python LiveKit worker in
+[`../agents/director`](../agents/director). For a full production proof, configure both
+`otto-frontend/.env.local` and `agents/director/.env` with matching `LIVEKIT_AGENT_NAME`,
+`LIVEKIT_AGENT_SERVICE_TOKEN`, LiveKit credentials, Anthropic credentials, provider credentials
+or `OTTO_USE_LIVEKIT_INFERENCE=true`, and the strict privacy acknowledgement flags.
+
+Then run migrations, start the app, start the worker with
+`uv run --no-sync otto-director-agent start --env-file .env`, complete a real `/onboarding/voice`
+session, and finish with:
+
+```bash
+cd ../agents/director
+OTTO_CAPTURE_SESSION_ID=<completed-director-capture-session-id> \
+  uv run --no-sync otto-director-session-verify \
+    --env-file .env \
+    --app-env-file ../../otto-frontend/.env.local \
+    --strict-voice-env
+```
+
+The verifier must pass without `--allow-incomplete` before the realtime voice implementation is
+considered accepted.
 
 ## Getting Started
 
@@ -39,7 +65,7 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+The app uses build-local system font stacks in `app/globals.css`, so production builds do not need network access for remote font downloads.
 
 ## Learn More
 

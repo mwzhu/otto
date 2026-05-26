@@ -169,11 +169,16 @@ export function UploadClient() {
       {allDone && (
         <div className="flex justify-end">
           <Button
-            onClick={() =>
+            onClick={() => {
+              const workspaceId = window.localStorage.getItem("otto.phase0.workspaceId");
               router.push(
-                `/synthesis?next=${encodeURIComponent("/overview")}`,
-              )
-            }
+                `/synthesis?next=${encodeURIComponent("/overview")}${
+                  workspaceId
+                    ? `&workspace_id=${encodeURIComponent(workspaceId)}`
+                    : ""
+                }`,
+              );
+            }}
           >
             Continue → Synthesize
           </Button>

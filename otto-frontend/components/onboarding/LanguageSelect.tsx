@@ -8,8 +8,9 @@ const LANGS = [
   { code: "es", flag: "🇪🇸", label: "Español" },
   { code: "de", flag: "🇩🇪", label: "Deutsch" },
   { code: "fr", flag: "🇫🇷", label: "Français" },
-  { code: "cs", flag: "🇨🇿", label: "Čeština" },
-  { code: "pl", flag: "🇵🇱", label: "Polski" },
+  { code: "pt", flag: "🇵🇹", label: "Português" },
+  { code: "zh", flag: "🇨🇳", label: "中文" },
+  { code: "ja", flag: "🇯🇵", label: "日本語" },
 ];
 
 export function LanguageSelect({

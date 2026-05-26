@@ -8,6 +8,7 @@ import {
 } from "@/lib/inngest/client";
 import { getDb, setOrgContext } from "@/lib/db/client";
 import { getServiceDbPool } from "@/lib/db/service";
+import { getServerEnv } from "@/lib/env";
 import {
   auditLog,
   captureSessions,
@@ -17,7 +18,10 @@ import {
 } from "@/lib/db/schema";
 import { writeAgentDecision } from "@/lib/db/write-agent-decision";
 import { processDocumentArtifact } from "@/lib/documents/pipeline";
-import { runDirectorTurn } from "@/lib/interview/director/brain";
+import {
+  dispatchDirectorTurnPlan,
+  planDirectorTurn,
+} from "@/lib/interview/director/brain";
 import { runInventorySynthesis } from "@/lib/synthesis/inventory";
 
 export const artifactUploaded = inngest.createFunction(
@@ -66,6 +70,7 @@ export const directorInterviewCompleted = inngest.createFunction(
     await step.run("request-director-inventory-synthesis", async () => {
       const captureSessionId = event.data.captureSessionId as string;
       const eventOrgId = event.data.orgId as string;
+      const idempotencyKey = event.data.idempotencyKey as string | undefined;
       const result = await getDb().transaction(async (tx) => {
         await setOrgContext(tx, eventOrgId);
         const rows = await tx
@@ -77,6 +82,29 @@ export const directorInterviewCompleted = inngest.createFunction(
         if (!captureSession) {
           return { ok: false, reason: "capture_session_not_found" };
         }
+        await tx.execute(sql`
+          SELECT pg_advisory_xact_lock(hashtext(${`synthesis.inventory.queued:${captureSession.id}:${idempotencyKey ?? ""}`}))
+        `);
+        const existingQueueRows = await tx.execute<{ id: string }>(sql`
+          SELECT id
+          FROM audit_log
+          WHERE org_id = ${captureSession.orgId}
+            AND workspace_id = ${captureSession.workspaceId}
+            AND subject_type = 'capture_session'
+            AND subject_id = ${captureSession.id}
+            AND event_type = 'synthesis.inventory.queued'
+            AND metadata_json->>'idempotency_key' = ${idempotencyKey ?? ""}
+          LIMIT 1
+        `);
+        if (existingQueueRows.rows[0]) {
+          return {
+            ok: true,
+            alreadyQueued: true,
+            orgId: captureSession.orgId,
+            workspaceId: captureSession.workspaceId,
+            captureSessionId: captureSession.id,
+          };
+        }
         await tx.insert(auditLog).values({
           orgId: captureSession.orgId,
           workspaceId: captureSession.workspaceId,
@@ -86,17 +114,18 @@ export const directorInterviewCompleted = inngest.createFunction(
           subjectId: captureSession.id,
           metadataJson: {
             capture_session_id: captureSession.id,
-            idempotency_key: event.data.idempotencyKey,
+            idempotency_key: idempotencyKey,
           },
         });
         return {
           ok: true,
+          alreadyQueued: false,
           orgId: captureSession.orgId,
           workspaceId: captureSession.workspaceId,
           captureSessionId: captureSession.id,
         };
       });
-      if (isDecisionResult(result)) {
+      if (isDecisionResult(result) && !result.alreadyQueued) {
         await writeAgentDecision({
           orgId: result.orgId,
           workspaceId: result.workspaceId,
@@ -117,7 +146,7 @@ export const directorInterviewCompleted = inngest.createFunction(
             captureSessionIds: [result.captureSessionId],
             runType: "director_inventory",
             userId: event.data.userId as string | undefined,
-            idempotencyKey: event.data.idempotencyKey as string | undefined,
+            idempotencyKey,
           },
         });
       }
@@ -186,6 +215,7 @@ function isDecisionResult(
   result: unknown,
 ): result is {
   ok: true;
+  alreadyQueued?: boolean;
   orgId: string;
   workspaceId: string;
   captureSessionId: string;
@@ -273,6 +303,11 @@ async function loadRecoverableDegradedTurns(orgId: string) {
 
 async function recoverDegradedDirectorTurn(row: RecoverableDegradedTurn) {
   const started = new Date();
+  if (!configuredRecoverySecret(getServerEnv().ANTHROPIC_API_KEY)) {
+    await writeSkippedDegradedRecovery(row, started, "missing_anthropic_api_key");
+    return { ok: false as const };
+  }
+
   const payload = await getDb().transaction(async (tx) => {
     await setOrgContext(tx, row.orgId);
     const segments = await tx
@@ -309,25 +344,15 @@ async function recoverDegradedDirectorTurn(row: RecoverableDegradedTurn) {
   });
 
   if (!payload.latestUtterance.trim() || !payload.userId) {
-    await writeAgentDecision({
-      orgId: row.orgId,
-      workspaceId: row.workspaceId,
-      captureSessionId: row.captureSessionId,
-      stageName: "re_extract_degraded_turns.skipped",
-      tsStart: started,
-      tsEnd: new Date(),
-      promptTemplateId: "director.turn.re-extract-degraded",
-      promptTemplateVersion: "1",
-      toolCalls: {
-        source_agent_decision_log_id: row.id,
-        reason: payload.userId ? "missing_transcript" : "missing_actor_user",
-      },
-      degradedQuality: false,
-    });
+    await writeSkippedDegradedRecovery(
+      row,
+      started,
+      payload.userId ? "missing_transcript" : "missing_actor_user",
+    );
     return { ok: false as const };
   }
 
-  const turn = await runDirectorTurn({
+  const turnInput = {
     orgId: row.orgId,
     workspaceId: row.workspaceId,
     captureSessionId: row.captureSessionId,
@@ -336,7 +361,27 @@ async function recoverDegradedDirectorTurn(row: RecoverableDegradedTurn) {
     transcriptSegmentIds: row.transcriptSegmentIds,
     evidenceIds: payload.evidenceIds,
     turnIndex: row.turnIndex ?? 0,
+  };
+  const planned = await planDirectorTurn(turnInput);
+  if (planned.degraded_quality) {
+    await writeSkippedDegradedRecovery(row, started, "rerun_still_degraded");
+    return { ok: false as const };
+  }
+  const turn = await dispatchDirectorTurnPlan({
+    ...turnInput,
+    plan: planned.plan,
+    plannedAgentUtterance: "",
+    metadata: planned.metadata,
+    degradedQuality: false,
+    startedAt: planned.started_at,
+    deliveryStatus: "pending",
+    decisionStageName: "re_extract_degraded_turns.applied",
+    advanceConversationState: false,
   });
+  if (turn.degraded_quality) {
+    await writeSkippedDegradedRecovery(row, started, "rerun_still_degraded");
+    return { ok: false as const };
+  }
 
   await writeAgentDecision({
     orgId: row.orgId,
@@ -361,4 +406,39 @@ async function recoverDegradedDirectorTurn(row: RecoverableDegradedTurn) {
     degradedQuality: false,
   });
   return { ok: true as const };
+}
+
+async function writeSkippedDegradedRecovery(
+  row: RecoverableDegradedTurn,
+  started: Date,
+  reason: string,
+) {
+  await writeAgentDecision({
+    orgId: row.orgId,
+    workspaceId: row.workspaceId,
+    captureSessionId: row.captureSessionId,
+    stageName: "re_extract_degraded_turns.skipped",
+    tsStart: started,
+    tsEnd: new Date(),
+    promptTemplateId: "director.turn.re-extract-degraded",
+    promptTemplateVersion: "1",
+    toolCalls: {
+      source_agent_decision_log_id: row.id,
+      reason,
+    },
+    degradedQuality: false,
+  });
+}
+
+function configuredRecoverySecret(value: string | undefined) {
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed) return false;
+  const lowered = trimmed.toLowerCase();
+  return !(
+    lowered === "..." ||
+    lowered === "replace-me" ||
+    lowered === "replace_with_real_value" ||
+    lowered.startsWith("replace-with") ||
+    lowered.includes("your-project")
+  );
 }

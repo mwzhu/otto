@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://otto.local/schemas/director-turn-plan.schema.json",
+  "title": "DirectorTurnPlan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "utterance_type",
+    "slot_updates",
+    "claims",
+    "tool_calls",
+    "contradiction_signals",
+    "current_phase",
+    "proposed_next_phase",
+    "phase_transition_ready",
+    "ranked_intents",
+    "chosen_intent"
+  ],
+  "properties": {
+    "utterance_type": {
+      "enum": [
+        "greeting",
+        "meta_question",
+        "clarification_request",
+        "substantive_answer",
+        "partial_answer",
+        "non_answer",
+        "dont_know",
+        "correction",
+        "contradiction",
+        "off_topic"
+      ]
+    },
+    "slot_updates": {
+      "type": "array",
+      "items": { "$ref": "slot-state.schema.json" }
+    },
+    "claims": {
+      "type": "array",
+      "items": { "$ref": "claim.schema.json" }
+    },
+    "tool_calls": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "arguments"],
+        "properties": {
+          "name": { "type": "string" },
+          "arguments": { "type": "object" }
+        }
+      }
+    },
+    "contradiction_signals": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "current_phase": {
+      "enum": ["orient", "inventory", "expand", "enrich", "closeout"]
+    },
+    "proposed_next_phase": {
+      "enum": ["orient", "inventory", "expand", "enrich", "closeout"]
+    },
+    "phase_transition_ready": { "type": "boolean" },
+    "ranked_intents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["intent", "score", "reason"],
+        "properties": {
+          "intent": { "type": "string" },
+          "target_slot": { "type": "string" },
+          "target_process": { "type": "string" },
+          "score": { "type": "number" },
+          "info_gain": { "type": "number" },
+          "conversational_fit": { "type": "number" },
+          "priority": { "type": "number" },
+          "recency": { "type": "number" },
+          "reason": { "type": "string" },
+          "style_hint": { "type": "string" }
+        }
+      }
+    },
+    "chosen_intent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intent", "score", "reason"],
+      "properties": {
+        "intent": { "type": "string" },
+        "target_slot": { "type": "string" },
+        "target_process": { "type": "string" },
+        "score": { "type": "number" },
+        "info_gain": { "type": "number" },
+        "conversational_fit": { "type": "number" },
+        "priority": { "type": "number" },
+        "recency": { "type": "number" },
+        "reason": { "type": "string" },
+        "style_hint": { "type": "string" }
+      }
+    },
+    "focus_candidate_process_id": {
+      "type": "string",
+      "format": "uuid"
+    }
+  }
+}

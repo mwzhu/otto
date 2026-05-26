@@ -1,0 +1,235 @@
+{
+  "version": 1,
+  "description": "Director voice consultant scripted smoke evals from DIRECTOR_VOICE_AGENT_PLAN.md §12.",
+  "cases": [
+    {
+      "id": "greeting_orients_without_boundary_loop",
+      "current_phase": "orient",
+      "utterance": "hello",
+      "expected": {
+        "utterance_type": "greeting",
+        "chosen_intent": "discover_function",
+        "required_slot_updates": [],
+        "required_processes": [],
+        "forbidden_phrase_fragments": ["where does the process begin and end"]
+      }
+    },
+    {
+      "id": "meta_question_explains_the_interview",
+      "current_phase": "orient",
+      "utterance": "what are we going to do",
+      "expected": {
+        "utterance_type": "meta_question",
+        "chosen_intent": "discover_function",
+        "required_slot_updates": [],
+        "required_processes": [],
+        "required_phrase_fragments": ["mapping how your function operates"]
+      }
+    },
+    {
+      "id": "revops_acceptance_inventory_and_followup",
+      "current_phase": "orient",
+      "utterance": "I run rev ops. We own forecasting, territory planning, quote approvals, and sales comp. Forecasting is weekly, mostly in Salesforce and Sheets. Quote approvals are painful because finance gets pulled in late.",
+      "expected": {
+        "utterance_type": "substantive_answer",
+        "chosen_intent": "select_process_to_expand",
+        "proposed_next_phase": "expand",
+        "required_processes": [
+          "Forecasting",
+          "Territory Planning",
+          "Quote Approvals",
+          "Sales Comp"
+        ],
+        "required_slot_updates": [
+          "function.name",
+          "process.inventory",
+          "systems.systems_of_record",
+          "frequency.volume",
+          "handoffs.dependencies",
+          "friction.pain_points"
+        ],
+        "required_systems": ["Salesforce", "Google Sheets"],
+        "required_phrase_fragments": ["quote approvals", "where does it start"]
+      }
+    },
+    {
+      "id": "metrics_wait_until_process_known",
+      "current_phase": "inventory",
+      "current_slots": {
+        "function.name": { "status": "filled", "confidence": 0.8 }
+      },
+      "utterance": "We run commercial operations.",
+      "expected": {
+        "utterance_type": "partial_answer",
+        "chosen_intent": "discover_processes",
+        "required_slot_updates": ["function.name"],
+        "required_processes": [],
+        "forbidden_intents": ["capture_metrics"]
+      }
+    },
+    {
+      "id": "clarification_defines_systems_and_reasks",
+      "current_phase": "enrich",
+      "current_slots": {
+        "function.name": { "status": "filled", "confidence": 0.8 },
+        "process.inventory": { "status": "filled", "confidence": 0.8 },
+        "scope.boundaries": { "status": "filled", "confidence": 0.8 }
+      },
+      "candidate_process_names": ["Quote Approvals"],
+      "utterance": "What do you mean by systems of record?",
+      "expected": {
+        "utterance_type": "clarification_request",
+        "chosen_intent": "clarify_previous_question",
+        "required_phrase_fragments": ["systems of record", "source of truth"]
+      }
+    },
+    {
+      "id": "off_topic_redirects_without_slot_chasing",
+      "current_phase": "inventory",
+      "utterance": "By the way do you know a good lunch place?",
+      "expected": {
+        "utterance_type": "off_topic",
+        "chosen_intent": "discover_processes",
+        "required_phrase_fragments": ["come back to that later", "recurring process"]
+      }
+    },
+    {
+      "id": "dont_know_marks_prior_slot_unknown_and_pivots",
+      "current_phase": "inventory",
+      "prior_intent": "discover_processes",
+      "current_slots": {
+        "function.name": { "status": "filled", "confidence": 0.8 }
+      },
+      "utterance": "I don't know",
+      "expected": {
+        "utterance_type": "dont_know",
+        "chosen_intent": "discover_function",
+        "required_slot_updates": ["process.inventory"],
+        "required_slot_statuses": {
+          "process.inventory": "asked_unknown"
+        },
+        "required_phrase_fragments": ["three recurring things"]
+      }
+    },
+    {
+      "id": "correction_targets_known_process",
+      "current_phase": "expand",
+      "candidate_process_names": ["Quote Approvals"],
+      "utterance": "Actually scratch that, quote approvals are owned by finance, not rev ops.",
+      "expected": {
+        "utterance_type": "correction",
+        "chosen_intent": "capture_owner_roles",
+        "required_slot_updates": ["ownership.roles"],
+        "required_contradiction_signal": "corrected prior context",
+        "required_phrase_fragments": ["correction for quote approvals"]
+      }
+    },
+    {
+      "id": "enrichment_extracts_controls_variants_and_exec_priority",
+      "current_phase": "enrich",
+      "candidate_process_names": ["Quote Approvals"],
+      "utterance": "For quote approvals, legal approval is required for enterprise deals, exceptions go through a manual override, and the CFO says this is a top priority this quarter.",
+      "expected": {
+        "utterance_type": "substantive_answer",
+        "required_slot_updates": [
+          "controls.compliance",
+          "variants.exceptions",
+          "priority.executive_priority"
+        ]
+      }
+    },
+    {
+      "id": "enrichment_extracts_spof_and_documentation_maturity",
+      "current_phase": "enrich",
+      "candidate_process_names": ["Quote Approvals"],
+      "utterance": "Quote approvals depend on one person and most exception rules are tribal knowledge, not documented in a runbook.",
+      "expected": {
+        "utterance_type": "substantive_answer",
+        "required_slot_updates": [
+          "risk.spofs",
+          "documentation.maturity"
+        ]
+      }
+    },
+    {
+      "id": "volunteered_boundary_fills_scope_slot",
+      "current_phase": "expand",
+      "candidate_process_names": ["Quote Approvals"],
+      "utterance": "Quote approvals start when sales submits a discount request and end when finance approves it.",
+      "expected": {
+        "utterance_type": "substantive_answer",
+        "required_slot_updates": ["scope.boundaries"]
+      }
+    },
+    {
+      "id": "people_involved_extracts_named_person",
+      "current_phase": "enrich",
+      "candidate_process_names": ["Quote Approvals"],
+      "utterance": "Quote approvals are owned by Pat, and ask Priya for exceptions.",
+      "expected": {
+        "utterance_type": "substantive_answer",
+        "required_slot_updates": ["people.key_people"]
+      }
+    },
+    {
+      "id": "process_relationships_capture_how_work_connects",
+      "current_phase": "enrich",
+      "candidate_process_names": ["Forecasting", "Territory Planning"],
+      "utterance": "Forecasting feeds territory planning because the regional forecast sets the capacity assumptions.",
+      "expected": {
+        "utterance_type": "substantive_answer",
+        "required_slot_updates": ["handoffs.dependencies"],
+        "required_claim_fields": ["process_relationship"]
+      }
+    },
+    {
+      "id": "frequency_volume_extracts_transaction_volume",
+      "current_phase": "expand",
+      "candidate_process_names": ["Quote Approvals"],
+      "utterance": "Quote approvals happen weekly, about 200 approval requests per month.",
+      "expected": {
+        "utterance_type": "substantive_answer",
+        "required_slot_updates": ["frequency.volume"],
+        "required_claim_fields": ["volume"]
+      }
+    },
+    {
+      "id": "contradiction_asks_for_trusted_version",
+      "current_phase": "expand",
+      "candidate_process_names": ["Forecasting"],
+      "utterance": "That's wrong, forecasting is not weekly, it's monthly.",
+      "expected": {
+        "utterance_type": "contradiction",
+        "chosen_intent": "reconcile_conflict",
+        "required_slot_updates": ["frequency.volume"],
+        "required_slot_statuses": {
+          "frequency.volume": "conflicting"
+        },
+        "required_contradiction_signal": "contradicted prior context",
+        "required_phrase_fragments": ["which version should i trust"]
+      }
+    },
+    {
+      "id": "repeated_low_info_forces_closeout_instead_of_slot_chasing",
+      "current_phase": "enrich",
+      "low_info_turn_count": 2,
+      "turn_index": 8,
+      "last_new_slot_turn_index": 5,
+      "current_slots": {
+        "function.name": { "status": "filled", "confidence": 0.8 },
+        "process.inventory": { "status": "filled", "confidence": 0.8 },
+        "scope.boundaries": { "status": "filled", "confidence": 0.8 },
+        "ownership.roles": { "status": "filled", "confidence": 0.8 },
+        "systems.systems_of_record": { "status": "filled", "confidence": 0.8 }
+      },
+      "candidate_process_names": ["Quote Approvals"],
+      "utterance": "yeah",
+      "expected": {
+        "utterance_type": "non_answer",
+        "chosen_intent": "open_questions_closeout",
+        "proposed_next_phase": "closeout",
+        "required_phrase_fragments": ["before we wrap", "gaps"]
+      }
+    }
+  ]
+}

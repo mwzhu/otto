@@ -13,9 +13,20 @@ import {
   slotStates,
   systems,
 } from "@/lib/db/schema";
-import { writeClaim } from "@/lib/db/write-claim";
-import { slotPriority, type DirectorSlotStatus } from "@/lib/interview/director/slot-schema";
+import {
+  writeClaim,
+  writeClaimInTransaction,
+  type ClaimWriteTx,
+  type WriteClaimInput,
+} from "@/lib/db/write-claim";
+import {
+  assertDirectorSlotPath,
+  slotPriority,
+  type DirectorSlotStatus,
+} from "@/lib/interview/director/slot-schema";
+import { normalizeDirectorSlotValue } from "@/lib/interview/director/slot-values";
 import { stableStringify } from "@/lib/http/json";
+import { sanitizeForLogs, sanitizeJsonForLogs } from "@/lib/security/sanitize";
 
 export type DirectorToolContext = {
   orgId: string;
@@ -34,15 +45,17 @@ export type SlotUpdateInput = {
   lastAskedAt?: Date;
 };
 
+type DirectorToolTx = ClaimWriteTx;
+type DirectorToolOptions = { tx?: DirectorToolTx };
+
 export async function createTranscriptEvidence(input: {
   orgId: string;
   workspaceId: string;
   transcriptSegmentId: string;
   quote: string;
   confidence?: number;
-}) {
-  return getDb().transaction(async (tx) => {
-    await setOrgContext(tx, input.orgId);
+}, options: DirectorToolOptions = {}) {
+  return withNamedEntityTx(input.orgId, options.tx, async (tx) => {
     return (
       await tx
         .insert(evidence)
@@ -71,9 +84,8 @@ export async function createDocumentEvidence(input: {
   spanStart?: number;
   spanEnd?: number;
   confidence?: number;
-}) {
-  return getDb().transaction(async (tx) => {
-    await setOrgContext(tx, input.orgId);
+}, options: DirectorToolOptions = {}) {
+  return withNamedEntityTx(input.orgId, options.tx, async (tx) => {
     return (
       await tx
         .insert(evidence)
@@ -98,9 +110,10 @@ export async function touchSlotAskedAt(
   context: DirectorToolContext,
   slotPath: string,
   askedAt = new Date(),
+  options: DirectorToolOptions = {},
 ) {
-  return getDb().transaction(async (tx) => {
-    await setOrgContext(tx, context.orgId);
+  assertDirectorSlotPath(slotPath);
+  return withDirectorToolTx(context, options, async (tx) => {
     const updated = await tx.execute<{ id: string }>(sql`
       UPDATE slot_states
       SET last_asked_at = ${askedAt},
@@ -134,9 +147,11 @@ export async function touchSlotAskedAt(
 export async function updateSlotState(
   context: DirectorToolContext,
   update: SlotUpdateInput,
+  options: DirectorToolOptions = {},
 ) {
-  return getDb().transaction(async (tx) => {
-    await setOrgContext(tx, context.orgId);
+  assertDirectorSlotPath(update.slotPath);
+  const value = normalizeDirectorSlotValue(update.slotPath, update.value);
+  return withDirectorToolTx(context, options, async (tx) => {
     return (
       await tx
         .insert(slotStates)
@@ -145,7 +160,7 @@ export async function updateSlotState(
           workspaceId: context.workspaceId,
           captureSessionId: context.captureSessionId,
           slotPath: update.slotPath,
-          value: update.value,
+          value,
           status: update.status,
           confidence: String(update.confidence),
           evidenceIds: update.evidenceIds ?? [],
@@ -156,7 +171,7 @@ export async function updateSlotState(
         .onConflictDoUpdate({
           target: [slotStates.captureSessionId, slotStates.slotPath],
           set: {
-            value: update.value,
+            value,
             status: update.status,
             confidence: String(update.confidence),
             evidenceIds: update.evidenceIds ?? [],
@@ -181,11 +196,18 @@ export async function recordProcess(
     confidence?: number;
     evidenceIds: string[];
   },
+  options: DirectorToolOptions = {},
 ) {
-  const db = getDb();
   const normalized = normalizeName(input.name);
-  const candidate = await db.transaction(async (tx) => {
-    await setOrgContext(tx, context.orgId);
+  return withDirectorToolTx(context, options, async (tx) => {
+    await tx.execute(sql`
+      SELECT pg_advisory_xact_lock(
+        hashtextextended(
+          ${`${context.captureSessionId}:candidate_process:${normalized}`},
+          13
+        )
+      )
+    `);
     const existing = await tx.execute<{
       id: string;
       proposed_function: string | null;
@@ -204,12 +226,13 @@ export async function recordProcess(
       FOR UPDATE
     `);
     const existingRow = existing.rows[0];
+    let candidate;
     if (existingRow) {
       const mergedEvidenceIds = unique([
         ...(existingRow.evidence_ids ?? []),
         ...input.evidenceIds,
       ]);
-      return (
+      candidate = (
         await tx
           .update(candidateProcesses)
           .set({
@@ -223,48 +246,65 @@ export async function recordProcess(
           .where(eq(candidateProcesses.id, existingRow.id))
           .returning()
       )[0];
+    } else {
+      candidate = (
+        await tx
+          .insert(candidateProcesses)
+          .values({
+            orgId: context.orgId,
+            workspaceId: context.workspaceId,
+            captureSessionId: context.captureSessionId,
+            proposedName: input.name.trim(),
+            proposedFunction: input.proposedFunction,
+            frequency: input.frequency,
+            complexityHint: input.complexityHint,
+            evidenceIds: input.evidenceIds,
+            confidence: String(input.confidence ?? 0.75),
+          })
+          .returning()
+      )[0];
     }
-    return (
-      await tx
-        .insert(candidateProcesses)
-        .values({
-          orgId: context.orgId,
-          workspaceId: context.workspaceId,
-          captureSessionId: context.captureSessionId,
-          proposedName: input.name.trim(),
-          proposedFunction: input.proposedFunction,
-          frequency: input.frequency,
-          complexityHint: input.complexityHint,
-          evidenceIds: input.evidenceIds,
-          confidence: String(input.confidence ?? 0.75),
-        })
-        .returning()
-    )[0];
-  });
 
-  await writeCandidateClaim(context, candidate.id, "proposed_name", candidate.proposedName, input.evidenceIds);
-  if (input.frequency) {
-    await writeCandidateClaim(context, candidate.id, "frequency", input.frequency, input.evidenceIds);
-  }
-  if (input.complexityHint) {
     await writeCandidateClaim(
       context,
       candidate.id,
-      "complexity_hint",
-      input.complexityHint,
+      "proposed_name",
+      candidate.proposedName,
       input.evidenceIds,
+      tx,
     );
-  }
-  return candidate;
+    if (input.frequency) {
+      await writeCandidateClaim(
+        context,
+        candidate.id,
+        "frequency",
+        input.frequency,
+        input.evidenceIds,
+        tx,
+      );
+    }
+    if (input.complexityHint) {
+      await writeCandidateClaim(
+        context,
+        candidate.id,
+        "complexity_hint",
+        input.complexityHint,
+        input.evidenceIds,
+        tx,
+      );
+    }
+    return candidate;
+  });
 }
 
 export async function recordSystem(
   context: DirectorToolContext,
   input: { name: string; evidenceIds: string[]; candidateProcessId?: string },
+  options: DirectorToolOptions = {},
 ) {
-  const system = await upsertNamedSystem(context.orgId, input.name);
+  const system = await upsertNamedSystem(context.orgId, input.name, options.tx);
   if (input.candidateProcessId) {
-    await writeClaim({
+    await writeClaimWithOptionalTx(options.tx, {
       orgId: context.orgId,
       workspaceId: context.workspaceId,
       userId: context.userId,
@@ -288,10 +328,11 @@ export async function recordSystem(
 export async function recordRole(
   context: DirectorToolContext,
   input: { name: string; evidenceIds: string[]; candidateProcessId?: string },
+  options: DirectorToolOptions = {},
 ) {
-  const role = await upsertNamedRole(context.orgId, input.name);
+  const role = await upsertNamedRole(context.orgId, input.name, options.tx);
   if (input.candidateProcessId) {
-    await writeClaim({
+    await writeClaimWithOptionalTx(options.tx, {
       orgId: context.orgId,
       workspaceId: context.workspaceId,
       userId: context.userId,
@@ -315,10 +356,10 @@ export async function recordRole(
 export async function recordPerson(
   context: DirectorToolContext,
   input: { name: string; title?: string; roleName?: string; evidenceIds: string[] },
+  options: DirectorToolOptions = {},
 ) {
-  const db = getDb();
-  const person = await db.transaction(async (tx) => {
-    await setOrgContext(tx, context.orgId);
+  return withDirectorToolTx(context, options, async (tx) => {
+    let person;
     const existing = await tx.execute<{ id: string }>(sql`
       SELECT id FROM people
       WHERE org_id = ${context.orgId}
@@ -327,51 +368,53 @@ export async function recordPerson(
       FOR UPDATE
     `);
     if (existing.rows[0]) {
-      return (
+      person = (
         await tx
           .update(people)
           .set({ title: input.title, updatedAt: new Date() })
           .where(eq(people.id, existing.rows[0].id))
           .returning()
       )[0];
+    } else {
+      person = (
+        await tx
+          .insert(people)
+          .values({
+            orgId: context.orgId,
+            name: input.name.trim(),
+            title: input.title,
+            source: "director_interview",
+          })
+          .returning()
+      )[0];
     }
-    return (
-      await tx
-        .insert(people)
-        .values({
-          orgId: context.orgId,
-          name: input.name.trim(),
-          title: input.title,
-          source: "director_interview",
-        })
-        .returning()
-    )[0];
+    if (input.roleName) {
+      const role = await upsertNamedRole(context.orgId, input.roleName, tx);
+      await writeClaimInTransaction(tx, {
+        orgId: context.orgId,
+        workspaceId: context.workspaceId,
+        userId: context.userId,
+        subject: { type: "person", id: person.id },
+        field: "role",
+        value: role.name,
+        evidenceIds: input.evidenceIds,
+        confidence: 0.72,
+        idempotencyKey: claimKey("person", person.id, "role", input),
+        requestHash: claimHash(input),
+        route: "director-tool/record-person",
+        metadata: { role_id: role.id, source: "director_tool" },
+      });
+    }
+    return person;
   });
-  if (input.roleName) {
-    const role = await upsertNamedRole(context.orgId, input.roleName);
-    await writeClaim({
-      orgId: context.orgId,
-      workspaceId: context.workspaceId,
-      userId: context.userId,
-      subject: { type: "person", id: person.id },
-      field: "role",
-      value: role.name,
-      evidenceIds: input.evidenceIds,
-      confidence: 0.72,
-      idempotencyKey: claimKey("person", person.id, "role", input),
-      requestHash: claimHash(input),
-      route: "director-tool/record-person",
-      metadata: { role_id: role.id, source: "director_tool" },
-    });
-  }
-  return person;
 }
 
 export async function recordPainPoint(
   context: DirectorToolContext,
   input: { candidateProcessId: string; text: string; evidenceIds: string[] },
+  options: DirectorToolOptions = {},
 ) {
-  return writeClaim({
+  return writeClaimWithOptionalTx(options.tx, {
     orgId: context.orgId,
     workspaceId: context.workspaceId,
     userId: context.userId,
@@ -390,8 +433,9 @@ export async function recordPainPoint(
 export async function recordSpof(
   context: DirectorToolContext,
   input: { candidateProcessId: string; text: string; evidenceIds: string[] },
+  options: DirectorToolOptions = {},
 ) {
-  return writeClaim({
+  return writeClaimWithOptionalTx(options.tx, {
     orgId: context.orgId,
     workspaceId: context.workspaceId,
     userId: context.userId,
@@ -418,9 +462,13 @@ export async function createFollowUpTask(
     priority?: number;
     contextJson?: Record<string, unknown>;
   },
+  options: DirectorToolOptions = {},
 ) {
-  return getDb().transaction(async (tx) => {
-    await setOrgContext(tx, context.orgId);
+  return withDirectorToolTx(context, options, async (tx) => {
+    const contextJson = sanitizeJsonForLogs(input.contextJson ?? {}) as Record<
+      string,
+      unknown
+    >;
     const task = (
       await tx
         .insert(followUpTasks)
@@ -429,12 +477,14 @@ export async function createFollowUpTask(
           workspaceId: context.workspaceId,
           captureSessionId: context.captureSessionId,
           taskType: input.taskType ?? "open_question",
-          title: input.title,
-          description: input.description,
+          title: sanitizeForLogs(input.title),
+          description: input.description
+            ? sanitizeForLogs(input.description)
+            : undefined,
           targetType: input.targetType,
           targetId: input.targetId,
           priority: String(input.priority ?? 1),
-          contextJson: input.contextJson ?? {},
+          contextJson,
         })
         .returning()
     )[0];
@@ -457,8 +507,9 @@ async function writeCandidateClaim(
   field: string,
   value: string,
   evidenceIds: string[],
+  tx?: DirectorToolTx,
 ) {
-  return writeClaim({
+  return writeClaimWithOptionalTx(tx, {
     orgId: context.orgId,
     workspaceId: context.workspaceId,
     userId: context.userId,
@@ -477,10 +528,9 @@ async function writeCandidateClaim(
   });
 }
 
-async function upsertNamedSystem(orgId: string, name: string) {
-  return getDb().transaction(async (tx) => {
-    await setOrgContext(tx, orgId);
-    const existing = await tx.execute<{ id: string }>(sql`
+async function upsertNamedSystem(orgId: string, name: string, tx?: DirectorToolTx) {
+  return withNamedEntityTx(orgId, tx, async (activeTx) => {
+    const existing = await activeTx.execute<{ id: string }>(sql`
       SELECT id FROM systems
       WHERE org_id = ${orgId}
         AND lower(name) = ${normalizeName(name)}
@@ -489,7 +539,7 @@ async function upsertNamedSystem(orgId: string, name: string) {
     `);
     if (existing.rows[0]) {
       return (
-        await tx
+        await activeTx
           .update(systems)
           .set({ updatedAt: new Date() })
           .where(and(eq(systems.id, existing.rows[0].id), eq(systems.orgId, orgId)))
@@ -497,7 +547,7 @@ async function upsertNamedSystem(orgId: string, name: string) {
       )[0];
     }
     return (
-      await tx
+      await activeTx
         .insert(systems)
         .values({
           orgId,
@@ -510,10 +560,9 @@ async function upsertNamedSystem(orgId: string, name: string) {
   });
 }
 
-async function upsertNamedRole(orgId: string, name: string) {
-  return getDb().transaction(async (tx) => {
-    await setOrgContext(tx, orgId);
-    const existing = await tx.execute<{ id: string }>(sql`
+async function upsertNamedRole(orgId: string, name: string, tx?: DirectorToolTx) {
+  return withNamedEntityTx(orgId, tx, async (activeTx) => {
+    const existing = await activeTx.execute<{ id: string }>(sql`
       SELECT id FROM roles
       WHERE org_id = ${orgId}
         AND lower(name) = ${normalizeName(name)}
@@ -522,7 +571,7 @@ async function upsertNamedRole(orgId: string, name: string) {
     `);
     if (existing.rows[0]) {
       return (
-        await tx
+        await activeTx
           .update(roles)
           .set({ updatedAt: new Date() })
           .where(and(eq(roles.id, existing.rows[0].id), eq(roles.orgId, orgId)))
@@ -530,11 +579,39 @@ async function upsertNamedRole(orgId: string, name: string) {
       )[0];
     }
     return (
-      await tx
+      await activeTx
         .insert(roles)
         .values({ orgId, name: name.trim(), canonicalKey: canonicalKey(name) })
         .returning()
     )[0];
+  });
+}
+
+async function writeClaimWithOptionalTx(tx: DirectorToolTx | undefined, input: WriteClaimInput) {
+  return tx ? writeClaimInTransaction(tx, input) : writeClaim(input);
+}
+
+async function withDirectorToolTx<T>(
+  context: DirectorToolContext,
+  options: DirectorToolOptions,
+  fn: (tx: DirectorToolTx) => Promise<T>,
+) {
+  if (options.tx) return fn(options.tx);
+  return getDb().transaction(async (tx) => {
+    await setOrgContext(tx, context.orgId);
+    return fn(tx);
+  });
+}
+
+async function withNamedEntityTx<T>(
+  orgId: string,
+  tx: DirectorToolTx | undefined,
+  fn: (tx: DirectorToolTx) => Promise<T>,
+) {
+  if (tx) return fn(tx);
+  return getDb().transaction(async (activeTx) => {
+    await setOrgContext(activeTx, orgId);
+    return fn(activeTx);
   });
 }
 

@@ -22,23 +22,77 @@ const STAGES = [
 ];
 
 const STAGE_MS = 650;
+const STATUS_POLL_MS = 1500;
+const STATUS_TIMEOUT_MS = 60_000;
+
+type SynthesisStatus = {
+  latest_run: { status: string; stage: string | null } | null;
+  overview: { process_count: number; has_partial_synthesis?: boolean };
+  ready_for_overview: boolean;
+  terminal: boolean;
+};
 
 export default function SynthesisClient() {
   const router = useRouter();
   const sp = useSearchParams();
   const next = sp.get("next") ?? "/overview";
+  const workspaceId = sp.get("workspace_id");
 
   const [idx, setIdx] = useState(0);
-  const done = idx >= STAGES.length;
+  const [status, setStatus] = useState<SynthesisStatus | null>(null);
+  const [statusTimedOut, setStatusTimedOut] = useState(false);
+  const animationDone = idx >= STAGES.length;
+  const synthesisBlocked =
+    status?.terminal === true && status.ready_for_overview !== true;
+  const backendDone =
+    status?.ready_for_overview === true ||
+    (!synthesisBlocked && statusTimedOut);
+  const done = animationDone && backendDone;
 
   useEffect(() => {
-    if (idx >= STAGES.length) {
+    if (done) {
       const t = setTimeout(() => router.push(next), 900);
       return () => clearTimeout(t);
     }
+    if (idx >= STAGES.length) return;
     const t = setTimeout(() => setIdx((i) => i + 1), STAGE_MS);
     return () => clearTimeout(t);
-  }, [idx, next, router]);
+  }, [done, idx, next, router]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const startedAt = Date.now();
+
+    async function poll() {
+      try {
+        const statusUrl = workspaceId
+          ? `/api/synthesis/status?workspace_id=${encodeURIComponent(workspaceId)}`
+          : "/api/synthesis/status";
+        const response = await fetch(statusUrl, { cache: "no-store" });
+        if (response.ok) {
+          const nextStatus = (await response.json()) as SynthesisStatus;
+          if (cancelled) return;
+          setStatus(nextStatus);
+          if (nextStatus.ready_for_overview || nextStatus.terminal) return;
+        }
+      } catch {
+        // The timed local fallback below still gets the user to the overview.
+      }
+      if (cancelled) return;
+      if (Date.now() - startedAt >= STATUS_TIMEOUT_MS) {
+        setStatusTimedOut(true);
+        return;
+      }
+      timeout = setTimeout(poll, STATUS_POLL_MS);
+    }
+
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timeout) clearTimeout(timeout);
+    };
+  }, [workspaceId]);
 
   return (
     <div className="grid min-h-screen place-items-center bg-canvas px-6">
@@ -46,12 +100,20 @@ export default function SynthesisClient() {
         <GradientMark variant="loops" size={120} />
         <div className="text-center">
           <h1 className="text-[20px] font-semibold tracking-tight text-ink">
-            {done ? "Draft ready" : `${BRAND.name} is synthesizing`}
+            {synthesisBlocked
+              ? "Synthesis needs attention"
+              : done
+                ? "Draft ready"
+                : `${BRAND.name} is synthesizing`}
           </h1>
           <p className="mt-1 text-[12.5px] text-ink-secondary">
-            {done
+            {synthesisBlocked
+              ? "The latest synthesis run finished without an overview. Check the run before opening the process map."
+              : done
               ? "Your process map is ready for review."
-              : "Turning captures into a versioned, evidence-anchored map."}
+              : animationDone && !backendDone
+                ? "Waiting for the latest synthesis run to finish."
+                : "Turning captures into a versioned, evidence-anchored map."}
           </p>
         </div>
         <ol className="w-full space-y-2 rounded-lg border border-subtle bg-surface p-4 shadow-card">

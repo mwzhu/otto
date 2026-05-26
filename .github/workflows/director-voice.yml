@@ -1,0 +1,68 @@
+name: Director Voice
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  smoke:
+    name: TypeScript and director voice smoke
+    runs-on: ubuntu-latest
+    env:
+      UV_CACHE_DIR: /tmp/otto-uv-cache
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: otto-frontend/package-lock.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: agents/director/uv.lock
+
+      - name: Install frontend dependencies
+        working-directory: otto-frontend
+        run: npm ci
+
+      - name: Install director worker dependencies
+        working-directory: agents/director
+        run: uv sync --locked --no-dev
+
+      - name: Type-check frontend
+        working-directory: otto-frontend
+        run: npm exec tsc -- --noEmit
+
+      - name: Build frontend
+        working-directory: otto-frontend
+        run: OTTO_DEV_AUTH_BYPASS=false npm run build
+
+      - name: Check diff whitespace
+        run: git diff --check
+
+      - name: Run database integration tests
+        working-directory: otto-frontend
+        env:
+          OTTO_REQUIRE_DOCKER_TESTS: "true"
+        run: npm exec vitest -- tests/phase0/db.integration.test.ts tests/phase1/db.integration.test.ts
+
+      - name: Run director voice smoke eval
+        working-directory: otto-frontend
+        run: npm run eval:director:smoke
+
+      - name: Build director worker container
+        working-directory: otto-frontend
+        run: npm run eval:director:container

@@ -14,6 +14,8 @@ type AppDb = NeonDb | NodePgDb;
 
 let pool: Pool | NodePgPool | null = null;
 let db: AppDb | null = null;
+let servicePool: Pool | NodePgPool | null = null;
+let serviceDb: AppDb | null = null;
 
 export function getDb() {
   if (!db) {
@@ -29,6 +31,20 @@ export function getDb() {
   return db;
 }
 
+export function getServiceDb() {
+  if (!serviceDb) {
+    const connectionString = requireEnv("DATABASE_SERVICE_URL");
+    if (isLocalPostgresUrl(connectionString)) {
+      servicePool = new NodePgPool({ connectionString });
+      serviceDb = drizzleNodePostgres(servicePool, { schema });
+    } else {
+      servicePool = new Pool({ connectionString });
+      serviceDb = drizzle(servicePool, { schema });
+    }
+  }
+  return serviceDb;
+}
+
 export async function setOrgContext(
   tx: Pick<ReturnType<typeof getDb>, "execute">,
   orgId: string,
@@ -38,8 +54,11 @@ export async function setOrgContext(
 
 export async function closeDb() {
   await pool?.end();
+  await servicePool?.end();
   pool = null;
   db = null;
+  servicePool = null;
+  serviceDb = null;
 }
 
 function isLocalPostgresUrl(connectionString: string) {

@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://otto.local/schemas/claim-subject-fields.schema.json",
+  "title": "ClaimSubjectFields",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "allowed"],
+  "properties": {
+    "version": { "type": "integer", "minimum": 1 },
+    "allowed": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["subject_type", "fields"],
+        "properties": {
+          "subject_type": { "type": "string" },
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["field", "value_schema"],
+              "properties": {
+                "field": { "type": "string" },
+                "value_schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["type"],
+                  "properties": {
+                    "type": {
+                      "oneOf": [
+                        { "type": "string" },
+                        {
+                          "type": "array",
+                          "items": { "type": "string" },
+                          "minItems": 1
+                        }
+                      ]
+                    },
+                    "required": {
+                      "type": "array",
+                      "items": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

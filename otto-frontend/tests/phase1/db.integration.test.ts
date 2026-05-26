@@ -3,6 +3,7 @@ import { Client } from "pg";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { directorSlotDefinitions } from "@/lib/interview/director/slot-schema";
 
 const root = process.cwd();
 const image = "pgvector/pgvector:pg16";
@@ -35,11 +36,95 @@ const week5SynthesisCandidateId = "81818181-8181-5181-8181-818181818181";
 const week5SynthesisEvidenceId = "82828282-8282-5282-8282-828282828282";
 const week5LocalCaptureId = "83838383-8383-5383-8383-838383838383";
 const week5LocalArtifactId = "84848484-8484-5484-8484-848484848484";
+const recoveredVerificationCaptureId = "85858585-8585-5585-8585-858585858585";
+const recoveredVerificationDecisionId = "86868686-8686-5686-8686-868686868686";
+const recoveredVerificationMarkerId = "87878787-8787-5787-8787-878787878787";
+const asrVerificationCaptureId = "88888888-8888-5888-8888-888888888888";
+const bareAsrTranscriptId = "89898989-8989-5898-8989-898989898990";
+const livekitDeepgramTranscriptId = "90909090-9090-5909-8909-909090909091";
+const livekitDeepgramTranscriptContinuationId = "94949494-9494-5949-8949-949494949494";
+const ttsVerificationCaptureId = "91919191-9191-5919-8919-919191919191";
+const bareTtsDecisionId = "92929292-9292-5929-8929-929292929292";
+const livekitCartesiaDecisionId = "93939393-9393-5939-8939-939393939393";
+const targetedClaimCaptureId = "96969696-9696-5969-8969-969696969696";
+const hardRequiredToolCaptureId = "97979797-9797-5979-8979-979797979797";
+const hardRequiredClaimCaptureId = "98989898-9898-5989-8989-989898989898";
+const softMalformedClaimCaptureId = "9a9a9a9a-9a9a-5a9a-8a9a-9a9a9a9a9a9a";
+const softMalformedClaimCandidateId = "9b9b9b9b-9b9b-5b9b-8b9b-9b9b9b9b9b9b";
+const invalidSlotPathCaptureId = "9c9c9c9c-9c9c-5c9c-8c9c-9c9c9c9c9c9c";
+const sanitizedDecisionCaptureId = "9d9d9d9d-9d9d-5d9d-8d9d-9d9d9d9d9d9d";
+const sanitizedTranscriptMetadataCaptureId =
+  "9d1d9d1d-9d1d-5d1d-8d1d-9d1d9d1d9d1d";
+const mismatchedTurnIndexCaptureId = "9e9e9e9e-9e9e-5e9e-8e9e-9e9e9e9e9e9e";
+const pendingOpeningResumeCaptureId = "9f9f9f9f-9f9f-5f9f-8f9f-9f9f9f9f9f9f";
+const priorityCoverageCaptureId = "99999999-9999-5999-8999-999999999999";
+const unknownDeliveryCompletionCaptureId = "a1a1a1a1-a1a1-5a1a-8a1a-a1a1a1a1a1a1";
+const duplicateVendorAuditCaptureId = "a2a2a2a2-a2a2-5a2a-8a2a-a2a2a2a2a2a2";
+const recentConversationContextCaptureId = "a3a3a3a3-a3a3-5a3a-8a3a-a3a3a3a3a3a3";
+const recentConversationTranscriptId = "a4a4a4a4-a4a4-5a4a-8a4a-a4a4a4a4a4a4";
+const recentConversationDecisionId = "a5a5a5a5-a5a5-5a5a-8a5a-a5a5a5a5a5a5";
+const duplicateProcessCaptureId = "a6a6a6a6-a6a6-5a6a-8a6a-a6a6a6a6a6a6";
+const duplicateProcessEvidenceAId = "a7a7a7a7-a7a7-5a7a-8a7a-a7a7a7a7a7a7";
+const duplicateProcessEvidenceBId = "a8a8a8a8-a8a8-5a8a-8a8a-a8a8a8a8a8a8";
+const duplicateCandidateVerificationCaptureId =
+  "a9a9a9a9-a9a9-5a9a-8a9a-a9a9a9a9a9a9";
+const duplicateCandidateVerificationIdA =
+  "b1b1b1b1-b1b1-5b1b-8b1b-b1b1b1b1b1b1";
+const duplicateCandidateVerificationIdB =
+  "b2b2b2b2-b2b2-5b2b-8b2b-b2b2b2b2b2b2";
+const missingTurnEvidenceCaptureId = "b3b3b3b3-b3b3-5b3b-8b3b-b3b3b3b3b3b3";
+const missingTurnEvidenceDecisionId = "b4b4b4b4-b4b4-5b4b-8b4b-b4b4b4b4b4b4";
+const badDeliveryFidelityCaptureId =
+  "b5b5b5b5-b5b5-5b5b-8b5b-b5b5b5b5b5b5";
+const badDeliveryFidelityTranscriptId =
+  "b6b6b6b6-b6b6-5b6b-8b6b-b6b6b6b6b6b6";
+const badDeliveryFidelityEvidenceId =
+  "b7b7b7b7-b7b7-5b7b-8b7b-b7b7b7b7b7b7";
+const badDeliveryFidelityDecisionId =
+  "b8b8b8b8-b8b8-5b8b-8b8b-b8b8b8b8b8b8";
+const badPromptFidelityCaptureId = "b9b9b9b9-b9b9-5b9b-8b9b-b9b9b9b9b9b9";
+const badPromptFidelityDecisionId = "c1c1c1c1-c1c1-5c1c-8c1c-c1c1c1c1c1c1";
+const badCompletionDeliveryFidelityCaptureId =
+  "c2c2c2c2-c2c2-5c2c-8c2c-c2c2c2c2c2c2";
+const staleBrowserCompletionCaptureId =
+  "c0c0c0c0-c0c0-5c0c-8c0c-c0c0c0c0c0c0";
+const staleBrowserCompletionDecisionId =
+  "c9c9c9c9-c9c9-5c9c-8c9c-c9c9c9c9c9c9";
+const completedTurnIngestCaptureId =
+  "d0d0d0d0-d0d0-5d0d-8d0d-d0d0d0d0d0d0";
+const completedInternalWriteCaptureId =
+  "d1d1d1d1-d1d1-5d1d-8d1d-d1d1d1d1d1d1";
+const completedIdempotentReplayCaptureId =
+  "d2d2d2d2-d2d2-5d2d-8d2d-d2d2d2d2d2d2";
+const completionLockCaptureId = "d3d3d3d3-d3d3-5d3d-8d3d-d3d3d3d3d3d3";
+const badDeliveryUpdateCaptureId =
+  "d4d4d4d4-d4d4-5d4d-8d4d-d4d4d4d4d4d4";
+const badDeliveryUpdateDecisionId =
+  "d5d5d5d5-d5d5-5d5d-8d5d-d5d5d5d5d5d5";
+const twoCallCostCaptureId = "c3c3c3c3-c3c3-5c3c-8c3c-c3c3c3c3c3c3";
+const twoCallCostDecisionId = "c4c4c4c4-c4c4-5c4c-8c4c-c4c4c4c4c4c4";
+const cacheHitRateCaptureId = "c5c5c5c5-c5c5-5c5c-8c5c-c5c5c5c5c5c5";
+const voiceTimeoutFallbackCaptureId =
+  "c5f5c5f5-c5f5-55c5-85c5-c5f5c5f5c5f5";
+const voiceTimeoutFallbackDecisionId =
+  "c5e5c5e5-c5e5-55e5-85e5-c5e5c5e5c5e5";
+const streamedVoiceCaptureId = "c8c8c8c8-c8c8-5c8c-8c8c-c8c8c8c8c8c8";
+const streamedVoiceDecisionId = "c9c8c9c8-c9c8-59c8-89c8-c9c8c9c8c9c8";
+const requiredSlotEvidenceCaptureId =
+  "c6c6c6c6-c6c6-5c6c-8c6c-c6c6c6c6c6c6";
+const requiredClaimEvidenceCaptureId =
+  "c7c7c7c7-c7c7-5c7c-8c7c-c7c7c7c7c7c7";
 
 let connectionString = "";
 let appClient: Client;
+const hasDocker = canUseDocker();
+const requiresDocker = process.env.CI === "true" || process.env.OTTO_REQUIRE_DOCKER_TESTS === "true";
 
-describe("Phase 1 database integration", () => {
+if (requiresDocker && !hasDocker) {
+  throw new Error("Docker is required for database integration tests in CI.");
+}
+
+describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
   beforeAll(async () => {
     ensureDocker();
     cleanupContainer();
@@ -61,6 +146,8 @@ describe("Phase 1 database integration", () => {
 
     applyMigration("0000_phase0_foundations.sql");
     applyMigration("0001_phase1_director_intake.sql");
+    applyMigration("0002_workspace_data_tier_real.sql");
+    applyMigration("0003_director_voice_m1.sql");
     execFileSync(
       "docker",
       [
@@ -88,6 +175,7 @@ describe("Phase 1 database integration", () => {
     const port = dockerPort();
     connectionString = `postgres://otto_app:otto_app@127.0.0.1:${port}/otto_test`;
     process.env.DATABASE_URL = connectionString;
+    process.env.DATABASE_SERVICE_URL = `postgres://postgres:postgres@127.0.0.1:${port}/otto_test`;
     process.env.OTTO_DEV_AUTH_BYPASS = "true";
     appClient = new Client({ connectionString });
     await appClient.connect();
@@ -364,6 +452,27 @@ describe("Phase 1 database integration", () => {
       narrative_claims: 1,
       completed_audits: 1,
     });
+
+    const { readDirectorSessionVerification } = await import(
+      "@/lib/interview/director/turn-transaction"
+    );
+    const verification = await readDirectorSessionVerification({
+      orgId,
+      workspaceId,
+      captureSessionId: directorCaptureId,
+      userId,
+      language: "en",
+    });
+
+    expect(verification.synthesis.run_count).toBeGreaterThanOrEqual(1);
+    expect(verification.synthesis.terminal_run_count).toBeGreaterThanOrEqual(1);
+    expect(verification.synthesis.completed_run_count).toBeGreaterThanOrEqual(1);
+    expect(verification.overview.process_cards).toBeGreaterThan(0);
+    expect(verification.overview.evidence_linked_cards).toBeGreaterThan(0);
+    expect(verification.acceptance.has_synthesis_run_for_capture).toBe(true);
+    expect(verification.acceptance.synthesis_terminal_for_capture).toBe(true);
+    expect(verification.acceptance.overview_ready).toBe(true);
+    expect(verification.acceptance.overview_has_evidence_linked_card).toBe(true);
   });
 
   test("Week 5 local document pipeline reads uploaded text and creates multiple normalized candidates", async () => {
@@ -595,6 +704,1014 @@ describe("Phase 1 database integration", () => {
     );
   });
 
+  test("director turn dispatch writes targeted candidate-process claims", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [targetedClaimCaptureId, orgId, workspaceId],
+    );
+
+    const { runDirectorTurn } = await import("@/lib/interview/director/brain");
+    const result = await runDirectorTurn({
+      orgId,
+      workspaceId,
+      captureSessionId: targetedClaimCaptureId,
+      userId,
+      transcriptSegmentIds: [],
+      evidenceIds: [evidenceId],
+      turnIndex: 12,
+      latestUtterance:
+        "I run rev ops. We own forecasting and quote approvals. Quote approvals are painful because finance gets pulled in late. Quote approvals are tracked by approval cycle time.",
+    });
+
+    expect(result.candidate_process_ids.length).toBeGreaterThanOrEqual(2);
+    const rows = await appClient.query(
+      `
+        SELECT cp.proposed_name, c.field, c.value
+        FROM candidate_processes cp
+        JOIN claims c
+          ON c.subject_type = 'candidate_process'
+         AND c.subject_id = cp.id
+        WHERE cp.capture_session_id = $1
+          AND cp.proposed_name = 'Quote Approvals'
+          AND c.field IN ('upstream_dependency', 'kpi')
+          AND c.status = 'active'
+        ORDER BY c.field
+      `,
+      [targetedClaimCaptureId],
+    );
+
+    expect(rows.rows).toEqual([
+      {
+        proposed_name: "Quote Approvals",
+        field: "kpi",
+        value: { name: "approval cycle time" },
+      },
+      {
+        proposed_name: "Quote Approvals",
+        field: "upstream_dependency",
+        value: { name: "finance" },
+      },
+    ]);
+  });
+
+  test("director dispatch rolls back chosen-intent hard enrichment failures", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [hardRequiredToolCaptureId, orgId, workspaceId],
+    );
+
+    const { dispatchDirectorTurnPlan } = await import("@/lib/interview/director/brain");
+    const chosenIntent = {
+      intent: "capture_metrics",
+      target_slot: "metrics.kpis",
+      target_process: "Quote Approvals",
+      score: 100,
+      reason: "The metric answer is the selected intent for this turn.",
+    };
+
+    await expect(
+      dispatchDirectorTurnPlan({
+        orgId,
+        workspaceId,
+        captureSessionId: hardRequiredToolCaptureId,
+        userId,
+        latestUtterance: "Quote approvals are measured by approval cycle time.",
+        transcriptSegmentIds: [],
+        evidenceIds: [evidenceId],
+        turnIndex: 44,
+        plannedAgentUtterance: "What target cycle time do you manage toward?",
+        plan: {
+          utterance_type: "substantive_answer",
+          slot_updates: [],
+          claims: [],
+          tool_calls: [
+            {
+              name: "recordProcess",
+              arguments: { name: "Quote Approvals", confidence: 0.9 },
+            },
+            {
+              name: "recordCandidateProcessClaim",
+              arguments: {
+                targetProcess: "Quote Approvals",
+                field: "metric_not_in_allowlist",
+                value: { name: "approval cycle time" },
+                confidence: 0.8,
+              },
+            },
+          ],
+          contradiction_signals: [],
+          current_phase: "expand",
+          proposed_next_phase: "enrich",
+          phase_transition_ready: true,
+          ranked_intents: [chosenIntent],
+          chosen_intent: chosenIntent,
+        },
+      }),
+    ).rejects.toThrow(/Required director tool failed for capture_metrics/);
+
+    const rows = await appClient.query(
+      `
+        SELECT
+          (SELECT count(*)::int
+             FROM candidate_processes
+            WHERE capture_session_id = $1) AS candidates,
+          (SELECT count(*)::int
+             FROM agent_decision_log
+            WHERE capture_session_id = $1) AS decisions,
+          (SELECT count(*)::int
+             FROM follow_up_tasks
+            WHERE capture_session_id = $1) AS follow_ups
+      `,
+      [hardRequiredToolCaptureId],
+    );
+
+    expect(rows.rows[0]).toEqual({
+      candidates: 0,
+      decisions: 0,
+      follow_ups: 0,
+    });
+  });
+
+  test("recordProcess serializes duplicate candidate creation and merges evidence", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [duplicateProcessCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO evidence (id, org_id, workspace_id, source_type, evidence_label, quote)
+        VALUES
+          ($1, $3, $4, 'transcript_segment', 'stated_director', 'Quote approvals are weekly.'),
+          ($2, $3, $4, 'transcript_segment', 'stated_director', 'Quote approvals also use Salesforce.')
+        ON CONFLICT (id) DO NOTHING
+      `,
+      [
+        duplicateProcessEvidenceAId,
+        duplicateProcessEvidenceBId,
+        orgId,
+        workspaceId,
+      ],
+    );
+
+    const lockClient = new Client({ connectionString });
+    await lockClient.connect();
+    const { recordProcess } = await import("@/lib/interview/director/tools");
+    let settled = false;
+    let creation: Promise<unknown> | null = null;
+    try {
+      await lockClient.query("BEGIN");
+      await lockClient.query(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 13))",
+        [`${duplicateProcessCaptureId}:candidate_process:quote approvals`],
+      );
+
+      creation = recordProcess({
+        orgId,
+        workspaceId,
+        captureSessionId: duplicateProcessCaptureId,
+        userId,
+      }, {
+        name: "Quote Approvals",
+        frequency: "weekly",
+        evidenceIds: [duplicateProcessEvidenceAId],
+      }).then((candidate) => {
+        settled = true;
+        return candidate;
+      });
+      await delay(150);
+      expect(settled).toBe(false);
+
+      await lockClient.query("COMMIT");
+      const candidate = await creation;
+      expect((candidate as { proposedName: string }).proposedName).toBe(
+        "Quote Approvals",
+      );
+    } finally {
+      await lockClient.query("ROLLBACK").catch(() => undefined);
+      await lockClient.end().catch(() => undefined);
+    }
+
+    await recordProcess({
+      orgId,
+      workspaceId,
+      captureSessionId: duplicateProcessCaptureId,
+      userId,
+    }, {
+      name: "quote approvals",
+      proposedFunction: "Revenue Operations",
+      evidenceIds: [duplicateProcessEvidenceBId],
+    });
+
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    const rows = await appClient.query(
+      `
+        SELECT count(DISTINCT cp.id)::int AS candidates,
+               max(proposed_name) AS proposed_name,
+               max(proposed_function) AS proposed_function,
+               array_agg(DISTINCT evidence_id ORDER BY evidence_id) AS evidence_ids
+        FROM candidate_processes cp
+        CROSS JOIN LATERAL unnest(cp.evidence_ids) AS evidence_id
+        WHERE cp.capture_session_id = $1
+          AND lower(cp.proposed_name) = 'quote approvals'
+      `,
+      [duplicateProcessCaptureId],
+    );
+
+    expect(rows.rows[0]).toEqual({
+      candidates: 1,
+      proposed_name: "Quote Approvals",
+      proposed_function: "Revenue Operations",
+      evidence_ids: [duplicateProcessEvidenceAId, duplicateProcessEvidenceBId].sort(),
+    });
+  }, 30_000);
+
+  test("director dispatch rolls back malformed generic claims required by chosen intent", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [hardRequiredClaimCaptureId, orgId, workspaceId],
+    );
+
+    const { dispatchDirectorTurnPlan } = await import("@/lib/interview/director/brain");
+    const chosenIntent = {
+      intent: "capture_metrics",
+      target_slot: "metrics.kpis",
+      target_process: "Quote Approvals",
+      score: 100,
+      reason: "The metric claim is the selected intent for this turn.",
+    };
+
+    await expect(
+      dispatchDirectorTurnPlan({
+        orgId,
+        workspaceId,
+        captureSessionId: hardRequiredClaimCaptureId,
+        userId,
+        latestUtterance: "Quote approvals are measured by approval cycle time.",
+        transcriptSegmentIds: [],
+        evidenceIds: [evidenceId],
+        turnIndex: 45,
+        plannedAgentUtterance: "What target cycle time do you manage toward?",
+        plan: {
+          utterance_type: "substantive_answer",
+          slot_updates: [
+            {
+              slot_path: "metrics.kpis",
+              status: "filled",
+              confidence: 0.8,
+              evidence_ids: [evidenceId],
+              priority: 70,
+              value: { metrics: ["approval cycle time"] },
+            },
+          ],
+          claims: [
+            {
+              subject_type: "candidate_process",
+              subject_id: candidateProcessId,
+              field: "metric_not_in_allowlist",
+              value: { name: "approval cycle time" },
+              confidence: 0.8,
+              evidence_ids: [evidenceId],
+            },
+          ],
+          tool_calls: [],
+          contradiction_signals: [],
+          current_phase: "expand",
+          proposed_next_phase: "enrich",
+          phase_transition_ready: true,
+          ranked_intents: [chosenIntent],
+          chosen_intent: chosenIntent,
+        },
+      }),
+    ).rejects.toThrow(/Required director claim failed validation for capture_metrics/);
+
+    const rows = await appClient.query(
+      `
+        SELECT
+          (SELECT count(*)::int
+             FROM slot_states
+            WHERE capture_session_id = $1) AS slots,
+          (SELECT count(*)::int
+             FROM agent_decision_log
+            WHERE capture_session_id = $1) AS decisions,
+          (SELECT count(*)::int
+             FROM follow_up_tasks
+            WHERE capture_session_id = $1) AS follow_ups
+      `,
+      [hardRequiredClaimCaptureId],
+    );
+
+    expect(rows.rows[0]).toEqual({
+      slots: 0,
+      decisions: 0,
+      follow_ups: 0,
+    });
+  });
+
+  test("director dispatch rolls back selected slot updates with stale evidence", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [requiredSlotEvidenceCaptureId, orgId, workspaceId],
+    );
+
+    const { dispatchDirectorTurnPlan } = await import("@/lib/interview/director/brain");
+    const chosenIntent = {
+      intent: "capture_metrics",
+      target_slot: "metrics.kpis",
+      target_process: "Quote Approvals",
+      score: 100,
+      reason: "The metric slot is the selected intent for this turn.",
+    };
+
+    await expect(
+      dispatchDirectorTurnPlan({
+        orgId,
+        workspaceId,
+        captureSessionId: requiredSlotEvidenceCaptureId,
+        userId,
+        latestUtterance: "Quote approvals are measured by approval cycle time.",
+        transcriptSegmentIds: [],
+        evidenceIds: [evidenceId],
+        turnIndex: 48,
+        plannedAgentUtterance: "What target cycle time do you manage toward?",
+        plan: {
+          utterance_type: "substantive_answer",
+          slot_updates: [
+            {
+              slot_path: "metrics.kpis",
+              status: "filled",
+              confidence: 0.8,
+              evidence_ids: [week4EvidenceAId],
+              priority: 70,
+              value: { metrics: ["approval cycle time"] },
+            },
+          ],
+          claims: [],
+          tool_calls: [],
+          contradiction_signals: [],
+          current_phase: "expand",
+          proposed_next_phase: "enrich",
+          phase_transition_ready: true,
+          ranked_intents: [chosenIntent],
+          chosen_intent: chosenIntent,
+        },
+      }),
+    ).rejects.toThrow(/Required director assertion cited invalid evidence for capture_metrics/);
+
+    const rows = await appClient.query(
+      `
+        SELECT
+          (SELECT count(*)::int
+             FROM slot_states
+            WHERE capture_session_id = $1) AS slots,
+          (SELECT count(*)::int
+             FROM agent_decision_log
+            WHERE capture_session_id = $1) AS decisions,
+          (SELECT count(*)::int
+             FROM follow_up_tasks
+            WHERE capture_session_id = $1) AS follow_ups
+      `,
+      [requiredSlotEvidenceCaptureId],
+    );
+
+    expect(rows.rows[0]).toEqual({
+      slots: 0,
+      decisions: 0,
+      follow_ups: 0,
+    });
+  });
+
+  test("director dispatch rolls back required claims with missing evidence", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [requiredClaimEvidenceCaptureId, orgId, workspaceId],
+    );
+
+    const { dispatchDirectorTurnPlan } = await import("@/lib/interview/director/brain");
+    const chosenIntent = {
+      intent: "capture_metrics",
+      target_slot: "metrics.kpis",
+      target_process: "Quote Approvals",
+      score: 100,
+      reason: "The metric claim is the selected intent for this turn.",
+    };
+
+    await expect(
+      dispatchDirectorTurnPlan({
+        orgId,
+        workspaceId,
+        captureSessionId: requiredClaimEvidenceCaptureId,
+        userId,
+        latestUtterance: "Quote approvals are measured by approval cycle time.",
+        transcriptSegmentIds: [],
+        evidenceIds: [evidenceId],
+        turnIndex: 49,
+        plannedAgentUtterance: "What target cycle time do you manage toward?",
+        plan: {
+          utterance_type: "substantive_answer",
+          slot_updates: [],
+          claims: [
+            {
+              subject_type: "candidate_process",
+              subject_id: candidateProcessId,
+              field: "kpi",
+              value: { name: "approval cycle time" },
+              confidence: 0.8,
+              evidence_ids: [],
+            },
+          ],
+          tool_calls: [],
+          contradiction_signals: [],
+          current_phase: "expand",
+          proposed_next_phase: "enrich",
+          phase_transition_ready: true,
+          ranked_intents: [chosenIntent],
+          chosen_intent: chosenIntent,
+        },
+      }),
+    ).rejects.toThrow(/Required director assertion cited invalid evidence for capture_metrics/);
+
+    const rows = await appClient.query(
+      `
+        SELECT
+          (SELECT count(*)::int
+             FROM claims
+            WHERE subject_type = 'candidate_process'
+              AND field = 'kpi'
+              AND subject_id = $2) AS claims,
+          (SELECT count(*)::int
+             FROM agent_decision_log
+            WHERE capture_session_id = $1) AS decisions,
+          (SELECT count(*)::int
+             FROM follow_up_tasks
+            WHERE capture_session_id = $1) AS follow_ups
+      `,
+      [requiredClaimEvidenceCaptureId, candidateProcessId],
+    );
+
+    expect(rows.rows[0]).toEqual({
+      claims: 0,
+      decisions: 0,
+      follow_ups: 0,
+    });
+  });
+
+  test("director dispatch preserves valid turn data when optional claims degrade", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [softMalformedClaimCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      "INSERT INTO candidate_processes (id, org_id, workspace_id, capture_session_id, proposed_name, confidence, evidence_ids) VALUES ($1, $2, $3, $4, 'Quote Approvals', 0.91, ARRAY[$5]::uuid[]) ON CONFLICT (id) DO NOTHING",
+      [
+        softMalformedClaimCandidateId,
+        orgId,
+        workspaceId,
+        softMalformedClaimCaptureId,
+        evidenceId,
+      ],
+    );
+
+    const { dispatchDirectorTurnPlan } = await import("@/lib/interview/director/brain");
+    const chosenIntent = {
+      intent: "capture_outcome",
+      target_slot: "outcomes.business_outcomes",
+      target_process: "Quote Approvals",
+      score: 100,
+      reason: "The outcome claim is the selected intent for this turn.",
+    };
+
+    const result = await dispatchDirectorTurnPlan({
+      orgId,
+      workspaceId,
+      captureSessionId: softMalformedClaimCaptureId,
+      userId,
+      latestUtterance:
+        "Quote approvals protect margin, and the team also mentioned an unknown metric tag.",
+      transcriptSegmentIds: [],
+      evidenceIds: [evidenceId],
+      turnIndex: 46,
+      plannedAgentUtterance: "What margin outcome matters most for that approval flow?",
+      plan: {
+        utterance_type: "substantive_answer",
+        slot_updates: [
+          {
+            slot_path: "outcomes.business_outcomes",
+            status: "filled",
+            confidence: 0.82,
+            evidence_ids: [evidenceId],
+            priority: 65,
+            value: { outcomes: ["protect margin"] },
+          },
+        ],
+        claims: [
+          {
+            subject_type: "candidate_process",
+            subject_id: softMalformedClaimCandidateId,
+            field: "business_outcome",
+            value: { name: "protect margin" },
+            confidence: 0.82,
+            evidence_ids: [evidenceId],
+          },
+          {
+            subject_type: "candidate_process",
+            subject_id: softMalformedClaimCandidateId,
+            field: "metric_not_in_allowlist",
+            value: { name: "unknown metric tag" },
+            confidence: 0.4,
+            evidence_ids: [evidenceId],
+          },
+        ],
+        tool_calls: [],
+        contradiction_signals: [],
+        current_phase: "expand",
+        proposed_next_phase: "enrich",
+        phase_transition_ready: false,
+        ranked_intents: [chosenIntent],
+        chosen_intent: chosenIntent,
+      },
+    });
+
+    expect(result.degraded_quality).toBe(true);
+    const rows = await appClient.query(
+      `
+        SELECT
+          (SELECT count(*)::int
+             FROM slot_states
+            WHERE capture_session_id = $1
+              AND slot_path = 'outcomes.business_outcomes'
+              AND status = 'filled') AS slots,
+          (SELECT count(*)::int
+             FROM claims
+            WHERE subject_type = 'candidate_process'
+              AND subject_id = $2
+              AND field = 'business_outcome'
+              AND status = 'active') AS valid_claims,
+          (SELECT count(*)::int
+             FROM claims
+            WHERE subject_type = 'candidate_process'
+              AND subject_id = $2
+              AND field = 'metric_not_in_allowlist') AS invalid_claims,
+          (SELECT count(*)::int
+             FROM agent_decision_log
+            WHERE capture_session_id = $1
+              AND turn_index = 46
+              AND stage_name = 'director.turn'
+              AND degraded_quality = true) AS degraded_decisions,
+          (SELECT count(*)::int
+             FROM follow_up_tasks
+            WHERE capture_session_id = $1
+              AND task_type = 'low_confidence_claim'
+              AND title = 'Review unsupported director claim: candidate_process.metric_not_in_allowlist') AS unsupported_follow_ups,
+          (SELECT count(*)::int
+             FROM follow_up_tasks
+            WHERE capture_session_id = $1
+              AND task_type = 'low_confidence_claim'
+              AND title = 'Re-extract degraded director turn') AS recovery_follow_ups
+      `,
+      [softMalformedClaimCaptureId, softMalformedClaimCandidateId],
+    );
+
+    expect(rows.rows[0]).toEqual({
+      slots: 1,
+      valid_claims: 1,
+      invalid_claims: 0,
+      degraded_decisions: 1,
+      unsupported_follow_ups: 1,
+      recovery_follow_ups: 1,
+    });
+  });
+
+  test("director dispatch rejects model-invented slot paths before commit", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [invalidSlotPathCaptureId, orgId, workspaceId],
+    );
+
+    const { dispatchDirectorTurnPlan } = await import("@/lib/interview/director/brain");
+    const chosenIntent = {
+      intent: "discover_function",
+      target_slot: "function.name",
+      score: 100,
+      reason: "The director remit is the selected intent for this turn.",
+    };
+
+    await expect(
+      dispatchDirectorTurnPlan({
+        orgId,
+        workspaceId,
+        captureSessionId: invalidSlotPathCaptureId,
+        userId,
+        latestUtterance: "The outcome is margin protection.",
+        transcriptSegmentIds: [],
+        evidenceIds: [evidenceId],
+        turnIndex: 47,
+        plannedAgentUtterance: "What part of the business do you oversee?",
+        plan: {
+          utterance_type: "substantive_answer",
+          slot_updates: [
+            {
+              slot_path: "outcomes.business",
+              status: "filled",
+              confidence: 0.8,
+              evidence_ids: [evidenceId],
+              priority: 98,
+              value: { outcome: "margin protection" },
+            },
+          ],
+          claims: [],
+          tool_calls: [],
+          contradiction_signals: [],
+          current_phase: "orient",
+          proposed_next_phase: "inventory",
+          phase_transition_ready: true,
+          ranked_intents: [chosenIntent],
+          chosen_intent: chosenIntent,
+        },
+      }),
+    ).rejects.toThrow("Unknown director slot path: outcomes.business");
+
+    const rows = await appClient.query(
+      `
+        SELECT
+          (SELECT count(*)::int
+             FROM slot_states
+            WHERE capture_session_id = $1) AS slots,
+          (SELECT count(*)::int
+             FROM agent_decision_log
+            WHERE capture_session_id = $1) AS decisions,
+          (SELECT count(*)::int
+             FROM follow_up_tasks
+            WHERE capture_session_id = $1) AS follow_ups
+      `,
+      [invalidSlotPathCaptureId],
+    );
+
+    expect(rows.rows[0]).toEqual({
+      slots: 0,
+      decisions: 0,
+      follow_ups: 0,
+    });
+  });
+
+  test("director dispatch sanitizes agent-derived decision and follow-up logs", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [sanitizedDecisionCaptureId, orgId, workspaceId],
+    );
+
+    const { dispatchDirectorTurnPlan } = await import("@/lib/interview/director/brain");
+    const chosenIntent = {
+      intent: "discover_processes",
+      target_slot: "process.inventory",
+      score: 100,
+      reason: "The process inventory is the selected intent for this turn.",
+    };
+
+    await dispatchDirectorTurnPlan({
+      orgId,
+      workspaceId,
+      captureSessionId: sanitizedDecisionCaptureId,
+      userId,
+      latestUtterance: "Email me at jane@example.com or call 415-555-1212.",
+      transcriptSegmentIds: [],
+      evidenceIds: [evidenceId],
+      turnIndex: 48,
+      plannedAgentUtterance:
+        "Email jane@example.com or call 415-555-1212 before we map processes.",
+      deliveredAgentUtterance:
+        "Email jane@example.com and SSN 123-45-6789 are not needed.",
+      deliveryStatus: "completed",
+      spokenFraction: 1,
+      plan: {
+        utterance_type: "substantive_answer",
+        slot_updates: [
+          {
+            slot_path: "process.inventory",
+            status: "partial",
+            confidence: 0.7,
+            evidence_ids: [evidenceId],
+            priority: 105,
+            value: { note: "Call 415-555-1212 about process inventory" },
+          },
+        ],
+        claims: [],
+        tool_calls: [
+          {
+            name: "createFollowUpTask",
+            arguments: {
+              taskType: "open_question",
+              title: "Email jane@example.com for process list",
+              description: "Call 415-555-1212 before next interview.",
+              targetType: "capture_session",
+              targetId: sanitizedDecisionCaptureId,
+              priority: 2,
+            },
+          },
+        ],
+        contradiction_signals: [],
+        current_phase: "inventory",
+        proposed_next_phase: "inventory",
+        phase_transition_ready: false,
+        ranked_intents: [chosenIntent],
+        chosen_intent: chosenIntent,
+      },
+    });
+
+    const rows = await appClient.query(
+      `
+        SELECT
+          d.sanitized_agent_utterance,
+          d.delivery_json,
+          d.tool_calls,
+          d.slot_updates,
+          f.title AS follow_up_title,
+          f.description AS follow_up_description,
+          f.context_json AS follow_up_context
+        FROM agent_decision_log d
+        JOIN follow_up_tasks f
+          ON f.capture_session_id = d.capture_session_id
+        WHERE d.capture_session_id = $1
+          AND d.turn_index = 48
+          AND d.stage_name = 'director.turn'
+          AND f.task_type = 'open_question'
+      `,
+      [sanitizedDecisionCaptureId],
+    );
+
+    expect(rows.rowCount).toBe(1);
+    const row = rows.rows[0];
+    const serialized = JSON.stringify(row);
+    expect(serialized).toContain("[PII:email]");
+    expect(serialized).toContain("[PII:phone]");
+    expect(serialized).toContain("[PII:ssn]");
+    expect(serialized).not.toContain("jane@example.com");
+    expect(serialized).not.toContain("415-555-1212");
+    expect(serialized).not.toContain("123-45-6789");
+    expect(row.sanitized_agent_utterance).toBe(
+      "Email [PII:email] or call [PII:phone] before we map processes.",
+    );
+    expect(row.follow_up_title).toBe("Email [PII:email] for process list");
+    expect(row.follow_up_description).toBe(
+      "Call [PII:phone] before next interview.",
+    );
+    expect(row.tool_calls[0].execution).toMatchObject({
+      tool_index: 0,
+      tool_name: "createFollowUpTask",
+      status: "succeeded",
+    });
+    expect(row.tool_calls[0].execution.idempotency_key).toMatch(/^director-tool:/);
+    expect(row.tool_calls[0].execution.latency_ms).toBeGreaterThanOrEqual(0);
+  });
+
+  test("director ingest sanitizes ASR metadata without dropping timing metrics", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [sanitizedTranscriptMetadataCaptureId, orgId, workspaceId],
+    );
+
+    const { resolveDirectorSessionContext, ingestDirectorTurn } = await import(
+      "@/lib/interview/director/turn-transaction"
+    );
+    const context = await resolveDirectorSessionContext(
+      sanitizedTranscriptMetadataCaptureId,
+    );
+
+    const ingest = await ingestDirectorTurn({
+      context,
+      transcriptSegments: [
+        {
+          speaker: "director",
+          speaker_role: "director",
+          start_ms: 1200,
+          end_ms: 2600,
+          text: "Forecasting happens weekly.",
+          confidence: 0.94,
+          timing_source: "asr_metrics",
+          metadata_json: {
+            source: "livekit_agents",
+            provider: "deepgram",
+            metrics: {
+              transcription_delay: 0.24,
+              end_of_turn_delay: 0.41,
+            },
+            raw_debug: {
+              email: "director@example.com",
+              phone: "415-555-1212",
+              ssn: "123-45-6789",
+            },
+          },
+        },
+      ],
+    });
+
+    const rows = await appClient.query(
+      `
+        SELECT metadata_json
+          FROM transcript_segments
+         WHERE id = $1
+      `,
+      [ingest.transcript_segment_ids[0]],
+    );
+
+    expect(rows.rowCount).toBe(1);
+    const metadata = rows.rows[0].metadata_json;
+    expect(metadata).toMatchObject({
+      source: "livekit_agents",
+      provider: "deepgram",
+      metrics: {
+        transcription_delay: 0.24,
+        end_of_turn_delay: 0.41,
+      },
+      raw_debug: {
+        email: "[PII:email]",
+        phone: "[PII:phone]",
+        ssn: "[PII:ssn]",
+      },
+    });
+    const serialized = JSON.stringify(metadata);
+    expect(serialized).not.toContain("director@example.com");
+    expect(serialized).not.toContain("415-555-1212");
+    expect(serialized).not.toContain("123-45-6789");
+  });
+
+  test("director internal turn references reject mismatched turn indexes", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [mismatchedTurnIndexCaptureId, orgId, workspaceId],
+    );
+
+    const { assertDirectorTurnReferences, ingestDirectorTurn } = await import(
+      "@/lib/interview/director/turn-transaction"
+    );
+    const context = {
+      orgId,
+      workspaceId,
+      captureSessionId: mismatchedTurnIndexCaptureId,
+      userId,
+      language: "en",
+    };
+    const ingested = await ingestDirectorTurn({
+      context,
+      transcriptSegments: [
+        {
+          speaker: "director",
+          speaker_role: "director",
+          start_ms: 1000,
+          end_ms: 2200,
+          text: "Quote approvals are weekly.",
+          timing_source: "asr_metrics",
+          metadata_json: {
+            source: "livekit_agents",
+            provider: "deepgram",
+            timing: "started_stopped_speaking_at",
+          },
+        },
+      ],
+    });
+
+    await expect(
+      assertDirectorTurnReferences({
+        context,
+        transcriptSegmentIds: ingested.transcript_segment_ids,
+        evidenceIds: ingested.evidence_ids,
+        expectedTurnIndex: ingested.turn_index + 1,
+      }),
+    ).rejects.toThrow(
+      "Director turn_index must match the ingested transcript segment turn_index.",
+    );
+    await expect(
+      assertDirectorTurnReferences({
+        context,
+        transcriptSegmentIds: ingested.transcript_segment_ids,
+        evidenceIds: ingested.evidence_ids,
+        expectedTurnIndex: ingested.turn_index,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  test("director planning context distinguishes pending and terminal opening prompts", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [pendingOpeningResumeCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO agent_decision_log (
+          org_id,
+          workspace_id,
+          capture_session_id,
+          turn_index,
+          stage_name,
+          ts_start,
+          ts_end,
+          sanitized_agent_utterance,
+          prompt_template_id,
+          prompt_template_version,
+          delivery_json
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          0,
+          'director.opening',
+          now(),
+          now(),
+          'What part of the business do you oversee?',
+          'director.opening',
+          '1',
+          '{"delivery_status":"pending","spoken_fraction":0}'::jsonb
+        )
+        ON CONFLICT (capture_session_id, turn_index, stage_name)
+        WHERE capture_session_id IS NOT NULL
+          AND turn_index IS NOT NULL
+          AND stage_name IS NOT NULL
+        DO UPDATE SET delivery_json = excluded.delivery_json
+      `,
+      [orgId, workspaceId, pendingOpeningResumeCaptureId],
+    );
+
+    const { readDirectorPlanningContext } = await import(
+      "@/lib/interview/director/turn-transaction"
+    );
+    const context = {
+      orgId,
+      workspaceId,
+      captureSessionId: pendingOpeningResumeCaptureId,
+      userId,
+      language: "en",
+    };
+    const pendingContext = await readDirectorPlanningContext(context);
+    expect(pendingContext.has_opening_prompt).toBe(true);
+    expect(pendingContext.has_terminal_opening_prompt).toBe(false);
+    expect(pendingContext.opening_prompt_delivery_status).toBe("pending");
+
+    await appClient.query(
+      `
+        UPDATE agent_decision_log
+        SET delivery_json = '{"delivery_status":"completed","spoken_fraction":1}'::jsonb
+        WHERE capture_session_id = $1
+          AND turn_index = 0
+          AND stage_name = 'director.opening'
+      `,
+      [pendingOpeningResumeCaptureId],
+    );
+    const terminalContext = await readDirectorPlanningContext(context);
+    expect(terminalContext.has_opening_prompt).toBe(true);
+    expect(terminalContext.has_terminal_opening_prompt).toBe(true);
+    expect(terminalContext.opening_prompt_delivery_status).toBe("completed");
+  });
+
   test("Week 5 API routes accept real requests for intake and artifact completion", async () => {
     const priorAnthropic = process.env.ANTHROPIC_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
@@ -639,10 +1756,32 @@ describe("Phase 1 database integration", () => {
       const apiWorkspaceId = workspaceJson.workspace.id as string;
       const apiOrgId = workspaceJson.workspace.orgId as string;
 
+      const forgedInterviewResponse = await interviewsRoute.POST(
+        apiRequest("http://otto.test/api/director-interviews", {
+          idempotencyKey: "api-interview-forged-context",
+          body: {
+            workspace_id: apiWorkspaceId,
+            language: "en",
+            consent_acknowledged: true,
+            consent_text_version: "director_voice_v1",
+            org_id: "11111111-1111-4111-8111-111111111111",
+            user_id: "33333333-3333-4333-8333-333333333333",
+          },
+        }),
+      );
+      expect(forgedInterviewResponse.status).toBe(400);
+      const forgedInterviewJson = await forgedInterviewResponse.json();
+      expect(forgedInterviewJson.error.issues[0].code).toBe("unrecognized_keys");
+
       const interviewResponse = await interviewsRoute.POST(
         apiRequest("http://otto.test/api/director-interviews", {
           idempotencyKey: "api-interview",
-          body: { workspace_id: apiWorkspaceId, language: "en" },
+          body: {
+            workspace_id: apiWorkspaceId,
+            language: "en",
+            consent_acknowledged: true,
+            consent_text_version: "director_voice_v1",
+          },
         }),
       );
       expect(interviewResponse.status).toBe(201);
@@ -670,6 +1809,131 @@ describe("Phase 1 database integration", () => {
       expect(turnJson.candidate_process_ids.length).toBeGreaterThan(0);
       const apiEvidenceId = turnJson.evidence[0].id as string;
 
+      await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+        apiOrgId,
+      ]);
+      await appClient.query(
+        `
+          INSERT INTO agent_decision_log (
+            id,
+            org_id,
+            workspace_id,
+            capture_session_id,
+            turn_index,
+            stage_name,
+            ts_start,
+            sanitized_agent_utterance,
+            prompt_template_id,
+            prompt_template_version,
+            delivery_json
+          )
+          VALUES
+            (
+              'd4d4d4d4-d4d4-5d4d-8d4d-d4d4d4d4d4d4',
+              $1,
+              $2,
+              $3,
+              88,
+              'director.turn',
+              now() - interval '50 seconds',
+              'Planned completed line.',
+              'director.turn.plan',
+              '1',
+              '{"planned_utterance":"Planned completed line.","delivered_utterance":"Delivered completed line.","delivery_status":"completed","spoken_fraction":1}'::jsonb
+            ),
+            (
+              'd5d5d5d5-d5d5-5d5d-8d5d-d5d5d5d5d5d5',
+              $1,
+              $2,
+              $3,
+              89,
+              'director.notice.asr_stall',
+              now() - interval '40 seconds',
+              'Pending reload line.',
+              'director.notice.asr_stall',
+              '1',
+              '{"planned_utterance":"Pending reload line.","delivery_status":"pending","spoken_fraction":0}'::jsonb
+            ),
+            (
+              'd6d6d6d6-d6d6-5d6d-8d6d-d6d6d6d6d6d6',
+              $1,
+              $2,
+              $3,
+              90,
+              'director.turn',
+              now() - interval '30 seconds',
+              'Full interrupted reload line.',
+              'director.turn.plan',
+              '1',
+              '{"planned_utterance":"Full interrupted reload line.","delivered_utterance":"","delivery_status":"truncated","spoken_fraction":0}'::jsonb
+            ),
+            (
+              'd7d7d7d7-d7d7-5d7d-8d7d-d7d7d7d7d7d7',
+              $1,
+              $2,
+              $3,
+              91,
+              'director.turn',
+              now() - interval '20 seconds',
+              'Full partial reload line.',
+              'director.turn.plan',
+              '1',
+              '{"planned_utterance":"Partial reload line continues after the interruption.","delivered_utterance":"Partial reload line...","delivery_status":"truncated","spoken_fraction":0.3}'::jsonb
+            )
+          ON CONFLICT (id) DO UPDATE SET delivery_json = excluded.delivery_json
+        `,
+        [apiOrgId, apiWorkspaceId, captureSessionId],
+      );
+
+      const turnsHistoryResponse = await turnsRoute.GET(
+        new Request(
+          `http://otto.test/api/director-interviews/${captureSessionId}/turns?workspace_id=${apiWorkspaceId}`,
+        ),
+        { params: Promise.resolve({ captureSessionId }) },
+      );
+      expect(turnsHistoryResponse.status).toBe(200);
+      const turnsHistoryJson = await turnsHistoryResponse.json();
+      const transcriptTexts = turnsHistoryJson.messages.map(
+        (message: { text: string }) => message.text,
+      );
+      expect(transcriptTexts).toContain(
+        "We run renewal review weekly in Salesforce. The owner is Revenue Operations, and only Pat knows the exception rules.",
+      );
+      expect(transcriptTexts).toContain("Delivered completed line.");
+      expect(transcriptTexts).toContain("Partial reload line...");
+      expect(transcriptTexts).not.toContain("Planned completed line.");
+      expect(transcriptTexts).not.toContain("Pending reload line.");
+      expect(transcriptTexts).not.toContain("Full interrupted reload line.");
+      expect(transcriptTexts).not.toContain(
+        "Partial reload line continues after the interruption.",
+      );
+      await appClient.query(
+        `DELETE FROM agent_decision_log
+          WHERE id IN (
+            'd4d4d4d4-d4d4-5d4d-8d4d-d4d4d4d4d4d4',
+            'd5d5d5d5-d5d5-5d5d-8d5d-d5d5d5d5d5d5'
+          )`,
+      );
+
+      const forgedTurnResponse = await turnsRoute.POST(
+        apiRequest(
+          `http://otto.test/api/director-interviews/${captureSessionId}/turns`,
+          {
+            idempotencyKey: "api-turn-forged-context",
+            body: {
+              workspace_id: apiWorkspaceId,
+              utterance: "This should not be accepted with forged context.",
+              org_id: "11111111-1111-4111-8111-111111111111",
+              user_id: "33333333-3333-4333-8333-333333333333",
+            },
+          },
+        ),
+        { params: Promise.resolve({ captureSessionId }) },
+      );
+      expect(forgedTurnResponse.status).toBe(400);
+      const forgedTurnJson = await forgedTurnResponse.json();
+      expect(forgedTurnJson.error.issues[0].code).toBe("unrecognized_keys");
+
       const coverageResponse = await coverageRoute.GET(
         new Request(
           `http://otto.test/api/director-interviews/${captureSessionId}/coverage?workspace_id=${apiWorkspaceId}`,
@@ -690,6 +1954,24 @@ describe("Phase 1 database integration", () => {
       const evidenceJson = await evidenceResponse.json();
       expect(evidenceJson.evidence.id).toBe(apiEvidenceId);
 
+      const forgedCompleteResponse = await completeRoute.POST(
+        apiRequest(
+          `http://otto.test/api/director-interviews/${captureSessionId}/complete`,
+          {
+            idempotencyKey: "api-complete-forged-context",
+            body: {
+              workspace_id: apiWorkspaceId,
+              org_id: "11111111-1111-4111-8111-111111111111",
+              user_id: "33333333-3333-4333-8333-333333333333",
+            },
+          },
+        ),
+        { params: Promise.resolve({ captureSessionId }) },
+      );
+      expect(forgedCompleteResponse.status).toBe(400);
+      const forgedCompleteJson = await forgedCompleteResponse.json();
+      expect(forgedCompleteJson.error.issues[0].code).toBe("unrecognized_keys");
+
       const completeResponse = await completeRoute.POST(
         apiRequest(
           `http://otto.test/api/director-interviews/${captureSessionId}/complete`,
@@ -701,6 +1983,20 @@ describe("Phase 1 database integration", () => {
         { params: Promise.resolve({ captureSessionId }) },
       );
       expect(completeResponse.status).toBe(200);
+      expect(sendSpy).toHaveBeenCalledTimes(1);
+
+      const repeatedCompleteResponse = await completeRoute.POST(
+        apiRequest(
+          `http://otto.test/api/director-interviews/${captureSessionId}/complete`,
+          {
+            idempotencyKey: "api-complete-after-completed",
+            body: { workspace_id: apiWorkspaceId },
+          },
+        ),
+        { params: Promise.resolve({ captureSessionId }) },
+      );
+      expect(repeatedCompleteResponse.status).toBe(200);
+      expect(sendSpy).toHaveBeenCalledTimes(2);
 
       const presignResponse = await presignRoute.POST(
         apiRequest(
@@ -749,33 +2045,2544 @@ describe("Phase 1 database integration", () => {
     }
   });
 
-  test("Week 5 degraded director turns are re-extracted through the normal turn path", async () => {
-    await seedWeek5DegradedTurnGraph(appClient);
-
-    const { recoverDegradedDirectorTurnsForOrgs } = await import(
-      "@/lib/inngest/functions"
+  test("LiveKit room route is idempotent across start retries and token refreshes", async () => {
+    const workspacesRoute = await import("@/app/api/workspaces/route");
+    const interviewsRoute = await import("@/app/api/director-interviews/route");
+    const workspaceResponse = await workspacesRoute.POST(
+      apiRequest("http://otto.test/api/workspaces", {
+        idempotencyKey: "livekit-room-workspace",
+        body: {
+          name: "LiveKit Room Retry Workspace",
+          function_name: "Commercial",
+          create_starter_process: false,
+        },
+      }),
     );
-    const result = await recoverDegradedDirectorTurnsForOrgs([orgId]);
+    expect(workspaceResponse.status).toBe(201);
+    const workspaceJson = await workspaceResponse.json();
+    const apiWorkspaceId = workspaceJson.workspace.id as string;
+    const apiOrgId = workspaceJson.workspace.orgId as string;
 
-    expect(result.recovered).toBeGreaterThanOrEqual(1);
+    const interviewResponse = await interviewsRoute.POST(
+      apiRequest("http://otto.test/api/director-interviews", {
+        idempotencyKey: "livekit-room-interview",
+        body: {
+          workspace_id: apiWorkspaceId,
+          language: "en",
+          consent_acknowledged: true,
+          consent_text_version: "director_voice_v1",
+        },
+      }),
+    );
+    expect(interviewResponse.status).toBe(201);
+    const interviewJson = await interviewResponse.json();
+    const captureSessionId = interviewJson.capture_session.id as string;
+
+    const roomPayload = {
+      mode: "livekit" as const,
+      room: `director-${captureSessionId}`,
+      url: "wss://otto.livekit.cloud",
+      token: "join-token",
+      tokenExpiresAt: "2026-05-25T12:00:00.000Z",
+      agentName: "otto-director",
+      agentParticipantIdentity: `otto-director-agent-${captureSessionId}`,
+      dispatchId: "dispatch-1",
+    };
+    const createDirectorRoomToken = vi.fn(async () => roomPayload);
+    vi.doMock("@/lib/adapters/livekit", () => ({
+      createDirectorRoomToken,
+      directorVoiceReadiness: vi.fn(() => ({
+        mode: "livekit",
+        requiresMicrophone: true,
+        missing: [],
+        reason: null,
+      })),
+      DirectorVoiceConfigurationError: class DirectorVoiceConfigurationError extends Error {
+        constructor(public readonly missing: string[]) {
+          super("LiveKit voice is not fully configured.");
+        }
+      },
+    }));
+
+    try {
+      const roomRoute = await import("@/app/api/livekit/director-room/route");
+      const body = {
+        workspace_id: apiWorkspaceId,
+        capture_session_id: captureSessionId,
+      };
+      const first = await roomRoute.POST(
+        apiRequest("http://otto.test/api/livekit/director-room", {
+          idempotencyKey: "livekit-room-start-retry",
+          body,
+        }),
+      );
+      expect(first.status).toBe(200);
+      const firstJson = await first.json();
+
+      const repeated = await roomRoute.POST(
+        apiRequest("http://otto.test/api/livekit/director-room", {
+          idempotencyKey: "livekit-room-start-retry",
+          body,
+        }),
+      );
+      expect(repeated.status).toBe(200);
+      const repeatedJson = await repeated.json();
+
+      expect(repeatedJson).toEqual(firstJson);
+      expect(createDirectorRoomToken).toHaveBeenCalledTimes(1);
+      const participantIdentity = (
+        createDirectorRoomToken as unknown as {
+          mock: { calls: Array<[{ participantIdentity: string }]> };
+        }
+      ).mock.calls[0][0].participantIdentity;
+      expect(participantIdentity).toEqual(expect.any(String));
+      expect(createDirectorRoomToken).toHaveBeenCalledWith({
+        captureSessionId,
+        participantIdentity,
+        language: "en",
+      });
+
+      const refreshed = await roomRoute.POST(
+        apiRequest("http://otto.test/api/livekit/director-room", {
+          idempotencyKey: "livekit-room-refresh-new-token",
+          body,
+        }),
+      );
+      expect(refreshed.status).toBe(200);
+      const refreshedJson = await refreshed.json();
+      expect(refreshedJson).toEqual(firstJson);
+      expect(createDirectorRoomToken).toHaveBeenCalledTimes(2);
+
+      await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+        apiOrgId,
+      ]);
+      await appClient.query(
+        `
+          UPDATE audit_log
+          SET metadata_json = metadata_json - 'agent_participant_identity'
+          WHERE event_type = 'capture.director_voice.vendor_export'
+            AND subject_id = $1
+        `,
+        [captureSessionId],
+      );
+      const repaired = await roomRoute.POST(
+        apiRequest("http://otto.test/api/livekit/director-room", {
+          idempotencyKey: "livekit-room-refresh-repair-agent-identity",
+          body,
+        }),
+      );
+      expect(repaired.status).toBe(200);
+      expect(createDirectorRoomToken).toHaveBeenCalledTimes(3);
+
+      const forgedContext = await roomRoute.POST(
+        apiRequest("http://otto.test/api/livekit/director-room", {
+          idempotencyKey: "livekit-room-forged-context",
+          body: {
+            ...body,
+            org_id: "11111111-1111-4111-8111-111111111111",
+            user_id: "33333333-3333-4333-8333-333333333333",
+          },
+        }),
+      );
+      expect(forgedContext.status).toBe(400);
+      const forgedJson = await forgedContext.json();
+      expect(forgedJson.error.issues[0].code).toBe("unrecognized_keys");
+      expect(forgedJson.error.issues[0].keys).toEqual(
+        expect.arrayContaining(["org_id", "user_id"]),
+      );
+
+      const auditRows = await appClient.query(
+        `
+          SELECT
+            count(*)::int AS vendor_exports,
+            max(metadata_json #>> '{consent,consent_text_version}') AS consent_text_version,
+            bool_or((metadata_json #>> '{consent,consent_acknowledged}')::boolean) AS consent_acknowledged,
+            max(metadata_json #>> '{retention_policy,audio_recording_default}') AS audio_recording_default,
+            bool_or((metadata_json #>> '{retention_policy,audio_recording_enabled}')::boolean) AS audio_recording_enabled,
+            max(metadata_json #>> '{retention_policy,raw_payload_logging}') AS raw_payload_logging,
+            max(metadata_json->>'agent_participant_identity') AS agent_participant_identity,
+            max(metadata_json->>'director_user_id') AS director_user_id,
+            (
+              SELECT metadata_json->>'director_user_id'
+                FROM capture_sessions
+               WHERE id = $1
+            ) AS capture_director_user_id
+          FROM audit_log
+          WHERE event_type = 'capture.director_voice.vendor_export'
+            AND subject_id = $1
+        `,
+        [captureSessionId],
+      );
+      expect(auditRows.rows[0]).toMatchObject({
+        vendor_exports: 1,
+        consent_text_version: "director_voice_v1",
+        consent_acknowledged: true,
+        audio_recording_default: "off",
+        audio_recording_enabled: false,
+        raw_payload_logging: "off",
+        agent_participant_identity: `otto-director-agent-${captureSessionId}`,
+        director_user_id: participantIdentity,
+        capture_director_user_id: participantIdentity,
+      });
+
+      await appClient.query(
+        `
+          UPDATE capture_sessions
+          SET metadata_json = metadata_json || '{"audio_retention_enabled": true, "audio_retention_days": 45}'::jsonb
+          WHERE id = $1
+        `,
+        [captureSessionId],
+      );
+      const retained = await roomRoute.POST(
+        apiRequest("http://otto.test/api/livekit/director-room", {
+          idempotencyKey: "livekit-room-retention-enabled",
+          body,
+        }),
+      );
+      expect(retained.status).toBe(200);
+      expect(createDirectorRoomToken).toHaveBeenCalledTimes(4);
+      const retentionRows = await appClient.query(
+        `
+          SELECT
+            count(*) FILTER (
+              WHERE event_type = 'capture.director_voice.audio_retention_enabled'
+            )::int AS retention_audits,
+            max(metadata_json #>> '{retention_policy,audio_recording_enabled}') FILTER (
+              WHERE event_type = 'capture.director_voice.vendor_export'
+            ) AS vendor_audio_retention_enabled,
+            max(metadata_json #>> '{retention_policy,audio_retention_days}') FILTER (
+              WHERE event_type = 'capture.director_voice.audio_retention_enabled'
+            ) AS retention_days
+          FROM audit_log
+          WHERE subject_id = $1
+            AND event_type IN (
+              'capture.director_voice.vendor_export',
+              'capture.director_voice.audio_retention_enabled'
+            )
+        `,
+        [captureSessionId],
+      );
+      expect(retentionRows.rows[0]).toMatchObject({
+        retention_audits: 1,
+        vendor_audio_retention_enabled: "true",
+        retention_days: "45",
+      });
+
+      await appClient.query(
+        `
+          UPDATE capture_sessions
+          SET metadata_json = metadata_json || jsonb_build_object(
+            'raw_payload_logging_enabled', true,
+            'raw_payload_logging_expires_at', '2026-05-24T00:00:00.000Z'
+          )
+          WHERE id = $1
+        `,
+        [captureSessionId],
+      );
+      const rawLogging = await roomRoute.POST(
+        apiRequest("http://otto.test/api/livekit/director-room", {
+          idempotencyKey: "livekit-room-raw-payload-logging-enabled",
+          body,
+        }),
+      );
+      expect(rawLogging.status).toBe(200);
+      expect(createDirectorRoomToken).toHaveBeenCalledTimes(5);
+      const rawLoggingRows = await appClient.query(
+        `
+          SELECT
+            count(*) FILTER (
+              WHERE event_type = 'capture.director_voice.raw_payload_logging_enabled'
+            )::int AS raw_payload_logging_audits,
+            max(metadata_json #>> '{retention_policy,raw_payload_logging}') FILTER (
+              WHERE event_type = 'capture.director_voice.vendor_export'
+            ) AS vendor_raw_payload_logging,
+            max(metadata_json #>> '{retention_policy,raw_payload_logging_expires_at}') FILTER (
+              WHERE event_type = 'capture.director_voice.raw_payload_logging_enabled'
+            ) AS raw_payload_logging_expires_at
+          FROM audit_log
+          WHERE subject_id = $1
+            AND event_type IN (
+              'capture.director_voice.vendor_export',
+              'capture.director_voice.raw_payload_logging_enabled'
+            )
+        `,
+        [captureSessionId],
+      );
+      expect(rawLoggingRows.rows[0]).toMatchObject({
+        raw_payload_logging_audits: 1,
+        vendor_raw_payload_logging: "debug_window_enabled",
+        raw_payload_logging_expires_at: "2026-05-24T00:00:00.000Z",
+      });
+
+      await appClient.query(
+        "UPDATE capture_sessions SET completed_at = now(), updated_at = now() WHERE id = $1",
+        [captureSessionId],
+      );
+      const completedRoom = await roomRoute.POST(
+        apiRequest("http://otto.test/api/livekit/director-room", {
+          idempotencyKey: "livekit-room-completed-capture",
+          body,
+        }),
+      );
+      expect(completedRoom.status).toBe(409);
+      const completedJson = await completedRoom.json();
+      expect(completedJson.error.message).toBe(
+        "Director interview is already completed.",
+      );
+      expect(createDirectorRoomToken).toHaveBeenCalledTimes(5);
+    } finally {
+      vi.doUnmock("@/lib/adapters/livekit");
+    }
+  });
+
+  test("director session verification flags duplicate vendor export audits", async () => {
+    await seedWeek2Graph(appClient);
     await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
       orgId,
     ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [duplicateVendorAuditCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO audit_log (
+          org_id,
+          workspace_id,
+          user_id,
+          event_type,
+          subject_type,
+          subject_id,
+          metadata_json
+        )
+        SELECT
+          $1,
+          $2,
+          $3,
+          'capture.director_voice.vendor_export',
+          'capture_session',
+          $4,
+          jsonb_build_object(
+            'room_mode', 'livekit',
+            'vendors', jsonb_build_array('livekit', 'deepgram', 'cartesia', 'anthropic'),
+            'vendor_privacy_controls', jsonb_build_object(
+              'vendor_privacy_ack', true,
+              'deepgram_no_store_ack', true,
+              'cartesia_no_retention_ack', true,
+              'anthropic_raw_logging_off_ack', true
+            )
+          )
+        FROM generate_series(1, 2)
+      `,
+      [orgId, workspaceId, userId, duplicateVendorAuditCaptureId],
+    );
+
+    const { readDirectorSessionVerification } = await import(
+      "@/lib/interview/director/turn-transaction"
+    );
+    const verification = await readDirectorSessionVerification({
+      orgId,
+      workspaceId,
+      captureSessionId: duplicateVendorAuditCaptureId,
+      userId,
+      language: "en",
+    });
+
+    expect(verification.vendor_privacy).toMatchObject({
+      vendor_export_audits: 2,
+      livekit_vendor_export_audits: 2,
+      anthropic_vendor_export_audits: 2,
+      privacy_ack_vendor_export_audits: 2,
+    });
+    expect(verification.acceptance.has_vendor_export_audit).toBe(true);
+    expect(verification.acceptance.no_duplicate_vendor_export_audits).toBe(false);
+    expect(verification.failed_acceptance_checks).toContain(
+      "no_duplicate_vendor_export_audits",
+    );
+  });
+
+  test("director session verification flags duplicate candidate process names", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [duplicateCandidateVerificationCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO candidate_processes (
+          id,
+          org_id,
+          workspace_id,
+          capture_session_id,
+          proposed_name,
+          proposed_function
+        )
+        VALUES
+          ($1, $3, $4, $5, 'Quote   Approvals', 'Revenue Operations'),
+          ($2, $3, $4, $5, 'quote approvals', 'Revenue Operations')
+        ON CONFLICT (id) DO NOTHING
+      `,
+      [
+        duplicateCandidateVerificationIdA,
+        duplicateCandidateVerificationIdB,
+        orgId,
+        workspaceId,
+        duplicateCandidateVerificationCaptureId,
+      ],
+    );
+
+    const { readDirectorSessionVerification } = await import(
+      "@/lib/interview/director/turn-transaction"
+    );
+    const verification = await readDirectorSessionVerification({
+      orgId,
+      workspaceId,
+      captureSessionId: duplicateCandidateVerificationCaptureId,
+      userId,
+      language: "en",
+    });
+
+    expect(verification.candidate_process_count).toBe(2);
+    expect(verification.duplicate_candidate_process_name_groups).toBe(1);
+    expect(verification.duplicate_candidate_process_names).toEqual([
+      {
+        normalized_name: "quote approvals",
+        proposed_names: ["Quote   Approvals", "quote approvals"],
+      },
+    ]);
+    expect(verification.acceptance.has_candidate_processes).toBe(true);
+    expect(verification.acceptance.no_duplicate_candidate_process_names).toBe(
+      false,
+    );
+    expect(verification.failed_acceptance_checks).toContain(
+      "no_duplicate_candidate_process_names",
+    );
+  });
+
+  test("director session verification requires decision transcript evidence backing", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [missingTurnEvidenceCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO agent_decision_log (
+          id,
+          org_id,
+          workspace_id,
+          capture_session_id,
+          turn_index,
+          stage_name,
+          ts_start,
+          ts_end,
+          transcript_segment_ids,
+          delivery_json,
+          model
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          1,
+          'director.turn',
+          now() - interval '1 minute',
+          now(),
+          '{}'::uuid[],
+          '{"delivery_status":"completed","spoken_fraction":1}'::jsonb,
+          'claude-haiku-4-5'
+        )
+        ON CONFLICT (id) DO NOTHING
+      `,
+      [
+        missingTurnEvidenceDecisionId,
+        orgId,
+        workspaceId,
+        missingTurnEvidenceCaptureId,
+      ],
+    );
+
+    const { readDirectorSessionVerification } = await import(
+      "@/lib/interview/director/turn-transaction"
+    );
+    const verification = await readDirectorSessionVerification({
+      orgId,
+      workspaceId,
+      captureSessionId: missingTurnEvidenceCaptureId,
+      userId,
+      language: "en",
+    });
+
+    expect(verification.decision_turns).toBe(1);
+    expect(verification.turn_contract).toEqual({
+      decision_turns_with_transcript_segments: 0,
+      decision_turns_with_matching_transcript_segments: 0,
+      decision_turns_with_transcript_evidence: 0,
+    });
+    expect(
+      verification.acceptance.all_decisions_have_ingested_transcript_evidence,
+    ).toBe(false);
+    expect(verification.failed_acceptance_checks).toContain(
+      "all_decisions_have_ingested_transcript_evidence",
+    );
+  });
+
+  test("director session verification requires terminal delivery spoken evidence", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [badDeliveryFidelityCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO transcript_segments (
+          id,
+          org_id,
+          workspace_id,
+          capture_session_id,
+          speaker,
+          speaker_role,
+          text,
+          start_ms,
+          end_ms,
+          turn_index,
+          timing_source,
+          metadata_json
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          'director',
+          'director',
+          'We run quote approvals weekly.',
+          1000,
+          2400,
+          1,
+          'asr_metrics',
+          '{"source":"livekit_agents","provider":"deepgram","timing":"started_stopped_speaking_at"}'::jsonb
+        )
+        ON CONFLICT (id) DO NOTHING
+      `,
+      [
+        badDeliveryFidelityTranscriptId,
+        orgId,
+        workspaceId,
+        badDeliveryFidelityCaptureId,
+      ],
+    );
+    await appClient.query(
+      `
+        INSERT INTO evidence (
+          id,
+          org_id,
+          workspace_id,
+          source_type,
+          source_id,
+          evidence_label,
+          quote
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          'transcript_segment',
+          $4,
+          'stated_director',
+          'We run quote approvals weekly.'
+        )
+        ON CONFLICT (id) DO NOTHING
+      `,
+      [badDeliveryFidelityEvidenceId, orgId, workspaceId, badDeliveryFidelityTranscriptId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO agent_decision_log (
+          id,
+          org_id,
+          workspace_id,
+          capture_session_id,
+          turn_index,
+          stage_name,
+          ts_start,
+          ts_end,
+          transcript_segment_ids,
+          delivery_json,
+          model
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          1,
+          'director.turn',
+          now() - interval '1 minute',
+          now(),
+          ARRAY[$5]::uuid[],
+          jsonb_build_object(
+            'planned_utterance', 'Where does quote approval start?',
+            'delivered_utterance', 'A different sentence.',
+            'delivery_status', 'completed',
+            'spoken_fraction', 1,
+            'latency_ms', jsonb_build_object('turn_total_ms', 900, 'tts_playout_ms', 250),
+            'audio_metadata', jsonb_build_object(
+              'source', 'livekit_agents',
+              'provider', 'cartesia',
+              'playout', 'session.say.wait_for_playout'
+            )
+          ),
+          'claude-haiku-4-5'
+        )
+        ON CONFLICT (id) DO NOTHING
+      `,
+      [
+        badDeliveryFidelityDecisionId,
+        orgId,
+        workspaceId,
+        badDeliveryFidelityCaptureId,
+        badDeliveryFidelityTranscriptId,
+      ],
+    );
+
+    const { readDirectorSessionVerification } = await import(
+      "@/lib/interview/director/turn-transaction"
+    );
+    const verification = await readDirectorSessionVerification({
+      orgId,
+      workspaceId,
+      captureSessionId: badDeliveryFidelityCaptureId,
+      userId,
+      language: "en",
+    });
+
+    expect(verification.delivery).toMatchObject({
+      completed_turns: 1,
+      terminal_delivery_turns: 1,
+      delivery_fidelity_turns: 0,
+    });
+    expect(verification.acceptance.all_delivery_terminal).toBe(true);
+    expect(verification.acceptance.has_audible_tts_delivery).toBe(true);
+    expect(verification.acceptance.all_terminal_delivery_has_spoken_evidence).toBe(
+      false,
+    );
+    expect(verification.failed_acceptance_checks).toContain(
+      "all_terminal_delivery_has_spoken_evidence",
+    );
+  });
+
+  test("director session verification requires voice prompt spoken evidence", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [badPromptFidelityCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO agent_decision_log (
+          id,
+          org_id,
+          workspace_id,
+          capture_session_id,
+          turn_index,
+          stage_name,
+          ts_start,
+          ts_end,
+          transcript_segment_ids,
+          delivery_json,
+          model
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          0,
+          'director.opening',
+          now() - interval '1 minute',
+          now(),
+          '{}'::uuid[],
+          jsonb_build_object(
+            'planned_utterance', 'Hi. What part of the business do you oversee?',
+            'delivered_utterance', 'This was not the opening.',
+            'delivery_status', 'completed',
+            'spoken_fraction', 1,
+            'latency_ms', jsonb_build_object('turn_total_ms', 700, 'tts_playout_ms', 700),
+            'audio_metadata', jsonb_build_object(
+              'source', 'livekit_agents',
+              'provider', 'cartesia',
+              'playout', 'session.say.wait_for_playout'
+            )
+          ),
+          'claude-haiku-4-5'
+        )
+        ON CONFLICT (id) DO NOTHING
+      `,
+      [badPromptFidelityDecisionId, orgId, workspaceId, badPromptFidelityCaptureId],
+    );
+
+    const { readDirectorSessionVerification } = await import(
+      "@/lib/interview/director/turn-transaction"
+    );
+    const verification = await readDirectorSessionVerification({
+      orgId,
+      workspaceId,
+      captureSessionId: badPromptFidelityCaptureId,
+      userId,
+      language: "en",
+    });
+
+    expect(verification.voice_prompts).toMatchObject({
+      prompt_turns: 1,
+      opening_prompt_turns: 1,
+      terminal_prompt_delivery_turns: 1,
+      prompt_delivery_fidelity_turns: 0,
+      configured_tts_runtime_prompt_turns: 0,
+      privacy_configured_tts_runtime_prompt_turns: 0,
+    });
+    expect(verification.acceptance.all_voice_prompts_delivery_terminal).toBe(true);
+    expect(verification.acceptance.opening_prompt_has_tts_playout).toBe(true);
+    expect(verification.acceptance.voice_prompts_have_configured_tts_runtime).toBe(
+      false,
+    );
+    expect(
+      verification.acceptance.voice_prompts_have_privacy_configured_tts_runtime,
+    ).toBe(false);
+    expect(verification.acceptance.all_voice_prompts_have_spoken_evidence).toBe(
+      false,
+    );
+    expect(verification.failed_acceptance_checks).toContain(
+      "all_voice_prompts_have_spoken_evidence",
+    );
+    expect(verification.failed_acceptance_checks).toContain(
+      "voice_prompts_have_configured_tts_runtime",
+    );
+    expect(verification.failed_acceptance_checks).toContain(
+      "voice_prompts_have_privacy_configured_tts_runtime",
+    );
+  });
+
+  test("internal director context resolves identity from capture session only", async () => {
+    const previousServiceToken = process.env.LIVEKIT_AGENT_SERVICE_TOKEN;
+    process.env.LIVEKIT_AGENT_SERVICE_TOKEN = "service-token";
+    const workspacesRoute = await import("@/app/api/workspaces/route");
+    const interviewsRoute = await import("@/app/api/director-interviews/route");
+    const contextRoute = await import(
+      "@/app/api/internal/director-turns/context/route"
+    );
+
+    try {
+      const workspaceResponse = await workspacesRoute.POST(
+        apiRequest("http://otto.test/api/workspaces", {
+          idempotencyKey: "internal-context-boundary-workspace",
+          body: {
+            name: "Internal Context Boundary Workspace",
+            function_name: "Operations",
+            create_starter_process: false,
+          },
+        }),
+      );
+      expect(workspaceResponse.status).toBe(201);
+      const workspaceJson = await workspaceResponse.json();
+      const apiWorkspaceId = workspaceJson.workspace.id as string;
+      const apiOrgId = workspaceJson.workspace.orgId as string;
+
+      const interviewResponse = await interviewsRoute.POST(
+        apiRequest("http://otto.test/api/director-interviews", {
+          idempotencyKey: "internal-context-boundary-interview",
+          body: {
+            workspace_id: apiWorkspaceId,
+            language: "en-US",
+            consent_acknowledged: true,
+            consent_text_version: "director_voice_v1",
+          },
+        }),
+      );
+      expect(interviewResponse.status).toBe(201);
+      const interviewJson = await interviewResponse.json();
+      const captureSessionId = interviewJson.capture_session.id as string;
+
+      const response = await contextRoute.POST(
+        serviceRequest("http://otto.test/api/internal/director-turns/context", {
+          capture_session_id: captureSessionId,
+        }),
+      );
+      expect(response.status).toBe(200);
+      const json = await response.json();
+      expect(json.context).toMatchObject({
+        org_id: apiOrgId,
+        workspace_id: apiWorkspaceId,
+        capture_session_id: captureSessionId,
+        language: "en-US",
+      });
+
+      const forgedResponse = await contextRoute.POST(
+        serviceRequest("http://otto.test/api/internal/director-turns/context", {
+          capture_session_id: captureSessionId,
+          org_id: "11111111-1111-4111-8111-111111111111",
+          workspace_id: "22222222-2222-4222-8222-222222222222",
+          user_id: "33333333-3333-4333-8333-333333333333",
+        }),
+      );
+      expect(forgedResponse.status).toBe(400);
+      const forgedJson = await forgedResponse.json();
+      expect(forgedJson.error.issues[0].code).toBe("unrecognized_keys");
+      expect(forgedJson.error.issues[0].keys).toEqual(
+        expect.arrayContaining(["org_id", "workspace_id", "user_id"]),
+      );
+    } finally {
+      if (previousServiceToken === undefined) {
+        delete process.env.LIVEKIT_AGENT_SERVICE_TOKEN;
+      } else {
+        process.env.LIVEKIT_AGENT_SERVICE_TOKEN = previousServiceToken;
+      }
+    }
+  });
+
+  test("director completion rejects unknown voice delivery states", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO UPDATE SET completed_at = null, updated_at = now()",
+      [unknownDeliveryCompletionCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      "DELETE FROM agent_decision_log WHERE capture_session_id = $1",
+      [unknownDeliveryCompletionCaptureId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO agent_decision_log (
+          org_id,
+          workspace_id,
+          capture_session_id,
+          turn_index,
+          stage_name,
+          ts_start,
+          sanitized_agent_utterance,
+          prompt_template_id,
+          prompt_template_version,
+          delivery_json
+        )
+        VALUES ($1, $2, $3, 1, 'director.turn', now(), 'What systems are involved?', 'director.turn.extract', '1', '{"delivery_status":"mystery"}'::jsonb)
+      `,
+      [orgId, workspaceId, unknownDeliveryCompletionCaptureId],
+    );
+
+    const { getDb, setOrgContext } = await import("@/lib/db/client");
+    const { completeDirectorInterviewInTransaction } = await import(
+      "@/lib/interview/director/completion"
+    );
+    await expect(
+      getDb().transaction(async (tx) => {
+        await setOrgContext(tx, orgId);
+        return completeDirectorInterviewInTransaction(tx, {
+          orgId,
+          workspaceId,
+          captureSessionId: unknownDeliveryCompletionCaptureId,
+          userId,
+          idempotencyKey: "unknown-delivery-complete",
+          source: "livekit_agent",
+        });
+      }),
+    ).rejects.toThrow("pending, unknown, or inconsistent voice delivery evidence");
+
+    const completed = await appClient.query(
+      "SELECT completed_at FROM capture_sessions WHERE id = $1",
+      [unknownDeliveryCompletionCaptureId],
+    );
+    expect(completed.rows[0].completed_at).toBeNull();
+  });
+
+  test("director completion rejects inconsistent terminal delivery evidence", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO UPDATE SET completed_at = null, updated_at = now()",
+      [badCompletionDeliveryFidelityCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      "DELETE FROM agent_decision_log WHERE capture_session_id = $1",
+      [badCompletionDeliveryFidelityCaptureId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO agent_decision_log (
+          org_id,
+          workspace_id,
+          capture_session_id,
+          turn_index,
+          stage_name,
+          ts_start,
+          sanitized_agent_utterance,
+          prompt_template_id,
+          prompt_template_version,
+          delivery_json
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          1,
+          'director.turn',
+          now(),
+          'What systems are involved?',
+          'director.turn.extract',
+          '1',
+          jsonb_build_object(
+            'delivery_status',
+            'completed',
+            'planned_utterance',
+            'What systems are involved?',
+            'delivered_utterance',
+            'What metrics are involved?',
+            'spoken_fraction',
+            1
+          )
+        )
+      `,
+      [orgId, workspaceId, badCompletionDeliveryFidelityCaptureId],
+    );
+
+    const { getDb, setOrgContext } = await import("@/lib/db/client");
+    const { completeDirectorInterviewInTransaction } = await import(
+      "@/lib/interview/director/completion"
+    );
+    await expect(
+      getDb().transaction(async (tx) => {
+        await setOrgContext(tx, orgId);
+        return completeDirectorInterviewInTransaction(tx, {
+          orgId,
+          workspaceId,
+          captureSessionId: badCompletionDeliveryFidelityCaptureId,
+          userId,
+          idempotencyKey: "bad-delivery-fidelity-complete",
+          source: "livekit_agent",
+        });
+      }),
+    ).rejects.toThrow("inconsistent voice delivery evidence");
+
+    const completed = await appClient.query(
+      "SELECT completed_at FROM capture_sessions WHERE id = $1",
+      [badCompletionDeliveryFidelityCaptureId],
+    );
+    expect(completed.rows[0].completed_at).toBeNull();
+  });
+
+  test("internal delivery update rejects completed playout that differs from planned utterance", async () => {
+    const previousServiceToken = process.env.LIVEKIT_AGENT_SERVICE_TOKEN;
+    process.env.LIVEKIT_AGENT_SERVICE_TOKEN = "service-token";
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      `
+        INSERT INTO capture_sessions (
+          id,
+          org_id,
+          workspace_id,
+          capture_type,
+          started_at,
+          metadata_json
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          'director_interview',
+          now(),
+          '{"language":"en","director_user_id":"bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb"}'::jsonb
+        )
+        ON CONFLICT (id) DO UPDATE
+          SET completed_at = null,
+              metadata_json = excluded.metadata_json,
+              updated_at = now()
+      `,
+      [badDeliveryUpdateCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      "DELETE FROM agent_decision_log WHERE capture_session_id = $1",
+      [badDeliveryUpdateCaptureId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO agent_decision_log (
+          id,
+          org_id,
+          workspace_id,
+          capture_session_id,
+          turn_index,
+          stage_name,
+          ts_start,
+          sanitized_agent_utterance,
+          prompt_template_id,
+          prompt_template_version,
+          delivery_json
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          1,
+          'director.turn',
+          now(),
+          'Which systems are involved?',
+          'director.turn.plan',
+          '1',
+          jsonb_build_object(
+            'planned_utterance',
+            'Which systems are involved?',
+            'delivery_status',
+            'pending',
+            'spoken_fraction',
+            0
+          )
+        )
+      `,
+      [
+        badDeliveryUpdateDecisionId,
+        orgId,
+        workspaceId,
+        badDeliveryUpdateCaptureId,
+      ],
+    );
+
+    const deliveryRoute = await import(
+      "@/app/api/internal/director-turns/[turnIndex]/delivery/route"
+    );
+    try {
+      const response = await deliveryRoute.POST(
+        serviceRequest(
+          "http://otto.test/api/internal/director-turns/1/delivery",
+          {
+            capture_session_id: badDeliveryUpdateCaptureId,
+            decision_log_id: badDeliveryUpdateDecisionId,
+            delivery_status: "completed",
+            delivered_utterance: "Which metrics are involved?",
+            spoken_fraction: 1,
+          },
+          "bad-delivery-update",
+        ),
+        { params: Promise.resolve({ turnIndex: "1" }) },
+      );
+
+      expect(response.status).toBe(409);
+      const json = await response.json();
+      expect(json.error.message).toContain("planned utterance");
+      const persisted = await appClient.query(
+        "SELECT delivery_json FROM agent_decision_log WHERE id = $1",
+        [badDeliveryUpdateDecisionId],
+      );
+      expect(persisted.rows[0].delivery_json).toMatchObject({
+        delivery_status: "pending",
+        spoken_fraction: 0,
+      });
+    } finally {
+      if (previousServiceToken === undefined) {
+        delete process.env.LIVEKIT_AGENT_SERVICE_TOKEN;
+      } else {
+        process.env.LIVEKIT_AGENT_SERVICE_TOKEN = previousServiceToken;
+      }
+    }
+  });
+
+  test("browser completion recovers stale pending voice delivery after LiveKit loss", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO UPDATE SET completed_at = null, updated_at = now()",
+      [staleBrowserCompletionCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      "DELETE FROM agent_decision_log WHERE capture_session_id = $1",
+      [staleBrowserCompletionCaptureId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO agent_decision_log (
+          id,
+          org_id,
+          workspace_id,
+          capture_session_id,
+          turn_index,
+          stage_name,
+          ts_start,
+          created_at,
+          updated_at,
+          sanitized_agent_utterance,
+          prompt_template_id,
+          prompt_template_version,
+          delivery_json
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          1,
+          'director.turn',
+          now() - interval '10 seconds',
+          now() - interval '10 seconds',
+          now() - interval '10 seconds',
+          'Which systems are involved?',
+          'director.turn.plan',
+          '1',
+          jsonb_build_object(
+            'planned_utterance',
+            'Which systems are involved?',
+            'delivery_status',
+            'pending',
+            'spoken_fraction',
+            0
+          )
+        )
+      `,
+      [
+        staleBrowserCompletionDecisionId,
+        orgId,
+        workspaceId,
+        staleBrowserCompletionCaptureId,
+      ],
+    );
+
+    const { getDb, setOrgContext } = await import("@/lib/db/client");
+    const { completeDirectorInterviewInTransaction } = await import(
+      "@/lib/interview/director/completion"
+    );
+    const result = await getDb().transaction(async (tx) => {
+      await setOrgContext(tx, orgId);
+      return completeDirectorInterviewInTransaction(tx, {
+        orgId,
+        workspaceId,
+        captureSessionId: staleBrowserCompletionCaptureId,
+        userId,
+        idempotencyKey: "stale-browser-complete",
+        source: "browser",
+      });
+    });
+
+    expect(result.statusCode).toBe(200);
     const rows = await appClient.query(
       `
         SELECT
-          (SELECT count(*)::int FROM candidate_processes WHERE capture_session_id = $1 AND proposed_name = 'Renewal Review Weekly In Salesforce') AS recovered_candidates,
-          (SELECT count(*)::int FROM slot_states WHERE capture_session_id = $1 AND slot_path = 'scope.boundaries' AND status = 'filled') AS recovered_slots,
-          (SELECT count(*)::int FROM agent_decision_log WHERE stage_name = 're_extract_degraded_turns.recovered' AND tool_calls->>'source_agent_decision_log_id' = $2) AS recovered_markers
+          completed_at IS NOT NULL AS completed,
+          (
+            SELECT delivery_json
+            FROM agent_decision_log
+            WHERE id = $2
+          ) AS delivery_json,
+          (
+            SELECT count(*)::int
+            FROM audit_log
+            WHERE subject_id = $1
+              AND event_type = 'capture.director_voice.stale_delivery_recovered'
+          ) AS recovery_audits
+        FROM capture_sessions
+        WHERE id = $1
       `,
-      [directorCaptureId, week5DegradedDecisionId],
+      [staleBrowserCompletionCaptureId, staleBrowserCompletionDecisionId],
+    );
+    expect(rows.rows[0].completed).toBe(true);
+    expect(rows.rows[0].delivery_json).toMatchObject({
+      delivery_status: "failed_text_fallback",
+      delivered_utterance: "Which systems are involved?",
+      spoken_fraction: 0,
+      browser_completion_recovery: true,
+    });
+    expect(rows.rows[0].recovery_audits).toBe(1);
+  });
+
+  test("director completion waits for the shared turn sequence lock", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO UPDATE SET completed_at = null, updated_at = now()",
+      [completionLockCaptureId, orgId, workspaceId],
     );
 
-    expect(rows.rows[0]).toEqual({
-      recovered_candidates: 1,
-      recovered_slots: 1,
-      recovered_markers: 1,
+    const lockClient = new Client({ connectionString });
+    await lockClient.connect();
+    const { getDb, setOrgContext } = await import("@/lib/db/client");
+    const { completeDirectorInterviewInTransaction } = await import(
+      "@/lib/interview/director/completion"
+    );
+    let settled = false;
+    let completion: Promise<unknown> | null = null;
+    try {
+      await lockClient.query("BEGIN");
+      await lockClient.query(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        [completionLockCaptureId],
+      );
+
+      completion = getDb().transaction(async (tx) => {
+        await setOrgContext(tx, orgId);
+        return completeDirectorInterviewInTransaction(tx, {
+          orgId,
+          workspaceId,
+          captureSessionId: completionLockCaptureId,
+          userId,
+          idempotencyKey: "completion-lock",
+          source: "livekit_agent",
+        });
+      }).then((result) => {
+        settled = true;
+        return result;
+      });
+      await delay(150);
+      expect(settled).toBe(false);
+
+      await lockClient.query("COMMIT");
+      const result = await completion;
+      expect((result as { statusCode: number }).statusCode).toBe(200);
+    } finally {
+      await lockClient.query("ROLLBACK").catch(() => undefined);
+      await lockClient.end().catch(() => undefined);
+    }
+
+    const completed = await appClient.query(
+      "SELECT completed_at FROM capture_sessions WHERE id = $1",
+      [completionLockCaptureId],
+    );
+    expect(completed.rows[0].completed_at).not.toBeNull();
+  });
+
+  test("director turn ingest rejects completed capture sessions", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      `
+        INSERT INTO capture_sessions (
+          id,
+          org_id,
+          workspace_id,
+          capture_type,
+          started_at,
+          completed_at
+        )
+        VALUES ($1, $2, $3, 'director_interview', now() - interval '5 minutes', now())
+        ON CONFLICT (id) DO UPDATE SET completed_at = now(), updated_at = now()
+      `,
+      [completedTurnIngestCaptureId, orgId, workspaceId],
+    );
+
+    const { getDb, setOrgContext } = await import("@/lib/db/client");
+    const { ingestDirectorTurn } = await import(
+      "@/lib/interview/director/turn-transaction"
+    );
+    await expect(
+      getDb().transaction(async (tx) => {
+        await setOrgContext(tx, orgId);
+        return ingestDirectorTurn({
+          context: {
+            orgId,
+            workspaceId,
+            captureSessionId: completedTurnIngestCaptureId,
+            userId,
+            language: "en",
+          },
+          utterance: "This late answer should not be accepted.",
+          tx,
+        });
+      }),
+    ).rejects.toThrow("already completed");
+
+    const rows = await appClient.query(
+      "SELECT count(*)::int AS transcript_count FROM transcript_segments WHERE capture_session_id = $1",
+      [completedTurnIngestCaptureId],
+    );
+    expect(rows.rows[0].transcript_count).toBe(0);
+  });
+
+  test("internal director worker write routes reject completed capture sessions", async () => {
+    const previousServiceToken = process.env.LIVEKIT_AGENT_SERVICE_TOKEN;
+    process.env.LIVEKIT_AGENT_SERVICE_TOKEN = "service-token";
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      `
+        INSERT INTO capture_sessions (
+          id,
+          org_id,
+          workspace_id,
+          capture_type,
+          started_at,
+          completed_at,
+          metadata_json
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          'director_interview',
+          now() - interval '5 minutes',
+          now(),
+          '{"language":"en","director_user_id":"bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb"}'::jsonb
+        )
+        ON CONFLICT (id) DO UPDATE
+          SET completed_at = now(),
+              metadata_json = excluded.metadata_json,
+              updated_at = now()
+      `,
+      [completedInternalWriteCaptureId, orgId, workspaceId],
+    );
+
+    const openingRoute = await import("@/app/api/internal/director-turns/opening/route");
+    const noticeRoute = await import("@/app/api/internal/director-turns/notice/route");
+    const planRoute = await import("@/app/api/internal/director-turns/plan/route");
+    const dispatchRoute = await import("@/app/api/internal/director-turns/dispatch/route");
+    const chosenIntent = {
+      intent: "discover_function",
+      target_slot: "function.name",
+      score: 100,
+      reason: "Completed sessions should reject dispatch before applying this.",
+    };
+    const requests = [
+      openingRoute.POST(
+        serviceRequest(
+          "http://otto.test/api/internal/director-turns/opening",
+          {
+            capture_session_id: completedInternalWriteCaptureId,
+            planned_agent_utterance: "What part of the business do you oversee?",
+          },
+          "completed-opening",
+        ),
+      ),
+      noticeRoute.POST(
+        serviceRequest(
+          "http://otto.test/api/internal/director-turns/notice",
+          {
+            capture_session_id: completedInternalWriteCaptureId,
+            stage_name: "director.notice.asr_stall",
+            turn_index: 1,
+            planned_agent_utterance: "I lost your audio. Could you repeat that?",
+          },
+          "completed-notice",
+        ),
+      ),
+      planRoute.POST(
+        serviceRequest(
+          "http://otto.test/api/internal/director-turns/plan",
+          {
+            capture_session_id: completedInternalWriteCaptureId,
+            latest_utterance: "We run forecasting.",
+            transcript_segment_ids: [],
+            evidence_ids: [],
+            turn_index: 1,
+          },
+          "completed-plan",
+        ),
+      ),
+      dispatchRoute.POST(
+        serviceRequest(
+          "http://otto.test/api/internal/director-turns/dispatch",
+          {
+            capture_session_id: completedInternalWriteCaptureId,
+            latest_utterance: "We run forecasting.",
+            transcript_segment_ids: [],
+            evidence_ids: [],
+            turn_index: 1,
+            plan: {
+              utterance_type: "substantive_answer",
+              slot_updates: [],
+              claims: [],
+              tool_calls: [],
+              contradiction_signals: [],
+              current_phase: "orient",
+              proposed_next_phase: "inventory",
+              phase_transition_ready: false,
+              ranked_intents: [chosenIntent],
+              chosen_intent: chosenIntent,
+            },
+            planned_agent_utterance: "What are the main processes your team owns?",
+            degraded_quality: false,
+          },
+          "completed-dispatch",
+        ),
+      ),
+    ];
+
+    try {
+      const responses = await Promise.all(requests);
+      for (const response of responses) {
+        expect(response.status).toBe(409);
+        const json = await response.json();
+        expect(json.error.message).toContain("already completed");
+      }
+      const rows = await appClient.query(
+        `
+          SELECT
+            (SELECT count(*)::int
+               FROM agent_decision_log
+              WHERE capture_session_id = $1) AS decisions,
+            (SELECT count(*)::int
+               FROM idempotency_keys
+              WHERE org_id = $2
+                AND key IN (
+                  'completed-opening',
+                  'completed-notice',
+                  'completed-plan',
+                  'completed-dispatch'
+                )) AS idempotency_rows
+        `,
+        [completedInternalWriteCaptureId, orgId],
+      );
+      expect(rows.rows[0]).toEqual({
+        decisions: 0,
+        idempotency_rows: 0,
+      });
+    } finally {
+      if (previousServiceToken === undefined) {
+        delete process.env.LIVEKIT_AGENT_SERVICE_TOKEN;
+      } else {
+        process.env.LIVEKIT_AGENT_SERVICE_TOKEN = previousServiceToken;
+      }
+    }
+  });
+
+  test("internal director worker write routes replay cached responses after completion", async () => {
+    const previousServiceToken = process.env.LIVEKIT_AGENT_SERVICE_TOKEN;
+    process.env.LIVEKIT_AGENT_SERVICE_TOKEN = "service-token";
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      `
+        INSERT INTO capture_sessions (
+          id,
+          org_id,
+          workspace_id,
+          capture_type,
+          started_at,
+          metadata_json
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          'director_interview',
+          now() - interval '5 minutes',
+          '{"language":"en","director_user_id":"bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb"}'::jsonb
+        )
+        ON CONFLICT (id) DO UPDATE
+          SET completed_at = null,
+              metadata_json = excluded.metadata_json,
+              updated_at = now()
+      `,
+      [completedIdempotentReplayCaptureId, orgId, workspaceId],
+    );
+
+    const openingRoute = await import("@/app/api/internal/director-turns/opening/route");
+    const body = {
+      capture_session_id: completedIdempotentReplayCaptureId,
+      planned_agent_utterance: "What part of the business do you oversee?",
+    };
+
+    try {
+      const first = await openingRoute.POST(
+        serviceRequest(
+          "http://otto.test/api/internal/director-turns/opening",
+          body,
+          "completed-replay-opening",
+        ),
+      );
+      expect(first.status).toBe(201);
+      const firstJson = await first.json();
+
+      await appClient.query(
+        "UPDATE capture_sessions SET completed_at = now(), updated_at = now() WHERE id = $1",
+        [completedIdempotentReplayCaptureId],
+      );
+
+      const replay = await openingRoute.POST(
+        serviceRequest(
+          "http://otto.test/api/internal/director-turns/opening",
+          body,
+          "completed-replay-opening",
+        ),
+      );
+      expect(replay.status).toBe(201);
+      expect(await replay.json()).toEqual(firstJson);
+
+      const newWrite = await openingRoute.POST(
+        serviceRequest(
+          "http://otto.test/api/internal/director-turns/opening",
+          body,
+          "completed-replay-new-opening",
+        ),
+      );
+      expect(newWrite.status).toBe(409);
+
+      const rows = await appClient.query(
+        `
+          SELECT
+            (SELECT count(*)::int
+               FROM agent_decision_log
+              WHERE capture_session_id = $1) AS decisions,
+            (SELECT count(*)::int
+               FROM idempotency_keys
+              WHERE org_id = $2
+                AND key IN (
+                  'completed-replay-opening',
+                  'completed-replay-new-opening'
+                )) AS idempotency_rows
+        `,
+        [completedIdempotentReplayCaptureId, orgId],
+      );
+      expect(rows.rows[0]).toEqual({
+        decisions: 1,
+        idempotency_rows: 1,
+      });
+    } finally {
+      if (previousServiceToken === undefined) {
+        delete process.env.LIVEKIT_AGENT_SERVICE_TOKEN;
+      } else {
+        process.env.LIVEKIT_AGENT_SERVICE_TOKEN = previousServiceToken;
+      }
+    }
+  });
+
+  test("director planning context includes recent Otto and director turns", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [recentConversationContextCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO agent_decision_log (
+          id,
+          org_id,
+          workspace_id,
+          capture_session_id,
+          turn_index,
+          stage_name,
+          ts_start,
+          sanitized_agent_utterance,
+          prompt_template_id,
+          prompt_template_version,
+          delivery_json
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          1,
+          'director.turn',
+          now() - interval '2 minutes',
+          'Which systems does forecasting rely on?',
+          'director.turn.plan',
+          '1',
+          '{"planned_utterance":"Which systems does forecasting rely on?","delivery_status":"completed","spoken_fraction":1}'::jsonb
+        )
+        ON CONFLICT (id) DO UPDATE SET delivery_json = excluded.delivery_json
+      `,
+      [
+        recentConversationDecisionId,
+        orgId,
+        workspaceId,
+        recentConversationContextCaptureId,
+      ],
+    );
+    await appClient.query(
+      `
+        INSERT INTO agent_decision_log (
+          id,
+          org_id,
+          workspace_id,
+          capture_session_id,
+          turn_index,
+          stage_name,
+          ts_start,
+          sanitized_agent_utterance,
+          prompt_template_id,
+          prompt_template_version,
+          delivery_json
+        )
+        VALUES
+          (
+            'd1d1d1d1-d1d1-5d1d-8d1d-d1d1d1d1d1d1',
+            $1,
+            $2,
+            $3,
+            2,
+            'director.notice.asr_stall',
+            now() - interval '90 seconds',
+            'This pending prompt should not enter context.',
+            'director.notice.asr_stall',
+            '1',
+            '{"planned_utterance":"This pending prompt should not enter context.","delivery_status":"pending","spoken_fraction":0}'::jsonb
+          ),
+          (
+            'd2d2d2d2-d2d2-5d2d-8d2d-d2d2d2d2d2d2',
+            $1,
+            $2,
+            $3,
+            3,
+            'director.turn',
+            now() - interval '80 seconds',
+            'This full interrupted prompt should not enter context.',
+            'director.turn.plan',
+            '1',
+            '{"planned_utterance":"This full interrupted prompt should not enter context.","delivered_utterance":"","delivery_status":"truncated","spoken_fraction":0}'::jsonb
+          ),
+          (
+            'd3d3d3d3-d3d3-5d3d-8d3d-d3d3d3d3d3d3',
+            $1,
+            $2,
+            $3,
+            4,
+            'director.turn',
+            now() - interval '70 seconds',
+            'This full prompt should be replaced by the heard fragment.',
+            'director.turn.plan',
+            '1',
+            '{"planned_utterance":"This full prompt should be replaced by the heard fragment.","delivered_utterance":"This was partly heard...","delivery_status":"truncated","spoken_fraction":0.42}'::jsonb
+          )
+        ON CONFLICT (id) DO UPDATE SET delivery_json = excluded.delivery_json
+      `,
+      [orgId, workspaceId, recentConversationContextCaptureId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO transcript_segments (
+          id,
+          org_id,
+          workspace_id,
+          capture_session_id,
+          speaker,
+          speaker_role,
+          start_ms,
+          end_ms,
+          turn_index,
+          text,
+          confidence
+        )
+        VALUES ($1, $2, $3, $4, 'director', 'director', 1000, 2400, 2, 'Forecasting is in Salesforce and Sheets.', 0.94)
+        ON CONFLICT (id) DO UPDATE SET text = excluded.text
+      `,
+      [
+        recentConversationTranscriptId,
+        orgId,
+        workspaceId,
+        recentConversationContextCaptureId,
+      ],
+    );
+
+    const { readDirectorPlanningContext } = await import(
+      "@/lib/interview/director/turn-transaction"
+    );
+    const context = await readDirectorPlanningContext({
+      orgId,
+      workspaceId,
+      captureSessionId: recentConversationContextCaptureId,
+      userId,
+      language: "en",
     });
+
+    expect(context.recent_turns).toEqual([
+      "Otto: Which systems does forecasting rely on?",
+      "Otto: This was partly heard...",
+      "Director: Forecasting is in Salesforce and Sheets.",
+    ]);
+    expect(context.next_turn_index).toBe(5);
+  });
+
+  test("Week 5 degraded director turns wait for real Anthropic recovery", async () => {
+    await seedWeek5DegradedTurnGraph(appClient);
+    const priorAnthropic = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+
+    try {
+      const { recoverDegradedDirectorTurnsForOrgs } = await import(
+        "@/lib/inngest/functions"
+      );
+      const result = await recoverDegradedDirectorTurnsForOrgs([orgId]);
+
+      expect(result.recovered).toBe(0);
+      expect(result.skipped).toBeGreaterThanOrEqual(1);
+      await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+        orgId,
+      ]);
+      const rows = await appClient.query(
+        `
+        SELECT
+          (SELECT count(*)::int FROM candidate_processes WHERE capture_session_id = $1 AND proposed_name = 'Renewal Review Weekly In Salesforce') AS recovered_candidates,
+          (SELECT count(*)::int FROM agent_decision_log WHERE stage_name = 're_extract_degraded_turns.recovered' AND tool_calls->>'source_agent_decision_log_id' = $2) AS recovered_markers,
+          (SELECT count(*)::int FROM agent_decision_log WHERE stage_name = 're_extract_degraded_turns.skipped' AND tool_calls->>'source_agent_decision_log_id' = $2 AND tool_calls->>'reason' = 'missing_anthropic_api_key') AS skipped_markers
+      `,
+        [directorCaptureId, week5DegradedDecisionId],
+      );
+
+      expect(rows.rows[0]).toEqual({
+        recovered_candidates: 0,
+        recovered_markers: 0,
+        skipped_markers: 1,
+      });
+    } finally {
+      if (priorAnthropic) process.env.ANTHROPIC_API_KEY = priorAnthropic;
+    }
+  });
+
+  test("director session verification treats recovered degraded turns as resolved", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [recoveredVerificationCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO agent_decision_log (
+          id,
+          org_id,
+          workspace_id,
+          capture_session_id,
+          turn_index,
+          stage_name,
+          ts_start,
+          ts_end,
+          prompt_template_id,
+          prompt_template_version,
+          delivery_json,
+          model,
+          degraded_quality
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          1,
+          'director.turn',
+          now() - interval '5 minutes',
+          now() - interval '4 minutes',
+          'director.turn.plan',
+          '1',
+          '{"delivery_status":"completed","spoken_fraction":1,"latency_ms":{"turn_total_ms":900,"tts_playout_ms":250}}'::jsonb,
+          'deterministic-director-fallback',
+          true
+        )
+        ON CONFLICT (id) DO NOTHING
+      `,
+      [
+        recoveredVerificationDecisionId,
+        orgId,
+        workspaceId,
+        recoveredVerificationCaptureId,
+      ],
+    );
+    await appClient.query(
+      `
+        INSERT INTO agent_decision_log (
+          id,
+          org_id,
+          workspace_id,
+          capture_session_id,
+          stage_name,
+          ts_start,
+          ts_end,
+          prompt_template_id,
+          prompt_template_version,
+          tool_calls,
+          degraded_quality
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          're_extract_degraded_turns.recovered',
+          now() - interval '3 minutes',
+          now() - interval '2 minutes',
+          'director.turn.re-extract-degraded',
+          '1',
+          jsonb_build_object('source_agent_decision_log_id', $5::text),
+          false
+        )
+        ON CONFLICT (id) DO NOTHING
+      `,
+      [
+        recoveredVerificationMarkerId,
+        orgId,
+        workspaceId,
+        recoveredVerificationCaptureId,
+        recoveredVerificationDecisionId,
+      ],
+    );
+
+    const { readDirectorSessionVerification } = await import(
+      "@/lib/interview/director/turn-transaction"
+    );
+    const verification = await readDirectorSessionVerification({
+      orgId,
+      workspaceId,
+      captureSessionId: recoveredVerificationCaptureId,
+      userId,
+      language: "en",
+    });
+
+    expect(verification.brain).toMatchObject({
+      degraded_turns: 1,
+      recovered_degraded_turns: 1,
+      unresolved_degraded_turns: 0,
+    });
+    expect(verification.telemetry).toMatchObject({
+      degraded_turns: 1,
+      recovered_degraded_turns: 1,
+      unresolved_degraded_turns: 0,
+    });
+    expect(verification.acceptance.no_degraded_turns).toBe(true);
+  });
+
+  test("director session verification counts both brain and voice model cost", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [twoCallCostCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO agent_decision_log (
+          id,
+          org_id,
+          workspace_id,
+          capture_session_id,
+          turn_index,
+          stage_name,
+          ts_start,
+          ts_end,
+          prompt_template_id,
+          prompt_template_version,
+          model,
+          token_count_input,
+          token_count_output,
+          cost_cents,
+          latency_ms,
+          cache_hit,
+          delivery_json,
+          degraded_quality
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          1,
+          'director.turn',
+          now() - interval '1 minute',
+          now(),
+          'director.turn.plan',
+          '1',
+          'claude-haiku-4-5',
+          100,
+          20,
+          0.50,
+          400,
+          true,
+          jsonb_build_object(
+            'delivery_status', 'completed',
+            'planned_utterance', 'What part of the business do you oversee?',
+            'delivered_utterance', 'What part of the business do you oversee?',
+            'spoken_fraction', 1,
+            'latency_ms', jsonb_build_object('turn_total_ms', 900, 'tts_playout_ms', 250),
+            'voice_metadata', jsonb_build_object(
+              'model', 'claude-sonnet-4-6',
+              'prompt_template_id', 'director.voice.phrase-intent',
+              'prompt_template_version', '1',
+              'token_count_input', 80,
+              'token_count_output', 15,
+              'cost_cents', 0.75,
+              'latency_ms', 300,
+              'cache_hit', false
+            )
+          ),
+          false
+        )
+        ON CONFLICT (id) DO NOTHING
+      `,
+      [twoCallCostDecisionId, orgId, workspaceId, twoCallCostCaptureId],
+    );
+
+    const { readDirectorSessionVerification } = await import(
+      "@/lib/interview/director/turn-transaction"
+    );
+    const verification = await readDirectorSessionVerification({
+      orgId,
+      workspaceId,
+      captureSessionId: twoCallCostCaptureId,
+      userId,
+      language: "en",
+    });
+
+    expect(verification.telemetry.total_cost_cents).toBeCloseTo(1.25);
+    expect(verification.acceptance.total_cost_within_2x_baseline).toBe(true);
+  });
+
+  test("director session verification reports voice timeout separately from extraction degradation", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [voiceTimeoutFallbackCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO agent_decision_log (
+          id,
+          org_id,
+          workspace_id,
+          capture_session_id,
+          turn_index,
+          stage_name,
+          ts_start,
+          ts_end,
+          prompt_template_id,
+          prompt_template_version,
+          model,
+          delivery_json,
+          degraded_quality
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          1,
+          'director.turn',
+          now() - interval '1 minute',
+          now(),
+          'director.turn.plan',
+          '1',
+          'claude-haiku-4-5',
+          jsonb_build_object(
+            'delivery_status', 'completed',
+            'planned_utterance', 'Before we wrap, can we cover the biggest gap?',
+            'delivered_utterance', 'Before we wrap, can we cover the biggest gap?',
+            'spoken_fraction', 1,
+            'latency_ms', jsonb_build_object('turn_total_ms', 900, 'tts_playout_ms', 250),
+            'voice_metadata', jsonb_build_object(
+              'model', 'deterministic-python-voice',
+              'prompt_template_id', 'director.voice.phrase-intent',
+              'voice_timeout_fallback', true,
+              'voice_degraded', true,
+              'voice_timeout_ms', 1,
+              'attempted_model', 'claude-sonnet-4-6'
+            )
+          ),
+          false
+        )
+        ON CONFLICT (id) DO NOTHING
+      `,
+      [
+        voiceTimeoutFallbackDecisionId,
+        orgId,
+        workspaceId,
+        voiceTimeoutFallbackCaptureId,
+      ],
+    );
+
+    const { readDirectorSessionVerification } = await import(
+      "@/lib/interview/director/turn-transaction"
+    );
+    const verification = await readDirectorSessionVerification({
+      orgId,
+      workspaceId,
+      captureSessionId: voiceTimeoutFallbackCaptureId,
+      userId,
+      language: "en",
+    });
+
+    expect(verification.brain.unresolved_degraded_turns).toBe(0);
+    expect(verification.acceptance.no_degraded_turns).toBe(true);
+    expect(verification.voice).toMatchObject({
+      voice_timeout_fallback_turns: 1,
+      voice_degraded_turns: 1,
+    });
+    expect(verification.telemetry).toMatchObject({
+      voice_timeout_fallback_turns: 1,
+      voice_degraded_turns: 1,
+    });
+  });
+
+  test("director session verification enforces prompt cache hit-rate target", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [cacheHitRateCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO agent_decision_log (
+          id,
+          org_id,
+          workspace_id,
+          capture_session_id,
+          turn_index,
+          stage_name,
+          ts_start,
+          ts_end,
+          prompt_template_id,
+          prompt_template_version,
+          model,
+          token_count_input,
+          token_count_output,
+          cost_cents,
+          latency_ms,
+          cache_hit,
+          delivery_json,
+          degraded_quality
+        )
+        SELECT
+          gen_random_uuid(),
+          $1,
+          $2,
+          $3,
+          turn_index,
+          'director.turn',
+          now() - ((4 - turn_index) || ' minutes')::interval,
+          now() - ((4 - turn_index) || ' minutes')::interval + interval '1 second',
+          'director.turn.plan',
+          '1',
+          'claude-haiku-4-5',
+          100,
+          20,
+          0.25,
+          400,
+          turn_index IN (2, 3),
+          jsonb_build_object(
+            'delivery_status', 'completed',
+            'planned_utterance', 'Question ' || turn_index,
+            'delivered_utterance', 'Question ' || turn_index,
+            'spoken_fraction', 1,
+            'latency_ms', jsonb_build_object('turn_total_ms', 900, 'tts_playout_ms', 250),
+            'voice_metadata', jsonb_build_object(
+              'model', 'claude-sonnet-4-6',
+              'prompt_template_id', 'director.voice.phrase-intent',
+              'prompt_template_version', '1',
+              'token_count_input', 80,
+              'token_count_output', 15,
+              'cost_cents', 0.25,
+              'latency_ms', 300,
+              'cache_hit', turn_index IN (2, 3),
+              'cache_read_input_tokens', CASE WHEN turn_index IN (2, 3) THEN 120 ELSE 0 END,
+              'cache_creation_input_tokens', CASE WHEN turn_index = 1 THEN 120 ELSE 0 END
+            ),
+            'brain_metadata', jsonb_build_object(
+              'cache_read_input_tokens', CASE WHEN turn_index IN (2, 3) THEN 240 ELSE 0 END,
+              'cache_creation_input_tokens', CASE WHEN turn_index = 1 THEN 240 ELSE 0 END
+            )
+          ),
+          false
+        FROM generate_series(1, 3) AS turn_index
+      `,
+      [orgId, workspaceId, cacheHitRateCaptureId],
+    );
+
+    const { readDirectorSessionVerification } = await import(
+      "@/lib/interview/director/turn-transaction"
+    );
+    const verification = await readDirectorSessionVerification({
+      orgId,
+      workspaceId,
+      captureSessionId: cacheHitRateCaptureId,
+      userId,
+      language: "en",
+    });
+
+    expect(verification.telemetry).toMatchObject({
+      llm_cache_hits: 2,
+      llm_cache_observed_turns: 3,
+      llm_cache_hit_rate: 67,
+      voice_cache_hits: 2,
+      voice_cache_observed_turns: 3,
+      voice_cache_hit_rate: 67,
+    });
+    expect(verification.acceptance.llm_cache_hit_rate_target).toBe(true);
+    expect(verification.acceptance.voice_cache_hit_rate_target).toBe(true);
+  });
+
+  test("director session verification requires first-question streamed voice evidence", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [streamedVoiceCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO agent_decision_log (
+          id,
+          org_id,
+          workspace_id,
+          capture_session_id,
+          turn_index,
+          stage_name,
+          ts_start,
+          ts_end,
+          prompt_template_id,
+          prompt_template_version,
+          model,
+          token_count_input,
+          token_count_output,
+          cost_cents,
+          latency_ms,
+          cache_hit,
+          delivery_json,
+          degraded_quality
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          1,
+          'director.turn',
+          now() - interval '1 minute',
+          now(),
+          'director.turn.plan',
+          '1',
+          'claude-haiku-4-5',
+          100,
+          20,
+          0.50,
+          400,
+          true,
+          jsonb_build_object(
+            'delivery_status', 'completed',
+            'planned_utterance', 'What part of the business do you oversee?',
+            'delivered_utterance', 'What part of the business do you oversee?',
+            'spoken_fraction', 1,
+            'latency_ms', jsonb_build_object('turn_total_ms', 900, 'tts_playout_ms', 250),
+            'voice_metadata', jsonb_build_object(
+              'model', 'claude-sonnet-4-6',
+              'prompt_template_id', 'director.voice.phrase-intent',
+              'prompt_template_version', '1',
+              'streaming', true,
+              'stream_cutoff', 'message_stop',
+              'token_count_input', 80,
+              'token_count_output', 15,
+              'cost_cents', 0.75,
+              'latency_ms', 300,
+              'cache_hit', true
+            )
+          ),
+          false
+        )
+        ON CONFLICT (id) DO UPDATE SET delivery_json = excluded.delivery_json
+      `,
+      [streamedVoiceDecisionId, orgId, workspaceId, streamedVoiceCaptureId],
+    );
+
+    const { readDirectorSessionVerification } = await import(
+      "@/lib/interview/director/turn-transaction"
+    );
+    const before = await readDirectorSessionVerification({
+      orgId,
+      workspaceId,
+      captureSessionId: streamedVoiceCaptureId,
+      userId,
+      language: "en",
+    });
+    expect(before.voice.streamed_voice_turns).toBe(0);
+    expect(before.acceptance.has_streamed_voice_turn).toBe(false);
+
+    await appClient.query(
+      `
+        UPDATE agent_decision_log
+        SET delivery_json = jsonb_set(
+          delivery_json,
+          '{voice_metadata,stream_cutoff}',
+          '"first_question"'::jsonb
+        )
+        WHERE id = $1
+      `,
+      [streamedVoiceDecisionId],
+    );
+    const after = await readDirectorSessionVerification({
+      orgId,
+      workspaceId,
+      captureSessionId: streamedVoiceCaptureId,
+      userId,
+      language: "en",
+    });
+    expect(after.voice.streamed_voice_turns).toBe(1);
+    expect(after.acceptance.has_streamed_voice_turn).toBe(true);
+  });
+
+  test("director session verification requires LiveKit Deepgram metadata for real ASR timing", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [asrVerificationCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO transcript_segments (
+          id,
+          org_id,
+          workspace_id,
+          capture_session_id,
+          speaker,
+          speaker_role,
+          start_ms,
+          end_ms,
+          turn_index,
+          text,
+          timing_source,
+          metadata_json,
+          confidence
+        )
+        VALUES ($1, $2, $3, $4, 'director', 'director', 1000, 2400, 1, 'Forecasting is weekly.', 'asr_metrics', '{"source":"livekit_agents","provider":"deepgram"}'::jsonb, 0.94)
+        ON CONFLICT (id) DO NOTHING
+      `,
+      [bareAsrTranscriptId, orgId, workspaceId, asrVerificationCaptureId],
+    );
+
+    const { readDirectorSessionVerification } = await import(
+      "@/lib/interview/director/turn-transaction"
+    );
+    const beforeMetadata = await readDirectorSessionVerification({
+      orgId,
+      workspaceId,
+      captureSessionId: asrVerificationCaptureId,
+      userId,
+      language: "en",
+    });
+    expect(beforeMetadata.asr_timing).toMatchObject({
+      asr_metrics_turns: 1,
+      asr_metrics_segments: 1,
+      livekit_deepgram_asr_metrics_turns: 0,
+      livekit_deepgram_asr_metrics_segments: 0,
+      configured_asr_runtime_turns: 0,
+      configured_asr_runtime_segments: 0,
+      privacy_configured_asr_runtime_turns: 0,
+      privacy_configured_asr_runtime_segments: 0,
+    });
+    expect(beforeMetadata.transcript_turns).toBe(1);
+    expect(beforeMetadata.transcript_segments).toBe(1);
+    expect(beforeMetadata.acceptance.has_real_asr_timing).toBe(false);
+    expect(beforeMetadata.acceptance.has_configured_asr_runtime).toBe(false);
+    expect(beforeMetadata.acceptance.has_privacy_configured_asr_runtime).toBe(false);
+
+    await appClient.query(
+      `
+        INSERT INTO transcript_segments (
+          id,
+          org_id,
+          workspace_id,
+          capture_session_id,
+          speaker,
+          speaker_role,
+          start_ms,
+          end_ms,
+          turn_index,
+          text,
+          timing_source,
+          metadata_json,
+          confidence
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          'director',
+          'director',
+          2500,
+          4200,
+          2,
+          'Quote approvals are painful.',
+          'asr_metrics',
+          '{"source":"livekit_agents","provider":"deepgram","timing":"started_stopped_speaking_at","model":"nova-3","language":"en","transport":"direct_plugin","vendor_privacy_ack":true,"privacy_no_store_ack":true,"mip_opt_out":true}'::jsonb,
+          0.93
+        )
+        ON CONFLICT (id) DO NOTHING
+      `,
+      [livekitDeepgramTranscriptId, orgId, workspaceId, asrVerificationCaptureId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO transcript_segments (
+          id,
+          org_id,
+          workspace_id,
+          capture_session_id,
+          speaker,
+          speaker_role,
+          start_ms,
+          end_ms,
+          turn_index,
+          text,
+          timing_source,
+          metadata_json,
+          confidence
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          'director',
+          'director',
+          4200,
+          5100,
+          2,
+          'Finance gets pulled in late.',
+          'asr_metrics',
+          '{"source":"livekit_agents","provider":"deepgram","timing":"started_stopped_speaking_at","model":"nova-3","language":"en","transport":"direct_plugin","vendor_privacy_ack":true,"privacy_no_store_ack":true,"mip_opt_out":true}'::jsonb,
+          0.91
+        )
+        ON CONFLICT (id) DO NOTHING
+      `,
+      [
+        livekitDeepgramTranscriptContinuationId,
+        orgId,
+        workspaceId,
+        asrVerificationCaptureId,
+      ],
+    );
+
+    const afterMetadata = await readDirectorSessionVerification({
+      orgId,
+      workspaceId,
+      captureSessionId: asrVerificationCaptureId,
+      userId,
+      language: "en",
+    });
+    expect(afterMetadata.asr_timing).toMatchObject({
+      asr_metrics_turns: 2,
+      asr_metrics_segments: 3,
+      livekit_deepgram_asr_metrics_turns: 1,
+      livekit_deepgram_asr_metrics_segments: 2,
+      configured_asr_runtime_turns: 1,
+      configured_asr_runtime_segments: 2,
+      privacy_configured_asr_runtime_turns: 1,
+      privacy_configured_asr_runtime_segments: 2,
+    });
+    expect(afterMetadata.transcript_turns).toBe(2);
+    expect(afterMetadata.transcript_segments).toBe(3);
+    expect(afterMetadata.acceptance.has_real_asr_timing).toBe(true);
+    expect(afterMetadata.acceptance.has_configured_asr_runtime).toBe(true);
+    expect(afterMetadata.acceptance.has_privacy_configured_asr_runtime).toBe(true);
+  });
+
+  test("director session verification counts missing priority slots from the schema", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [priorityCoverageCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO slot_states (
+          org_id,
+          workspace_id,
+          capture_session_id,
+          slot_path,
+          status,
+          confidence,
+          priority
+        )
+        VALUES ($1, $2, $3, 'function.name', 'filled', 0.92, 100)
+        ON CONFLICT (capture_session_id, slot_path)
+        DO UPDATE SET status = 'filled', confidence = 0.92, priority = 100
+      `,
+      [orgId, workspaceId, priorityCoverageCaptureId],
+    );
+
+    const { readDirectorSessionVerification } = await import(
+      "@/lib/interview/director/turn-transaction"
+    );
+    const verification = await readDirectorSessionVerification({
+      orgId,
+      workspaceId,
+      captureSessionId: priorityCoverageCaptureId,
+      userId,
+      language: "en",
+    });
+    const priority1DefinitionCount = directorSlotDefinitions.filter(
+      (definition) => definition.priority >= 90,
+    ).length;
+
+    expect(verification.priority_1_slots).toBe(priority1DefinitionCount);
+    expect(verification.priority_1_covered_slots).toBe(1);
+    expect(verification.priority_1_coverage_ratio).toBe(1 / priority1DefinitionCount);
+    expect(verification.acceptance.priority_1_progress).toBe(false);
+  });
+
+  test("director session verification requires LiveKit Cartesia metadata for TTS playout", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [ttsVerificationCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO agent_decision_log (
+          id,
+          org_id,
+          workspace_id,
+          capture_session_id,
+          turn_index,
+          stage_name,
+          ts_start,
+          ts_end,
+          prompt_template_id,
+          prompt_template_version,
+          delivery_json,
+          model,
+          degraded_quality
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          1,
+          'director.turn',
+          now() - interval '5 minutes',
+          now() - interval '4 minutes',
+          'director.turn.plan',
+          '1',
+          '{"delivery_status":"completed","spoken_fraction":1,"latency_ms":{"turn_total_ms":900,"tts_playout_ms":250},"audio_metadata":{"source":"livekit_agents","provider":"cartesia"}}'::jsonb,
+          'claude-haiku-4-5',
+          false
+        )
+        ON CONFLICT (id) DO NOTHING
+      `,
+      [bareTtsDecisionId, orgId, workspaceId, ttsVerificationCaptureId],
+    );
+
+    const { readDirectorSessionVerification } = await import(
+      "@/lib/interview/director/turn-transaction"
+    );
+    const beforeMetadata = await readDirectorSessionVerification({
+      orgId,
+      workspaceId,
+      captureSessionId: ttsVerificationCaptureId,
+      userId,
+      language: "en",
+    });
+    expect(beforeMetadata.delivery_timing).toMatchObject({
+      tts_playout_turns: 0,
+      audible_tts_turns: 0,
+      configured_tts_runtime_turns: 0,
+      privacy_configured_tts_runtime_turns: 0,
+    });
+    expect(beforeMetadata.acceptance.has_tts_playout_timing).toBe(false);
+    expect(beforeMetadata.acceptance.has_audible_tts_delivery).toBe(false);
+    expect(beforeMetadata.acceptance.has_configured_tts_runtime).toBe(false);
+    expect(beforeMetadata.acceptance.has_privacy_configured_tts_runtime).toBe(false);
+
+    await appClient.query(
+      `
+        INSERT INTO agent_decision_log (
+          id,
+          org_id,
+          workspace_id,
+          capture_session_id,
+          turn_index,
+          stage_name,
+          ts_start,
+          ts_end,
+          prompt_template_id,
+          prompt_template_version,
+          delivery_json,
+          model,
+          degraded_quality
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          2,
+          'director.turn',
+          now() - interval '3 minutes',
+          now() - interval '2 minutes',
+          'director.turn.plan',
+          '1',
+          '{"delivery_status":"completed","spoken_fraction":1,"latency_ms":{"turn_total_ms":850,"tts_playout_ms":220},"audio_metadata":{"source":"livekit_agents","provider":"cartesia","model":"sonic-2","voice_id":"voice-id","language":"en","transport":"direct_plugin","playout":"session.say.wait_for_playout","vendor_privacy_ack":true,"privacy_no_retention_ack":true}}'::jsonb,
+          'claude-haiku-4-5',
+          false
+        )
+        ON CONFLICT (id) DO NOTHING
+      `,
+      [livekitCartesiaDecisionId, orgId, workspaceId, ttsVerificationCaptureId],
+    );
+
+    const afterMetadata = await readDirectorSessionVerification({
+      orgId,
+      workspaceId,
+      captureSessionId: ttsVerificationCaptureId,
+      userId,
+      language: "en",
+    });
+    expect(afterMetadata.delivery_timing).toMatchObject({
+      tts_playout_turns: 1,
+      audible_tts_turns: 1,
+      configured_tts_runtime_turns: 1,
+      privacy_configured_tts_runtime_turns: 1,
+    });
+    expect(afterMetadata.acceptance.has_tts_playout_timing).toBe(true);
+    expect(afterMetadata.acceptance.has_audible_tts_delivery).toBe(true);
+    expect(afterMetadata.acceptance.has_configured_tts_runtime).toBe(true);
+    expect(afterMetadata.acceptance.has_privacy_configured_tts_runtime).toBe(true);
   });
 });
 
@@ -1233,6 +5040,22 @@ function apiRequest(
   });
 }
 
+function serviceRequest(url: string, body: unknown, idempotencyKey?: string) {
+  return new Request(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: "Bearer service-token",
+      ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function applyMigration(filename: string) {
   execFileSync(
     "docker",
@@ -1253,7 +5076,18 @@ function applyMigration(filename: string) {
 }
 
 function ensureDocker() {
-  execFileSync("docker", ["version"], { stdio: "ignore" });
+  if (!hasDocker) {
+    throw new Error("Docker is required for database integration tests.");
+  }
+}
+
+function canUseDocker() {
+  try {
+    execFileSync("docker", ["version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function waitForPostgres() {

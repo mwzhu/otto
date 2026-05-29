@@ -1,0 +1,12 @@
+[project]
+name = "otto-realtime-core"
+version = "0.1.0"
+description = "Shared realtime worker primitives for Otto LiveKit agents."
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.uv]
+package = true
+
+[tool.ruff]
+line-length = 100

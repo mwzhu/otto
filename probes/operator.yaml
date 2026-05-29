@@ -1,0 +1,162 @@
+version: 1
+agent: operator_workflow_mapper
+description: >
+  Probe library for operator voice and screen-share interviews. The operator
+  brain chooses intents; runtime policy enforces cooldown_seconds and max_fires
+  before Otto asks one concise workflow question.
+
+probes:
+  - id: process-objective
+    type: orient
+    intent: capture_process_objective
+    triggers:
+      - no_process_objective
+      - opening_turn
+    target_slots:
+      - process.trigger
+      - process.objective
+    cooldown_seconds: 45
+    max_fires: 2
+    expected_shape: Business outcome, object being processed, and completion signal.
+    base_priority: 105
+    phrasings:
+      - What is this workflow trying to get done?
+      - What result tells you this process is complete?
+
+  - id: step-action
+    type: step_capture
+    intent: capture_next_step
+    triggers:
+      - step_boundary_seen
+      - operator_described_action
+      - missing_step_action
+    target_slots:
+      - step.action_verb
+      - step.action_object
+    cooldown_seconds: 15
+    max_fires: 20
+    expected_shape: Action verb plus object, with start/end cue when available.
+    base_priority: 120
+    phrasings:
+      - What happens next?
+      - What do you do right after that?
+
+  - id: system-source-of-truth
+    type: step_detail
+    intent: capture_step_systems
+    triggers:
+      - screen_app_changed
+      - system_mentioned
+      - missing_step_system
+    target_slots:
+      - step.systems
+      - step.source_of_truth
+    cooldown_seconds: 45
+    max_fires: 3
+    expected_shape: System of record, shadow spreadsheet, or communication tool.
+    base_priority: 100
+    phrasings:
+      - Which system is the source of truth for this step?
+      - Are you updating the official system here, or a working tracker?
+
+  - id: inputs-outputs
+    type: step_detail
+    intent: capture_inputs_outputs
+    triggers:
+      - file_opened
+      - upload_download_seen
+      - missing_inputs_outputs
+    target_slots:
+      - step.data_copied_from
+      - step.output
+    cooldown_seconds: 60
+    max_fires: 3
+    expected_shape: Input artifact/data and output artifact/data for the step.
+    base_priority: 90
+    phrasings:
+      - What input do you need before you can do this step?
+      - What gets created or changed when this step is done?
+
+  - id: decision-rule
+    type: branch
+    intent: capture_decision_rule
+    triggers:
+      - if_unless_when_language
+      - approval_or_rejection_seen
+      - missing_decision_rule
+    target_slots:
+      - step.decision_criteria
+    cooldown_seconds: 60
+    max_fires: 3
+    expected_shape: Condition, branch choices, and who or what decides.
+    base_priority: 95
+    phrasings:
+      - How do you decide which path to take here?
+      - What condition makes you send it back instead of moving forward?
+
+  - id: handoff
+    type: collaboration
+    intent: capture_handoff
+    triggers:
+      - email_or_message_seen
+      - role_mentioned
+      - missing_handoff
+    target_slots:
+      - step.next_owner
+    cooldown_seconds: 75
+    max_fires: 3
+    expected_shape: Sender, receiver, handoff medium, and acceptance cue.
+    base_priority: 86
+    phrasings:
+      - Who gets this after you finish your part?
+      - How do you know the next person has everything they need?
+
+  - id: exception
+    type: reliability
+    intent: capture_exception
+    triggers:
+      - error_seen
+      - reject_or_failed_language
+      - exception_mentioned
+    target_slots:
+      - step.exceptions
+    cooldown_seconds: 45
+    max_fires: 4
+    expected_shape: Failure condition, frequency, impact, and recovery path.
+    base_priority: 102
+    phrasings:
+      - When does this step fail or get stuck?
+      - What usually causes an exception here?
+
+  - id: workaround
+    type: reliability
+    intent: capture_workaround
+    triggers:
+      - spreadsheet_or_shadow_tool_seen
+      - manual_copy_paste_seen
+      - workaround_mentioned
+    target_slots:
+      - step.workarounds
+    cooldown_seconds: 45
+    max_fires: 4
+    expected_shape: Unofficial workaround, why it exists, and whether it is normal.
+    base_priority: 104
+    phrasings:
+      - Is that the normal workflow, or a workaround?
+      - What makes you leave the official system and do it manually?
+
+  - id: sop-contradiction
+    type: contradiction
+    intent: clarify_sop_contradiction
+    triggers:
+      - documented_observed_mismatch
+      - documented_stated_mismatch
+    target_slots:
+      - sop.contradictions
+    cooldown_seconds: 30
+    max_fires: 5
+    expected_shape: Current real behavior, whether SOP is outdated, and exception status.
+    base_priority: 115
+    phrasings:
+      - The SOP says something different here. Which version is current?
+      - Is this different from the SOP because the document is outdated, or because this case is unusual?

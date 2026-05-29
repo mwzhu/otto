@@ -81,6 +81,10 @@ export function slotPriority(slotPath: string) {
   );
 }
 
+export function isCaptureLevelDirectorSlot(slotPath: string) {
+  return slotPath === "function.name" || slotPath === "process.inventory";
+}
+
 export function isDirectorSlotPath(slotPath: string) {
   return directorSlotDefinitions.some((definition) => definition.path === slotPath);
 }

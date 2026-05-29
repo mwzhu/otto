@@ -3,6 +3,7 @@ export type ProcessSummary = {
   source?: "process" | "candidate";
   href?: string;
   name: string;
+  process_status?: "candidate" | "draft" | "approved" | "archived";
   function: string;
   department: string;
   status: "documented" | "in_progress";

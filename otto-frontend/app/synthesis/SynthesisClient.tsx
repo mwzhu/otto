@@ -37,6 +37,7 @@ export default function SynthesisClient() {
   const sp = useSearchParams();
   const next = sp.get("next") ?? "/overview";
   const workspaceId = sp.get("workspace_id");
+  const captureSessionId = sp.get("capture_session_id");
 
   const [idx, setIdx] = useState(0);
   const [status, setStatus] = useState<SynthesisStatus | null>(null);
@@ -46,18 +47,27 @@ export default function SynthesisClient() {
     status?.terminal === true && status.ready_for_overview !== true;
   const backendDone =
     status?.ready_for_overview === true ||
-    (!synthesisBlocked && statusTimedOut);
+    (!captureSessionId && !synthesisBlocked && statusTimedOut);
   const done = animationDone && backendDone;
 
   useEffect(() => {
     if (done) {
-      const t = setTimeout(() => router.push(next), 900);
+      const t = setTimeout(
+        () =>
+          router.push(
+            appendCaptureContextToOverview(next, {
+              captureSessionId,
+              workspaceId,
+            }),
+          ),
+        900,
+      );
       return () => clearTimeout(t);
     }
     if (idx >= STAGES.length) return;
     const t = setTimeout(() => setIdx((i) => i + 1), STAGE_MS);
     return () => clearTimeout(t);
-  }, [done, idx, next, router]);
+  }, [captureSessionId, done, idx, next, router, workspaceId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -66,9 +76,11 @@ export default function SynthesisClient() {
 
     async function poll() {
       try {
-        const statusUrl = workspaceId
-          ? `/api/synthesis/status?workspace_id=${encodeURIComponent(workspaceId)}`
-          : "/api/synthesis/status";
+        const params = new URLSearchParams();
+        if (workspaceId) params.set("workspace_id", workspaceId);
+        if (captureSessionId) params.set("capture_session_id", captureSessionId);
+        const query = params.toString();
+        const statusUrl = query ? `/api/synthesis/status?${query}` : "/api/synthesis/status";
         const response = await fetch(statusUrl, { cache: "no-store" });
         if (response.ok) {
           const nextStatus = (await response.json()) as SynthesisStatus;
@@ -92,7 +104,7 @@ export default function SynthesisClient() {
       cancelled = true;
       if (timeout) clearTimeout(timeout);
     };
-  }, [workspaceId]);
+  }, [captureSessionId, workspaceId]);
 
   return (
     <div className="grid min-h-screen place-items-center bg-canvas px-6">
@@ -149,6 +161,23 @@ export default function SynthesisClient() {
       </div>
     </div>
   );
+}
+
+function appendCaptureContextToOverview(
+  next: string,
+  context: { captureSessionId: string | null; workspaceId: string | null },
+) {
+  if (!next.startsWith("/overview")) return next;
+  const [path, query = ""] = next.split("?");
+  const params = new URLSearchParams(query);
+  if (context.captureSessionId) {
+    params.set("capture_session_id", context.captureSessionId);
+  }
+  if (context.workspaceId) {
+    params.set("workspace_id", context.workspaceId);
+  }
+  const nextQuery = params.toString();
+  return nextQuery ? `${path}?${nextQuery}` : path;
 }
 
 function StageIcon({ state }: { state: "done" | "active" | "pending" }) {

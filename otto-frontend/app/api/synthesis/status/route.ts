@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { ensureWorkspaceRole, requireAuth } from "@/lib/auth/session";
 import { getDb, setOrgContext } from "@/lib/db/client";
 import { synthesisRuns } from "@/lib/db/schema";
@@ -11,7 +11,9 @@ export const runtime = "nodejs";
 export async function GET(request: Request) {
   try {
     const auth = await requireAuth(request);
-    const requestedWorkspaceId = new URL(request.url).searchParams.get("workspace_id");
+    const searchParams = new URL(request.url).searchParams;
+    const requestedWorkspaceId = searchParams.get("workspace_id");
+    const captureSessionId = searchParams.get("capture_session_id");
     if (requestedWorkspaceId) {
       await ensureWorkspaceRole(auth, requestedWorkspaceId);
     }
@@ -29,18 +31,18 @@ export async function GET(request: Request) {
       });
     }
 
-    const [latestRun, metrics] = await Promise.all([
-      latestSynthesisRun(auth.orgId, workspace.id),
+    const [latestRun, metrics, captureInventoryCount] = await Promise.all([
+      latestSynthesisRun(auth.orgId, workspace.id, captureSessionId),
       getOverviewMetrics(auth.orgId, workspace.id),
+      captureSessionId
+        ? getCaptureInventoryCount(auth.orgId, workspace.id, captureSessionId)
+        : Promise.resolve(null),
     ]);
     const terminal =
-      latestRun?.status === "completed" ||
-      latestRun?.status === "partial_synthesis" ||
-      latestRun?.status === "failed";
+      latestRun?.status === "completed" || latestRun?.status === "failed";
     const readyForOverview =
-      metrics.processCount > 0 &&
-      (latestRun?.status === "completed" ||
-        latestRun?.status === "partial_synthesis");
+      latestRun?.status === "completed" &&
+      (captureInventoryCount === null ? metrics.processCount > 0 : captureInventoryCount > 0);
 
     return apiJson({
       workspace_id: workspace.id,
@@ -55,6 +57,7 @@ export async function GET(request: Request) {
         : null,
       overview: {
         process_count: metrics.processCount,
+        capture_process_count: captureInventoryCount,
         has_partial_synthesis: metrics.hasPartialSynthesis,
       },
       ready_for_overview: readyForOverview,
@@ -65,7 +68,11 @@ export async function GET(request: Request) {
   }
 }
 
-async function latestSynthesisRun(orgId: string, workspaceId: string) {
+async function latestSynthesisRun(
+  orgId: string,
+  workspaceId: string,
+  captureSessionId: string | null,
+) {
   const rows = await getDb().transaction(async (tx) => {
     await setOrgContext(tx, orgId);
     return tx
@@ -75,10 +82,42 @@ async function latestSynthesisRun(orgId: string, workspaceId: string) {
         and(
           eq(synthesisRuns.orgId, orgId),
           eq(synthesisRuns.workspaceId, workspaceId),
+          captureSessionId
+            ? sql`${synthesisRuns.captureSessionIds} @> ARRAY[${captureSessionId}]::uuid[]`
+            : undefined,
         ),
       )
       .orderBy(desc(synthesisRuns.updatedAt), desc(synthesisRuns.createdAt))
       .limit(1);
   });
   return rows[0] ?? null;
+}
+
+async function getCaptureInventoryCount(
+  orgId: string,
+  workspaceId: string,
+  captureSessionId: string,
+) {
+  const result = await getDb().transaction(async (tx) => {
+    await setOrgContext(tx, orgId);
+    return tx.execute<{ count: number }>(sql`
+      SELECT count(*)::int AS count
+      FROM candidate_processes
+      WHERE org_id = ${orgId}
+        AND workspace_id = ${workspaceId}
+        AND capture_session_id = ${captureSessionId}
+        AND status = 'pending'
+        AND lower(proposed_name) NOT IN (
+          'a couple different things',
+          'couple different things',
+          'different things',
+          'a few things',
+          'several things',
+          'some things',
+          'multiple things',
+          'things'
+        )
+    `);
+  });
+  return Number(result.rows[0]?.count ?? 0);
 }

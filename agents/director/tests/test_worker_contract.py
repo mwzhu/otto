@@ -31,6 +31,7 @@ from director_agent.otto_api import (
     IngestedTurn,
     OttoApiClient,
     PlannedTurn,
+    RespondedTurn,
     stable_key,
 )
 from director_agent import worker
@@ -110,7 +111,7 @@ from director_agent.worker import (
 
 class WorkerContractTests(unittest.TestCase):
     def test_python_model_defaults_mirror_frontend_role_keys(self) -> None:
-        self.assertEqual(DEFAULT_DIRECTOR_BRAIN_MODEL, "claude-haiku-4-5")
+        self.assertEqual(DEFAULT_DIRECTOR_BRAIN_MODEL, "claude-sonnet-4-6")
         self.assertEqual(DEFAULT_DIRECTOR_VOICE_MODEL, "claude-sonnet-4-6")
         self.assertEqual(DEFAULT_SYNTHESIS_PLANNER_MODEL, "claude-opus-4-7")
         self.assertEqual(director_brain_model({}), DEFAULT_DIRECTOR_BRAIN_MODEL)
@@ -154,6 +155,9 @@ class WorkerContractTests(unittest.TestCase):
             "/api/internal/director-turns/opening",
             "/api/internal/director-turns/ingest",
             "/api/internal/director-turns/context",
+            "/api/internal/director-turns/respond",
+            "/api/internal/director-turns/extract",
+            "/api/internal/director-turns/check",
             "/api/internal/director-turns/dispatch",
             "/api/internal/director-turns/:turnIndex/delivery",
             "/api/internal/director-turns/complete",
@@ -668,6 +672,13 @@ class WorkerContractTests(unittest.TestCase):
         self.assertIn("from livekit.plugins import deepgram", source)
         self.assertIn("from livekit.plugins import cartesia", source)
 
+    def test_semantic_turn_detector_is_opt_in_without_inference_executor(self) -> None:
+        source = inspect.getsource(worker.entrypoint)
+
+        self.assertIn("turn_detection = None", source)
+        self.assertIn("if config.use_semantic_turn_detector:", source)
+        self.assertIn("turn_detection=turn_detection", source)
+
     def test_capture_session_id_from_livekit_room(self) -> None:
         self.assertEqual(
             capture_session_id_from_room("director-14125388-f796-4087-ae34-f18ab845e270"),
@@ -898,6 +909,79 @@ class WorkerContractTests(unittest.TestCase):
         self.assertEqual(
             payload["transcript_segments"][0]["metadata_json"]["provider"],
             "deepgram",
+        )
+
+    def test_internal_api_client_allows_long_planner_streams(self) -> None:
+        source = Path("director_agent/otto_api.py").read_text()
+
+        self.assertIn("INTERNAL_API_TIMEOUT_SECONDS = 120.0", source)
+        self.assertIn("httpx.Timeout(", source)
+        self.assertIn("INTERNAL_API_TIMEOUT_SECONDS", source)
+
+    def test_dispatch_retry_preserves_local_turn_correlation_id(self) -> None:
+        requests: list[httpx.Request] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if len(requests) == 1:
+                return httpx.Response(502, text="temporary gateway failure")
+            return httpx.Response(
+                200,
+                json={
+                    "next_prompt": "Where does quote approval begin?",
+                    "decision_log_id": "00000000-0000-0000-0000-000000000123",
+                },
+            )
+
+        async def run_case() -> None:
+            client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            api = OttoApiClient(
+                "https://otto.example.com",
+                "service-token",
+                http_client=client,
+                max_attempts=2,
+            )
+            try:
+                result = await api.dispatch_turn(
+                    capture_session_id="14125388-f796-4087-ae34-f18ab845e270",
+                    turn=IngestedTurn(
+                        latest_utterance="Quote approvals are painful.",
+                        transcript_segment_ids=["segment-1"],
+                        evidence_ids=["evidence-1"],
+                        turn_index=3,
+                        raw={},
+                    ),
+                    planned=PlannedTurn(
+                        plan={"chosen_intent": {"intent": "define_process_boundary"}},
+                        planned_agent_utterance="Where does quote approval begin?",
+                        metadata={"model": "claude-sonnet-4-6"},
+                        voice_metadata={
+                            "utterance_source": "brain_planned_utterance",
+                            "llm_call_elided": True,
+                        },
+                        degraded_quality=False,
+                        raw={},
+                    ),
+                    idempotency_key="dispatch-key",
+                    local_turn_correlation_id="local-turn:abc",
+                )
+            finally:
+                await client.aclose()
+
+            self.assertEqual(result.decision_log_id, "00000000-0000-0000-0000-000000000123")
+
+        with patch("director_agent.otto_api.INTERNAL_API_RETRY_DELAYS_SECONDS", (0.0, 0.0)):
+            asyncio.run(run_case())
+
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(
+            [request.headers.get("idempotency-key") for request in requests],
+            ["dispatch-key", "dispatch-key"],
+        )
+        payloads = [json.loads(request.content.decode("utf-8")) for request in requests]
+        self.assertEqual(
+            [payload["local_turn_correlation_id"] for payload in payloads],
+            ["local-turn:abc", "local-turn:abc"],
         )
 
     def test_internal_api_client_omits_null_optional_ingest_fields(self) -> None:
@@ -2333,7 +2417,10 @@ class WorkerContractTests(unittest.TestCase):
                     },
                 }
 
+            voice_calls: list[dict] = []
+
             async def fake_voice(**_kwargs) -> dict:
+                voice_calls.append(_kwargs)
                 return {
                     "text": "Let's start with forecasting: where does it begin and end?",
                     "metadata": {
@@ -2355,7 +2442,7 @@ class WorkerContractTests(unittest.TestCase):
             planner._anthropic_validated_plan = fake_validated_plan
             planner._anthropic_text = fake_voice
             try:
-                return await planner.plan_turn(
+                planned = await planner.plan_turn(
                     capture_session_id="11111111-1111-4111-8111-111111111111",
                     turn=IngestedTurn(
                         latest_utterance="I run rev ops. We own forecasting in Salesforce and Sheets.",
@@ -2366,6 +2453,8 @@ class WorkerContractTests(unittest.TestCase):
                     ),
                     idempotency_key="plan-sparse-llm",
                 )
+                self.assertEqual(voice_calls, [])
+                return planned
             finally:
                 await planner.aclose()
 
@@ -3092,11 +3181,16 @@ class WorkerContractTests(unittest.TestCase):
                 "score": 100,
                 "reason": "Model tried to close early.",
             },
+            "planned_agent_utterance": "Great, let's close this out.",
         }
 
         orient_plan = enforce_phase_gate(base_plan, {"slots": []})
         self.assertEqual(orient_plan["proposed_next_phase"], "orient")
         self.assertEqual(orient_plan["chosen_intent"]["intent"], "discover_function")
+        self.assertNotEqual(
+            orient_plan["planned_agent_utterance"],
+            "Great, let's close this out.",
+        )
         self.assertEqual(
             (
                 inventory_plan := enforce_phase_gate(
@@ -3171,6 +3265,10 @@ class WorkerContractTests(unittest.TestCase):
         self.assertEqual(
             forced_closeout["chosen_intent"]["intent"],
             "open_questions_closeout",
+        )
+        self.assertNotEqual(
+            forced_closeout["planned_agent_utterance"],
+            "Great, let's close this out.",
         )
 
     def test_python_fallback_applies_probe_cooldown_from_context(self) -> None:
@@ -3287,10 +3385,13 @@ class WorkerContractTests(unittest.TestCase):
         planned = asyncio.run(run_case())
 
         self.assertTrue(planned.degraded_quality)
+        self.assertEqual(planned.degraded_reasons, ["missing_anthropic_api_key"])
         self.assertEqual(planned.metadata["model"], "deterministic-python-brain")
-        self.assertEqual(planned.voice_metadata["model"], "deterministic-python-voice")
+        self.assertEqual(planned.voice_metadata["model"], "deterministic-python-brain")
+        self.assertEqual(planned.voice_metadata["source"], "brain_planned_utterance")
+        self.assertTrue(planned.voice_metadata["llm_call_elided"])
 
-    def test_python_planner_times_out_slow_voice_rewrite(self) -> None:
+    def test_python_planner_times_out_slow_legacy_voice_rewrite(self) -> None:
         class FakeApi:
             async def planning_context(self, *, capture_session_id: str):
                 return {"current_phase": "orient", "candidate_processes": []}
@@ -3313,6 +3414,7 @@ class WorkerContractTests(unittest.TestCase):
                     use_livekit_inference=True,
                     livekit_agent_name="otto-director",
                     voice_phrase_timeout_ms=10,
+                    use_separate_voice_llm=True,
                 ),
             )
 
@@ -3377,7 +3479,9 @@ class WorkerContractTests(unittest.TestCase):
         planned = asyncio.run(run_case())
 
         self.assertFalse(planned.degraded_quality)
-        self.assertEqual(planned.voice_metadata["model"], "deterministic-python-voice")
+        self.assertEqual(planned.voice_metadata["model"], "claude-haiku-4-5")
+        self.assertEqual(planned.voice_metadata["source"], "brain_planned_utterance")
+        self.assertTrue(planned.voice_metadata["llm_call_elided"])
         self.assertTrue(planned.voice_metadata["voice_timeout_fallback"])
         self.assertTrue(planned.voice_metadata["voice_degraded"])
         self.assertEqual(planned.voice_metadata["attempted_model"], "claude-sonnet-4-6")
@@ -3739,6 +3843,10 @@ class WorkerContractTests(unittest.TestCase):
         )
         self.assertEqual(tool["input_schema"], director_turn_plan_tool_schema())
         self.assertNotIn("$ref", json.dumps(tool["input_schema"]))
+        schema_text = json.dumps(tool["input_schema"])
+        self.assertIn("function.name", schema_text)
+        self.assertIn("process.inventory", schema_text)
+        self.assertIn("select_process_to_expand", schema_text)
         self.assertEqual(result["value"]["utterance_type"], "greeting")
         self.assertTrue(result["metadata"]["cache_hit"])
         self.assertEqual(result["metadata"]["cache_read_input_tokens"], 100)
@@ -4293,7 +4401,7 @@ class WorkerContractTests(unittest.TestCase):
             }
         )
         self.assertTrue(configured.ok)
-        self.assertEqual(configured.mode["planner_runtime"], "python")
+        self.assertEqual(configured.mode["planner_runtime"], "next")
         self.assertEqual(configured.mode["voice_model"], "claude-sonnet-4-6")
         self.assertEqual(configured.mode["cartesia_model"], "sonic-2")
         self.assertEqual(configured.mode["livekit_agent_name"], "otto-director")
@@ -4386,7 +4494,7 @@ class WorkerContractTests(unittest.TestCase):
             production_ready.vendor_controls["anthropic_raw_logging_off_ack"],
         )
 
-    def test_strict_preflight_rejects_next_planner_runtime(self) -> None:
+    def test_strict_preflight_allows_streamed_next_planner_runtime(self) -> None:
         result = check_environment(
             {
                 "LIVEKIT_URL": "wss://example.livekit.cloud",
@@ -4406,10 +4514,9 @@ class WorkerContractTests(unittest.TestCase):
             }
         )
 
-        self.assertFalse(result.ok)
+        self.assertTrue(result.ok)
         self.assertEqual(result.mode["planner_runtime"], "next")
-        self.assertIn("OTTO_DIRECTOR_PLANNER_RUNTIME=python", result.missing_required)
-        self.assertIn("debug-only", result.warnings[0])
+        self.assertNotIn("OTTO_DIRECTOR_PLANNER_RUNTIME=python", result.missing_required)
 
     def test_node_production_forces_strict_director_voice_preflight(self) -> None:
         production = check_environment(
@@ -4591,6 +4698,7 @@ class WorkerContractTests(unittest.TestCase):
                 "OTTO_DIRECTOR_PREFLIGHT_STRICT": "true",
                 "OTTO_USE_LIVEKIT_INFERENCE": "true",
                 "OTTO_DIRECTOR_PLANNER_RUNTIME": " next ",
+                "OTTO_DIRECTOR_VOICE_RUNTIME": " steered_cascade ",
                 "OTTO_VENDOR_PRIVACY_ACK": "true",
                 "OTTO_DEEPGRAM_NO_STORE_ACK": "true",
                 "OTTO_CARTESIA_NO_RETENTION_ACK": "true",
@@ -4599,8 +4707,9 @@ class WorkerContractTests(unittest.TestCase):
             },
             clear=True,
         ):
-            with self.assertRaisesRegex(RuntimeError, "debug-only"):
-                DirectorAgentConfig.from_env()
+            config = DirectorAgentConfig.from_env()
+            self.assertEqual(config.planner_runtime, "next")
+            self.assertEqual(config.voice_runtime, "steered_cascade")
 
         with patch.dict(
             os.environ,
@@ -4624,6 +4733,40 @@ class WorkerContractTests(unittest.TestCase):
         self.assertTrue(config.cartesia_no_retention_ack)
         self.assertTrue(config.anthropic_raw_logging_off_ack)
         self.assertEqual(config.anthropic_api_key, "anthropic")
+
+    def test_preflight_reports_director_voice_runtime(self) -> None:
+        result = check_environment(
+            {
+                "LIVEKIT_URL": "wss://example.livekit.cloud",
+                "LIVEKIT_API_KEY": "key",
+                "LIVEKIT_API_SECRET": "secret",
+                "OTTO_INTERNAL_API_BASE_URL": "http://localhost:3000",
+                "LIVEKIT_AGENT_SERVICE_TOKEN": "token",
+                "DATABASE_SERVICE_URL": "postgres://service:service@localhost:5432/otto",
+                "OTTO_USE_LIVEKIT_INFERENCE": "true",
+                "OTTO_DIRECTOR_VOICE_RUNTIME": "steered_cascade",
+                "ANTHROPIC_API_KEY": "anthropic",
+            }
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.mode["voice_runtime"], "steered_cascade")
+
+        fallback = check_environment(
+            {
+                "LIVEKIT_URL": "wss://example.livekit.cloud",
+                "LIVEKIT_API_KEY": "key",
+                "LIVEKIT_API_SECRET": "secret",
+                "OTTO_INTERNAL_API_BASE_URL": "http://localhost:3000",
+                "LIVEKIT_AGENT_SERVICE_TOKEN": "token",
+                "DATABASE_SERVICE_URL": "postgres://service:service@localhost:5432/otto",
+                "OTTO_USE_LIVEKIT_INFERENCE": "true",
+                "OTTO_DIRECTOR_VOICE_RUNTIME": "surprise_me",
+                "ANTHROPIC_API_KEY": "anthropic",
+            }
+        )
+
+        self.assertEqual(fallback.mode["voice_runtime"], "planned_cascade")
 
     def test_worker_config_requires_direct_provider_keys_before_room_connect(self) -> None:
         base_env = {
@@ -4957,6 +5100,114 @@ class WorkerContractTests(unittest.TestCase):
         )
         self.assertTrue(result.degraded_quality)
 
+    def test_turn_smoke_exercises_steered_cascade_runtime(self) -> None:
+        class FakeApi:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            async def ingest_turn(self, **kwargs):
+                self.calls.append("ingest")
+                return IngestedTurn(
+                    latest_utterance=kwargs["utterance"],
+                    transcript_segment_ids=["segment-1"],
+                    evidence_ids=["evidence-1"],
+                    turn_index=4,
+                    raw={},
+                )
+
+            async def update_delivery(self, **kwargs):
+                self.calls.append("delivery")
+                assert kwargs["decision_log_id"] == "respond-decision-1"
+                assert "ttfa_ms" in kwargs["latency_ms"]
+                return {"id": "respond-decision-1"}
+
+            async def check_turn(self, **kwargs):
+                self.calls.append("check")
+                assert kwargs["spoken_agent_utterance"] == "Which system owns payroll?"
+                return {
+                    "checker_status": "complete",
+                    "checker_violations": [],
+                    "checker_violation_count": 0,
+                    "stale_question_count": 0,
+                    "metadata": {"model": "checker"},
+                }
+
+            async def extract_turn(self, **kwargs):
+                self.calls.append("extract")
+                assert kwargs["turn"].latest_utterance == DEFAULT_SMOKE_UTTERANCE
+                return {
+                    "decision_log_id": "extract-decision-1",
+                    "candidate_process_ids": ["process-1"],
+                    "slot_updates": [{"slot_path": "process.inventory"}],
+                    "degraded_quality": False,
+                }
+
+        class FakePlanner:
+            async def respond_turn(self, **kwargs):
+                return RespondedTurn(
+                    plan={
+                        "chosen_intent": {
+                            "intent": "capture_systems",
+                            "target_slot": "systems.systems_of_record",
+                            "score": 100,
+                            "reason": "Capture payroll system.",
+                        }
+                    },
+                    planned_agent_utterance="Which system owns payroll?",
+                    decision_log_id="respond-decision-1",
+                    metadata={"model": "deterministic-steering"},
+                    voice_metadata={"model": "voice-model"},
+                    steering_context={"target_slots": ["systems.systems_of_record"]},
+                    degraded_quality=False,
+                    degraded_reasons=[],
+                    raw={},
+                )
+
+        result = asyncio.run(
+            run_turn_smoke(
+                config=DirectorAgentConfig(
+                    otto_api_base_url="http://localhost:3000",
+                    service_token="token",
+                    capture_session_id="14125388-f796-4087-ae34-f18ab845e270",
+                    language="en",
+                    planner_runtime="next",
+                    anthropic_api_key=None,
+                    brain_model="claude-sonnet-4-6",
+                    voice_model="claude-sonnet-4-6",
+                    deepgram_model="nova-3",
+                    cartesia_model="sonic-2",
+                    cartesia_voice_id="voice-id",
+                    use_livekit_inference=True,
+                    livekit_agent_name="otto-director",
+                    voice_runtime="steered_cascade",
+                ),
+                api=FakeApi(),
+                planner=FakePlanner(),
+                preflight_result=PreflightResult(
+                    ok=True,
+                    missing_required=[],
+                    warnings=[],
+                    mode={
+                        "planner_runtime": "next",
+                        "voice_runtime": "steered_cascade",
+                    },
+                    vendor_controls={},
+                ),
+            )
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.decision_log_id, "respond-decision-1")
+        self.assertEqual(result.next_prompt, "Which system owns payroll?")
+        self.assertEqual(result.candidate_process_ids, ["process-1"])
+        self.assertIn("respond_ms", result.latency_ms)
+        self.assertIn("extraction_latency_ms", result.latency_ms)
+        self.assertTrue(result.latency_budget["backend_pre_tts_ok"])
+        self.assertEqual(
+            result.preflight["mode"]["voice_runtime"],
+            "steered_cascade",
+        )
+
     def test_turn_smoke_rejects_non_uuid_capture_session_id(self) -> None:
         result = check_smoke_environment(
             {
@@ -5185,9 +5436,13 @@ class WorkerContractTests(unittest.TestCase):
         source = inspect.getsource(worker.entrypoint)
 
         self.assertIn("turn_handling=TurnHandlingOptions(", source)
-        self.assertIn("turn_detection=MultilingualModel()", source)
-        self.assertIn('endpointing={"min_delay": 1.2, "max_delay": 6.0}', source)
-        self.assertIn('interruption={"enabled": True}', source)
+        self.assertIn("turn_detection = None", source)
+        self.assertIn("turn_detection=turn_detection", source)
+        self.assertIn('"mode": endpointing_mode(config.endpointing_mode)', source)
+        self.assertIn('"min_delay": config.endpointing_min_delay', source)
+        self.assertIn('"max_delay": config.endpointing_max_delay', source)
+        self.assertIn('"mode": interruption_mode(config.interruption_mode)', source)
+        self.assertIn('"min_duration": config.interruption_min_duration', source)
         self.assertNotIn("user_turn_limit", source)
         self.assertIn("user_away_timeout=None", source)
 
@@ -5526,7 +5781,7 @@ class WorkerContractTests(unittest.TestCase):
     def test_tts_failure_degrades_to_text_fallback_without_reraising(self) -> None:
         source = inspect.getsource(DirectorConsultantAgent._run_user_turn_completed)
         self.assertIn('delivery_status="failed_text_fallback"', source)
-        self.assertIn("delivered_utterance=dispatched.next_prompt", source)
+        self.assertIn("delivered_utterance=spoken_utterance", source)
         self.assertIn("latency_ms=failed_latency", source)
         self.assertIn("delivery_idempotency_key(", source)
         self.assertIn("_mark_delivery_interrupted_after_tts", source)
@@ -5651,6 +5906,123 @@ class WorkerContractTests(unittest.TestCase):
         self.assertEqual(decoded["payload"]["stage_name"], "director.turn")
         self.assertEqual(decoded["payload"]["agent_utterance"], delivery["delivered_utterance"])
 
+    def test_streamed_planned_utterance_starts_tts_before_full_plan_dispatch(self) -> None:
+        class FakeApi:
+            def __init__(self, tts_started: asyncio.Event) -> None:
+                self.tts_started = tts_started
+                self.calls: list[str] = []
+
+            async def ingest_turn(self, **kwargs):
+                self.calls.append("ingest")
+                return IngestedTurn(
+                    latest_utterance=kwargs["utterance"],
+                    transcript_segment_ids=["segment-1"],
+                    evidence_ids=["evidence-1"],
+                    turn_index=7,
+                    raw={},
+                )
+
+            async def dispatch_turn(self, **kwargs):
+                self.calls.append("dispatch")
+                assert self.tts_started.is_set()
+                assert kwargs["local_turn_correlation_id"].startswith("local-turn:")
+                return DispatchedTurn(
+                    next_prompt=kwargs["planned"].planned_agent_utterance,
+                    decision_log_id="decision-1",
+                    raw={"candidate_process_ids": [], "slot_updates": []},
+                )
+
+            async def update_delivery(self, **kwargs):
+                self.calls.append("delivery")
+                assert kwargs["local_turn_correlation_id"].startswith("local-turn:")
+                return {"id": "decision-1", "deliveryJson": {"delivery_status": "completed"}}
+
+        class FakePlanner:
+            def __init__(self, tts_started: asyncio.Event, release_plan: asyncio.Event) -> None:
+                self.tts_started = tts_started
+                self.release_plan = release_plan
+
+            async def plan_turn(self, **kwargs):
+                kwargs["on_planned_agent_utterance"]("Where does quote approval begin?")
+                await self.tts_started.wait()
+                await self.release_plan.wait()
+                return PlannedTurn(
+                    plan={
+                        "chosen_intent": {
+                            "intent": "define_process_boundary",
+                            "score": 100,
+                            "reason": "Drill the process.",
+                        }
+                    },
+                    planned_agent_utterance="Where does quote approval begin?",
+                    metadata={"model": "claude-sonnet-4-6", "streaming": True},
+                    voice_metadata={
+                        "model": "claude-sonnet-4-6",
+                        "utterance_source": "brain_planned_utterance",
+                        "llm_call_elided": True,
+                    },
+                    degraded_quality=False,
+                    raw={"local_turn_correlation_id": kwargs["local_turn_correlation_id"]},
+                    local_turn_correlation_id=kwargs["local_turn_correlation_id"],
+                )
+
+        class FakeSpeech:
+            interrupted = False
+
+            async def wait_for_playout(self):
+                return None
+
+        class FakeSession:
+            def __init__(self, tts_started: asyncio.Event, release_plan: asyncio.Event) -> None:
+                self.tts_started = tts_started
+                self.release_plan = release_plan
+                self.spoken: list[str] = []
+
+            def say(self, text, *, allow_interruptions):
+                self.spoken.append(text)
+                self.tts_started.set()
+                return FakeSpeech()
+
+        class FakeParticipant:
+            async def publish_data(self, payload, *, reliable, topic):
+                return None
+
+        class FakeRoom:
+            def __init__(self) -> None:
+                self.local_participant = FakeParticipant()
+
+            def on(self, event, handler):
+                return None
+
+        async def run_case() -> tuple[FakeApi, FakeSession]:
+            tts_started = asyncio.Event()
+            release_plan = asyncio.Event()
+            api = FakeApi(tts_started)
+            session = FakeSession(tts_started, release_plan)
+            agent = DirectorConsultantAgent(
+                capture_session_id="14125388-f796-4087-ae34-f18ab845e270",
+                api=api,
+                planner=FakePlanner(tts_started, release_plan),
+                room=FakeRoom(),
+            )
+            agent._activity = SimpleNamespace(session=session)
+            message = ChatMessage(role="user", content=["Quote approvals are painful."])
+            task = asyncio.create_task(
+                agent.on_user_turn_completed(ChatContext.empty(), message)
+            )
+            await tts_started.wait()
+            assert api.calls == ["ingest"]
+            release_plan.set()
+            with self.assertRaises(StopResponse):
+                await task
+            return api, session
+
+        from livekit.agents import ChatContext, StopResponse
+
+        api, session = asyncio.run(run_case())
+        self.assertEqual(session.spoken, ["Where does quote approval begin?"])
+        self.assertEqual(api.calls, ["ingest", "dispatch", "delivery"])
+
     def test_barge_in_interrupts_prior_delivery_without_serializing_new_turn(self) -> None:
         class FakeApi:
             def __init__(self, prior_delivery_done: asyncio.Event) -> None:
@@ -5755,6 +6127,332 @@ class WorkerContractTests(unittest.TestCase):
         api, speech = asyncio.run(run_case())
         self.assertEqual(api.calls, ["ingest", "dispatch", "delivery"])
         self.assertEqual(speech.interrupt_calls, [True])
+
+    def test_steered_cascade_speaks_before_async_extract_and_check_finish(self) -> None:
+        class FakeApi:
+            def __init__(
+                self,
+                release_extract: asyncio.Event,
+                release_check: asyncio.Event,
+            ) -> None:
+                self.release_extract = release_extract
+                self.release_check = release_check
+                self.extract_started = asyncio.Event()
+                self.extract_done = asyncio.Event()
+                self.check_started = asyncio.Event()
+                self.check_done = asyncio.Event()
+                self.calls: list[str] = []
+                self.extract_payloads: list[dict[str, object]] = []
+                self.check_payloads: list[dict[str, object]] = []
+                self.delivery_payloads: list[dict[str, object]] = []
+
+            async def ingest_turn(self, **kwargs):
+                self.calls.append("ingest")
+                return IngestedTurn(
+                    latest_utterance=kwargs["utterance"],
+                    transcript_segment_ids=["segment-1"],
+                    evidence_ids=["evidence-1"],
+                    turn_index=3,
+                    raw={},
+                )
+
+            async def extract_turn(self, **kwargs):
+                self.calls.append("extract")
+                self.extract_payloads.append(kwargs)
+                self.extract_started.set()
+                await self.release_extract.wait()
+                self.extract_done.set()
+                return {
+                    "decision_log_id": "extract-decision-1",
+                    "extraction_status": "complete",
+                    "extraction_latency_ms": 12,
+                    "slot_updates": [],
+                    "coverage_slots": [],
+                    "degraded_quality": False,
+                    "degraded_reasons": [],
+                }
+
+            async def check_turn(self, **kwargs):
+                self.calls.append("check")
+                self.check_payloads.append(kwargs)
+                self.check_started.set()
+                await self.release_check.wait()
+                self.check_done.set()
+                return {
+                    "checker_status": "complete",
+                    "checker_violations": [],
+                    "checker_violation_count": 0,
+                    "stale_question_count": 0,
+                    "metadata": {"model": "checker"},
+                }
+
+            async def update_delivery(self, **kwargs):
+                self.calls.append("delivery")
+                self.delivery_payloads.append(kwargs)
+                return {
+                    "id": kwargs["decision_log_id"],
+                    "deliveryJson": {"delivery_status": kwargs["delivery_status"]},
+                }
+
+        class FakePlanner:
+            config = SimpleNamespace(voice_runtime="steered_cascade")
+
+            async def respond_turn(self, **kwargs):
+                callback = kwargs.get("on_planned_agent_utterance")
+                if callback:
+                    callback("Got it. What system owns payroll?")
+                return RespondedTurn(
+                    plan={
+                        "chosen_intent": {
+                            "intent": "capture_systems",
+                            "target_slot": "systems.systems_of_record",
+                            "score": 100,
+                            "reason": "Payroll has been mentioned; capture the system of record.",
+                        }
+                    },
+                    planned_agent_utterance="Got it. What system owns payroll?",
+                    decision_log_id="respond-decision-1",
+                    metadata={"model": "deterministic-steering"},
+                    voice_metadata={"model": "voice-model"},
+                    steering_context={
+                        "target_slots": ["systems.systems_of_record"],
+                        "do_not_ask": [],
+                    },
+                    degraded_quality=False,
+                    degraded_reasons=[],
+                    raw={
+                        "extraction_status": "pending",
+                        "local_turn_correlation_id": kwargs.get(
+                            "local_turn_correlation_id",
+                        ),
+                    },
+                    local_turn_correlation_id=kwargs.get("local_turn_correlation_id"),
+                )
+
+        class FakeSpeech:
+            interrupted = False
+
+            async def wait_for_playout(self):
+                return None
+
+        class FakeSession:
+            def __init__(self) -> None:
+                self.spoken: list[str] = []
+
+            def say(self, text, *, allow_interruptions):
+                self.spoken.append(text)
+                return FakeSpeech()
+
+        class FakeParticipant:
+            def __init__(self) -> None:
+                self.events: list[dict[str, object]] = []
+
+            async def publish_data(self, payload, *, reliable, topic):
+                del reliable, topic
+                self.events.append(json.loads(payload.decode("utf-8")))
+
+        class FakeRoom:
+            def __init__(self) -> None:
+                self.local_participant = FakeParticipant()
+
+            def on(self, event, handler):
+                return None
+
+        async def run_case():
+            release_extract = asyncio.Event()
+            release_check = asyncio.Event()
+            api = FakeApi(release_extract, release_check)
+            session = FakeSession()
+            room = FakeRoom()
+            agent = DirectorConsultantAgent(
+                capture_session_id="14125388-f796-4087-ae34-f18ab845e270",
+                api=api,
+                planner=FakePlanner(),
+                room=room,
+            )
+            agent._activity = SimpleNamespace(session=session)
+            message = ChatMessage(
+                role="user",
+                content=["I own finance and payroll."],
+            )
+            with patch("director_agent.agent.EXTRACTION_WINDOW_DEBOUNCE_SECONDS", 0.01):
+                with self.assertRaises(StopResponse):
+                    await agent.on_user_turn_completed(ChatContext.empty(), message)
+
+                self.assertEqual(session.spoken, ["Got it. What system owns payroll?"])
+                self.assertIn("delivery", api.calls)
+                self.assertFalse(api.extract_done.is_set())
+                self.assertFalse(api.check_done.is_set())
+                release_check.set()
+                release_extract.set()
+                await asyncio.wait_for(api.check_done.wait(), timeout=1)
+                await asyncio.wait_for(api.extract_done.wait(), timeout=1)
+            return api, room
+
+        from livekit.agents import ChatContext, StopResponse
+
+        api, room = asyncio.run(run_case())
+        self.assertIn("check", api.calls)
+        self.assertIn("extract", api.calls)
+        self.assertEqual(api.delivery_payloads[0]["decision_log_id"], "respond-decision-1")
+        self.assertEqual(
+            api.extract_payloads[0]["turn"].latest_utterance,
+            "I own finance and payroll.",
+        )
+        self.assertEqual(
+            api.check_payloads[0]["steering_context"]["target_slots"],
+            ["systems.systems_of_record"],
+        )
+        event_names = [event["event"] for event in room.local_participant.events]
+        self.assertIn("director.turn.dispatched", event_names)
+        self.assertIn("director.turn.output_checked", event_names)
+        self.assertIn("director.turn.extracted", event_names)
+
+    def test_steered_cascade_coalesces_quick_split_finals_for_extraction(self) -> None:
+        class FakeApi:
+            def __init__(self, release_extract: asyncio.Event) -> None:
+                self.release_extract = release_extract
+                self.extract_started = asyncio.Event()
+                self.extract_done = asyncio.Event()
+                self.turn_index = 0
+                self.extract_payloads: list[dict[str, object]] = []
+
+            async def ingest_turn(self, **kwargs):
+                self.turn_index += 1
+                return IngestedTurn(
+                    latest_utterance=kwargs["utterance"],
+                    transcript_segment_ids=[f"segment-{self.turn_index}"],
+                    evidence_ids=[f"evidence-{self.turn_index}"],
+                    turn_index=self.turn_index,
+                    raw={},
+                )
+
+            async def extract_turn(self, **kwargs):
+                self.extract_payloads.append(kwargs)
+                self.extract_started.set()
+                await self.release_extract.wait()
+                self.extract_done.set()
+                return {
+                    "decision_log_id": "extract-window-1",
+                    "extraction_status": "complete",
+                    "extraction_latency_ms": 8,
+                    "slot_updates": [],
+                    "coverage_slots": [],
+                    "degraded_quality": False,
+                    "degraded_reasons": [],
+                }
+
+            async def check_turn(self, **kwargs):
+                return {
+                    "checker_status": "complete",
+                    "checker_violations": [],
+                    "checker_violation_count": 0,
+                    "stale_question_count": 0,
+                    "metadata": {"model": "checker"},
+                }
+
+            async def update_delivery(self, **kwargs):
+                return {
+                    "id": kwargs["decision_log_id"],
+                    "deliveryJson": {"delivery_status": kwargs["delivery_status"]},
+                }
+
+        class FakePlanner:
+            config = SimpleNamespace(voice_runtime="steered_cascade")
+
+            async def respond_turn(self, **kwargs):
+                callback = kwargs.get("on_planned_agent_utterance")
+                utterance = f"Fast response {kwargs['turn'].turn_index}?"
+                if callback:
+                    callback(utterance)
+                return RespondedTurn(
+                    plan={
+                        "chosen_intent": {
+                            "intent": "discover_processes",
+                            "target_slot": "process.inventory",
+                            "score": 100,
+                            "reason": "Capture process inventory.",
+                        }
+                    },
+                    planned_agent_utterance=utterance,
+                    decision_log_id=f"respond-{kwargs['turn'].turn_index}",
+                    metadata={"model": "deterministic-steering"},
+                    voice_metadata={"model": "voice-model"},
+                    steering_context={"target_slots": ["process.inventory"]},
+                    degraded_quality=False,
+                    degraded_reasons=[],
+                    raw={"extraction_status": "pending"},
+                    local_turn_correlation_id=kwargs.get("local_turn_correlation_id"),
+                )
+
+        class FakeSpeech:
+            interrupted = False
+
+            async def wait_for_playout(self):
+                return None
+
+        class FakeSession:
+            def __init__(self) -> None:
+                self.spoken: list[str] = []
+
+            def say(self, text, *, allow_interruptions):
+                self.spoken.append(text)
+                return FakeSpeech()
+
+        class FakeParticipant:
+            async def publish_data(self, payload, *, reliable, topic):
+                return None
+
+        class FakeRoom:
+            local_participant = FakeParticipant()
+
+            def on(self, event, handler):
+                return None
+
+        async def run_case():
+            release_extract = asyncio.Event()
+            api = FakeApi(release_extract)
+            session = FakeSession()
+            agent = DirectorConsultantAgent(
+                capture_session_id="14125388-f796-4087-ae34-f18ab845e270",
+                api=api,
+                planner=FakePlanner(),
+                room=FakeRoom(),
+            )
+            agent._activity = SimpleNamespace(session=session)
+            with patch("director_agent.agent.EXTRACTION_WINDOW_DEBOUNCE_SECONDS", 0.05):
+                for text in [
+                    "We handle payroll management,",
+                    "cost optimization and closing books.",
+                ]:
+                    with self.assertRaises(StopResponse):
+                        await agent.on_user_turn_completed(
+                            ChatContext.empty(),
+                            ChatMessage(role="user", content=[text]),
+                        )
+                await asyncio.wait_for(api.extract_started.wait(), timeout=1)
+                self.assertEqual(len(api.extract_payloads), 1)
+                release_extract.set()
+                await asyncio.wait_for(api.extract_done.wait(), timeout=1)
+            return api, session
+
+        from livekit.agents import ChatContext, StopResponse
+
+        api, session = asyncio.run(run_case())
+        self.assertEqual(session.spoken, ["Fast response 1?", "Fast response 2?"])
+        extracted_turn = api.extract_payloads[0]["turn"]
+        self.assertEqual(
+            extracted_turn.latest_utterance,
+            "We handle payroll management, cost optimization and closing books.",
+        )
+        self.assertEqual(
+            extracted_turn.transcript_segment_ids,
+            ["segment-1", "segment-2"],
+        )
+        self.assertEqual(
+            extracted_turn.raw["window_turn_indexes"],
+            [1, 2],
+        )
 
     def test_barge_in_path_has_no_prior_delivery_timeout_serializer(self) -> None:
         source = inspect.getsource(DirectorConsultantAgent)
@@ -6005,13 +6703,10 @@ class WorkerContractTests(unittest.TestCase):
         self.assertIn('"director.turn.ingested"', source)
         self.assertLess(
             source.index('"director.turn.ingested"'),
-            source.index("planned = await self._planner.plan_turn"),
+            source.index("plan_task = asyncio.create_task"),
         )
         self.assertIn("_publish_turn_telemetry", source)
-        self.assertLess(
-            source.index("_publish_turn_telemetry"),
-            source.index("speech = self.session.say"),
-        )
+        self.assertIn("pre_tts_total_ms\": elapsed_ms(turn_started, speech_started_at)", source)
         telemetry_source = inspect.getsource(DirectorConsultantAgent._publish_turn_telemetry)
         self.assertIn('"director.turn.telemetry"', telemetry_source)
         self.assertIn('"pre_tts_total_ms"', source)
@@ -6154,9 +6849,10 @@ class WorkerContractTests(unittest.TestCase):
             room.handlers["data_received"](FakePacket("resume"))
             self.assertFalse(agent._paused)
             agent._active_speech = speech
-            room.handlers["data_received"](FakePacket("end"))
-            await asyncio.sleep(0)
-            await asyncio.sleep(0)
+            with patch("director_agent.agent.COMPLETION_DISCONNECT_GRACE_SECONDS", 0):
+                room.handlers["data_received"](FakePacket("end"))
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
             self.assertTrue(agent._ended)
             self.assertTrue(room.disconnect_called)
             self.assertEqual(len(api.completed), 1)
@@ -6358,12 +7054,13 @@ class WorkerContractTests(unittest.TestCase):
             )
             active_turn_done = asyncio.Event()
             agent._active_turn_done = active_turn_done
-            room.handlers["data_received"](FakePacket())
-            await asyncio.sleep(0)
-            self.assertFalse(api.completed)
-            self.assertFalse(room.disconnect_called)
-            active_turn_done.set()
-            await asyncio.sleep(0)
+            with patch("director_agent.agent.COMPLETION_DISCONNECT_GRACE_SECONDS", 0):
+                room.handlers["data_received"](FakePacket())
+                await asyncio.sleep(0)
+                self.assertFalse(api.completed)
+                self.assertFalse(room.disconnect_called)
+                active_turn_done.set()
+                await asyncio.sleep(0)
             return api, room
 
         api, room = asyncio.run(run_case())
@@ -6414,12 +7111,13 @@ class WorkerContractTests(unittest.TestCase):
                 expected_control_participant_identity="director-user",
             )
             active_delivery_done = agent._begin_active_delivery()
-            room.handlers["data_received"](FakePacket())
-            await asyncio.sleep(0)
-            self.assertFalse(api.completed)
-            self.assertFalse(room.disconnect_called)
-            agent._finish_active_delivery(active_delivery_done)
-            await asyncio.sleep(0)
+            with patch("director_agent.agent.COMPLETION_DISCONNECT_GRACE_SECONDS", 0):
+                room.handlers["data_received"](FakePacket())
+                await asyncio.sleep(0)
+                self.assertFalse(api.completed)
+                self.assertFalse(room.disconnect_called)
+                agent._finish_active_delivery(active_delivery_done)
+                await asyncio.sleep(0)
             return api, room
 
         api, room = asyncio.run(run_case())
@@ -6471,7 +7169,10 @@ class WorkerContractTests(unittest.TestCase):
                 room=room,
                 expected_control_participant_identity="director-user",
             )
-            with patch("director_agent.agent.COMPLETION_RETRY_DELAYS_SECONDS", (0, 0)):
+            with (
+                patch("director_agent.agent.COMPLETION_RETRY_DELAYS_SECONDS", (0, 0)),
+                patch("director_agent.agent.COMPLETION_DISCONNECT_GRACE_SECONDS", 0),
+            ):
                 room.handlers["data_received"](FakePacket())
                 await asyncio.sleep(0)
                 await asyncio.sleep(0)
@@ -6536,9 +7237,10 @@ class WorkerContractTests(unittest.TestCase):
                 room=room,
                 expected_control_participant_identity="director-user",
             )
-            room.handlers["data_received"](FakePacket())
-            await asyncio.sleep(0)
-            await asyncio.sleep(0)
+            with patch("director_agent.agent.COMPLETION_DISCONNECT_GRACE_SECONDS", 0):
+                room.handlers["data_received"](FakePacket())
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
             return room
 
         room = asyncio.run(run_case())

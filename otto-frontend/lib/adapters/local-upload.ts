@@ -1,7 +1,7 @@
 import "server-only";
 
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 type LocalUploadMetadata = {
@@ -56,6 +56,29 @@ export async function readLocalUpload(key: string) {
     bytes,
     metadata: JSON.parse(metadataRaw) as LocalUploadMetadata,
   };
+}
+
+export async function deleteLocalUpload(key: string) {
+  await Promise.all([
+    unlinkIfExists(localUploadDataPath(key)),
+    unlinkIfExists(localUploadMetadataPath(key)),
+  ]);
+}
+
+async function unlinkIfExists(path: string) {
+  try {
+    await unlink(path);
+  } catch (error) {
+    if (
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      return;
+    }
+    throw error;
+  }
 }
 
 function localUploadDataPath(key: string) {

@@ -46,6 +46,7 @@ export const phase1EvidenceSchema = z.object({
 
 export const phase1SlotStateSchema = z.object({
   slot_path: z.string().min(1),
+  candidate_process_id: z.string().uuid().optional(),
   value: z.unknown().optional(),
   status: slotStateStatusSchema,
   confidence: z.number().min(0).max(1),
@@ -105,6 +106,11 @@ export const directorIntentSchema = z.object({
 
 export const directorTurnPlanSchema = z.object({
   utterance_type: directorUtteranceTypeSchema,
+  chosen_intent: directorIntentSchema,
+  planned_agent_utterance: z.string().min(1).optional(),
+  current_phase: directorInterviewPhaseSchema,
+  proposed_next_phase: directorInterviewPhaseSchema,
+  phase_transition_ready: z.boolean(),
   slot_updates: z.array(phase1SlotStateSchema),
   claims: z.array(phase1ClaimSchema),
   tool_calls: z
@@ -115,11 +121,7 @@ export const directorTurnPlanSchema = z.object({
       }).strict(),
     ),
   contradiction_signals: z.array(z.string()),
-  current_phase: directorInterviewPhaseSchema,
-  proposed_next_phase: directorInterviewPhaseSchema,
-  phase_transition_ready: z.boolean(),
   ranked_intents: z.array(directorIntentSchema),
-  chosen_intent: directorIntentSchema,
   focus_candidate_process_id: z.string().uuid().optional(),
 }).strict();
 
@@ -199,10 +201,12 @@ export const agentDecisionLogSchema = z.object({
   latencyMs: z.number().int().min(0).optional(),
   cacheHit: z.boolean().optional(),
   degradedQuality: z.boolean().default(false),
+  degradedReasons: z.array(z.string().min(1)).default([]),
 });
 
 export type AgentDecisionLogInput = z.input<typeof agentDecisionLogSchema>;
 export type DirectorTurnPlan = z.infer<typeof directorTurnPlanSchema>;
+export type SlotExtraction = z.infer<typeof slotExtractionSchema>;
 export type DirectorIntent = z.infer<typeof directorIntentSchema>;
 export type DirectorInterviewPhase = z.infer<typeof directorInterviewPhaseSchema>;
 export type DirectorUtteranceType = z.infer<typeof directorUtteranceTypeSchema>;

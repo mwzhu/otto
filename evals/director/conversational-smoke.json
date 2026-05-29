@@ -53,6 +53,27 @@
       }
     },
     {
+      "id": "ordinal_finance_inventory_does_not_repeat_inventory_prompt",
+      "current_phase": "orient",
+      "utterance": "I run the financial department. And we're responsible for three things. The first one being procurement. Second one being accounting, and the third one being cost optimization.",
+      "expected": {
+        "utterance_type": "substantive_answer",
+        "chosen_intent": "select_process_to_expand",
+        "proposed_next_phase": "expand",
+        "required_processes": [
+          "Procurement",
+          "Accounting",
+          "Cost Optimization"
+        ],
+        "required_slot_updates": [
+          "function.name",
+          "process.inventory"
+        ],
+        "required_phrase_fragments": ["procurement", "where does it start"],
+        "forbidden_phrase_fragments": ["rough list of recurring processes"]
+      }
+    },
+    {
       "id": "metrics_wait_until_process_known",
       "current_phase": "inventory",
       "current_slots": {

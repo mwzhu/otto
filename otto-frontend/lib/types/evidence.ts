@@ -26,6 +26,8 @@ export type Evidence = {
 };
 
 export type ClaimSubjectType =
+  | "process_node"
+  | "process_edge"
   | "node"
   | "edge"
   | "exception"

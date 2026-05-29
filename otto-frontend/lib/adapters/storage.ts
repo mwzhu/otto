@@ -1,10 +1,10 @@
 import "server-only";
 
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { getServerEnv, requireEnv } from "@/lib/env";
 import { withRetry, type RetryOptions } from "@/lib/adapters/retry";
-import { localUploadUrl } from "@/lib/adapters/local-upload";
+import { deleteLocalUpload, localUploadUrl } from "@/lib/adapters/local-upload";
 
 let s3: S3Client | null = null;
 
@@ -54,6 +54,25 @@ export function storagePublicUrl(key: string) {
   }
   const base = requireEnv("R2_PUBLIC_BASE_URL").replace(/\/$/, "");
   return `${base}/${key}`;
+}
+
+export async function deleteArtifactObject(input: {
+  key: string;
+  retry?: RetryOptions;
+}) {
+  if (shouldUseLocalUploadFallback()) {
+    await deleteLocalUpload(input.key);
+    return { ok: true as const, storage: "local" as const };
+  }
+  await withRetry(async () => {
+    await getS3().send(
+      new DeleteObjectCommand({
+        Bucket: requireEnv("R2_BUCKET"),
+        Key: input.key,
+      }),
+    );
+  }, input.retry);
+  return { ok: true as const, storage: "r2" as const };
 }
 
 function getS3() {

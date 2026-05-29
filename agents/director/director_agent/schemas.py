@@ -24,12 +24,34 @@ class PlannedTurnResponse(OttoApiModel):
     metadata: dict[str, Any] | None = None
     voice_metadata: dict[str, Any] | None = None
     degraded_quality: bool = False
+    degraded_reasons: list[str] = Field(default_factory=list)
 
     @field_validator("plan")
     @classmethod
     def validate_plan_contract(cls, value: dict[str, Any]) -> dict[str, Any]:
         validated = DirectorTurnPlan.model_validate(value)
         return validated.model_dump(mode="json", exclude_none=True)
+
+
+class RespondedTurnResponse(PlannedTurnResponse):
+    decision_log_id: str
+    steering_context: dict[str, Any] | None = None
+    local_turn_correlation_id: str | None = None
+
+
+class ExtractionTurnResponse(OttoApiModel):
+    next_prompt: str
+    decision_log_id: str
+    extraction_status: str = "complete"
+    extraction_latency_ms: int | None = None
+
+
+class CheckedTurnResponse(OttoApiModel):
+    checker_status: str = "complete"
+    checker_violations: list[dict[str, Any]] = Field(default_factory=list)
+    checker_violation_count: int = 0
+    stale_question_count: int = 0
+    metadata: dict[str, Any] | None = None
 
 
 class PlanningContextResponse(OttoApiModel):
@@ -145,6 +167,7 @@ class DirectorProcessInventory(StrictApiModel):
 
 class SlotUpdate(StrictApiModel):
     slot_path: str
+    candidate_process_id: UUID | None = None
     value: Any | None = None
     status: Literal[
         "empty",
@@ -202,13 +225,14 @@ class DirectorTurnPlan(StrictApiModel):
         "contradiction",
         "off_topic",
     ]
+    chosen_intent: DirectorIntent
+    planned_agent_utterance: str | None = None
+    current_phase: Literal["orient", "inventory", "expand", "enrich", "closeout"]
+    proposed_next_phase: Literal["orient", "inventory", "expand", "enrich", "closeout"]
+    phase_transition_ready: bool
     slot_updates: list[SlotUpdate]
     claims: list[PlanClaim]
     tool_calls: list[ToolCall]
     contradiction_signals: list[str]
-    current_phase: Literal["orient", "inventory", "expand", "enrich", "closeout"]
-    proposed_next_phase: Literal["orient", "inventory", "expand", "enrich", "closeout"]
-    phase_transition_ready: bool
     ranked_intents: list[DirectorIntent]
-    chosen_intent: DirectorIntent
     focus_candidate_process_id: UUID | None = None

@@ -4,15 +4,21 @@ import { join } from "node:path";
 import { parse } from "yaml";
 import { z } from "zod";
 import {
+  applyDeterministicFallbackForMockedResult,
   buildPromptCacheBlocks,
   deterministicTurnPlan,
   directorTurnPlanAnthropicToolSchema,
   gateDirectorPhase,
+  materializeDirectorProcessInventory,
   mergeDeterministicExtractions,
   preflightDirectorPlanEvidence,
   selectPhaseGatedDirectorIntent,
 } from "@/lib/interview/director/brain";
-import { structured, StructuredOutputError } from "@/lib/adapters/llm";
+import {
+  completeJsonStringField,
+  structured,
+  StructuredOutputError,
+} from "@/lib/adapters/llm";
 import { embedBatch, embedTextWithMetadata } from "@/lib/adapters/vector";
 import {
   anthropicMaxTokensForPrompt,
@@ -78,6 +84,51 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(buildDocumentExtractionStaticInput().length).toBeGreaterThan(4096);
   });
 
+  test("streaming planner waits for the complete planned utterance string", () => {
+    const partial =
+      '{"chosen_intent":{"intent":"discover_processes"},"planned_agent_utterance":"Thanks, wh';
+    const complete = `${partial}ich recurring processes should we list first?","slot_updates":[]}`;
+
+    expect(completeJsonStringField(partial, "planned_agent_utterance")).toBeNull();
+    expect(completeJsonStringField(complete, "planned_agent_utterance")).toBe(
+      "Thanks, which recurring processes should we list first?",
+    );
+  });
+
+  test("director turn tool schema orders live utterance before bookkeeping arrays", () => {
+    const jsonSchema = JSON.parse(read("../schemas/director-turn-plan.schema.json"));
+    const propertyOrder = Object.keys(jsonSchema.properties);
+
+    expect(propertyOrder.indexOf("chosen_intent")).toBeLessThan(
+      propertyOrder.indexOf("slot_updates"),
+    );
+    expect(propertyOrder.indexOf("planned_agent_utterance")).toBeLessThan(
+      propertyOrder.indexOf("slot_updates"),
+    );
+  });
+
+  test("director planner SSE route flushes before waiting on Anthropic", () => {
+    const route = read("app/api/internal/director-turns/plan/route.ts");
+    const readyIndex = route.indexOf('send("ready", { status: "planning" })');
+    const planIndex = route.indexOf("await planDirectorTurnStreamed");
+
+    expect(readyIndex).toBeGreaterThan(-1);
+    expect(planIndex).toBeGreaterThan(-1);
+    expect(readyIndex).toBeLessThan(planIndex);
+  });
+
+  test("director plan prompt carries live voice quality guidance", () => {
+    const blocks = buildPromptCacheBlocks({
+      currentSlots: new Map(),
+      recentTurns: [],
+      latestUtterance: "test",
+    });
+
+    expect(blocks.staticBlock).toContain("warm but efficient operations consultant");
+    expect(blocks.staticBlock).toContain("Do not sound like a survey");
+    expect(blocks.staticBlock).toContain("choose chosen_intent and planned_agent_utterance first");
+  });
+
   test("director slot schema rejects model-invented slot paths", () => {
     expect(() => assertDirectorSlotPath("outcomes.business_outcomes")).not.toThrow();
     expect(() => assertDirectorSlotPath("outcomes.business")).toThrow(
@@ -128,6 +179,82 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(plan.tool_calls).toHaveLength(0);
   });
 
+  test("director fallback extracts finance inventory from voice continuation phrasing", () => {
+    const plan = (latestUtterance: string) =>
+      deterministicTurnPlan({
+        latestUtterance,
+        evidenceIds: ["00000000-0000-0000-0000-000000000004"],
+        currentSlots: new Map(),
+        currentPhase: "orient",
+        candidateProcessNames: [],
+      });
+    const firstPlan = plan(
+      "Okay. Cool. Own the finance department. We're in charge of payroll. And cost management. As well as other, like, closing books.",
+    );
+    const secondPlan = plan(
+      "Great. I own the finance department. We're in charge of payroll management. Cost management, and also closing the books.",
+    );
+    const latestDogfoodPlan = plan(
+      "Great. I am the finance department. We're in charge of a couple different things. Like payroll management, cost management, and closing books.",
+    );
+
+    expect(firstPlan.slot_updates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          slot_path: "function.name",
+          value: { function_name: "The Finance Department" },
+        }),
+        expect.objectContaining({
+          slot_path: "process.inventory",
+          value: { processes: ["Payroll", "Cost Management", "Closing Books"] },
+        }),
+      ]),
+    );
+    expect(firstPlan.tool_calls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "recordProcess", arguments: expect.objectContaining({ name: "Payroll" }) }),
+        expect.objectContaining({ name: "recordProcess", arguments: expect.objectContaining({ name: "Cost Management" }) }),
+        expect.objectContaining({ name: "recordProcess", arguments: expect.objectContaining({ name: "Closing Books" }) }),
+      ]),
+    );
+    expect(secondPlan.slot_updates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          slot_path: "process.inventory",
+          value: {
+            processes: [
+              "Payroll Management",
+              "Cost Management",
+              "Closing Books",
+            ],
+          },
+        }),
+      ]),
+    );
+    expect(latestDogfoodPlan.slot_updates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          slot_path: "process.inventory",
+          value: {
+            processes: [
+              "Payroll Management",
+              "Cost Management",
+              "Closing Books",
+            ],
+          },
+        }),
+      ]),
+    );
+    expect(latestDogfoodPlan.tool_calls).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "recordProcess",
+          arguments: expect.objectContaining({ name: "A Couple Different Things" }),
+        }),
+      ]),
+    );
+  });
+
   test("director fallback answers meta questions without resetting the interview phase", async () => {
     const plan = deterministicTurnPlan({
       latestUtterance: "how long is this going to take?",
@@ -175,6 +302,8 @@ describe("Week 3 director brain and document pipeline", () => {
             reason: "Boundary is still unresolved.",
             style_hint: "last_attempt",
           },
+          planned_agent_utterance:
+            "Last try on this one before I mark it as unknown: where does the process begin and end?",
         },
         recentTurns: ["I'm not sure."],
         coverageSummary: "scope.boundaries partial",
@@ -215,6 +344,7 @@ describe("Week 3 director brain and document pipeline", () => {
             score: 100,
             reason: "Owner is still unresolved.",
           },
+          planned_agent_utterance: "Who is accountable for quote approvals?",
         },
         recentTurns: ["Quote approvals start in Slack."],
         coverageSummary: "ownership.roles empty",
@@ -267,6 +397,7 @@ describe("Week 3 director brain and document pipeline", () => {
         score: 100,
         reason: "Model tried to close early.",
       },
+      planned_agent_utterance: "Before we wrap, what have we missed?",
     } satisfies DirectorTurnPlan;
 
     expect(gateDirectorPhase(prematurePlan, new Map(), [], [])).toBe("orient");
@@ -457,7 +588,177 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(plan.chosen_intent.target_process).toBe("Quote Approvals");
   });
 
-  test("director LLM plans keep deterministic factual extractions when under-specified", () => {
+  test("director fallback treats payroll step narration as process detail, not new processes", () => {
+    const plan = deterministicTurnPlan({
+      latestUtterance:
+        "Yeah. So it's successful payroll end to end. Looks like we first begin by looking at Google Sheets, and then we move data to we reconciled with the make sure all the salaries are right for our employees on NetSuite, and then we send off to Sarah does a final check, and then we we finish.",
+      evidenceIds: ["00000000-0000-0000-0000-000000000034"],
+      currentSlots: new Map([
+        ["function.name", { status: "filled", confidence: 0.97 }],
+        ["process.inventory", { status: "partial", confidence: 0.95 }],
+      ]),
+      currentPhase: "expand",
+      candidateProcessNames: ["AP", "closing books", "payroll"],
+      priorIntent: "select_process_to_expand",
+    });
+
+    const processNames = plan.tool_calls
+      .filter((tool) => tool.name === "recordProcess")
+      .map((tool) => tool.arguments.name);
+    const systemNames = plan.tool_calls
+      .filter((tool) => tool.name === "recordSystem")
+      .map((tool) => tool.arguments.name);
+
+    expect(processNames).toEqual([]);
+    expect(systemNames).toEqual(["NetSuite", "Google Sheets"]);
+    expect(plan.chosen_intent.target_process).toBe("payroll");
+    expect(
+      plan.slot_updates.find((slot) => slot.slot_path === "process.inventory"),
+    ).toBeUndefined();
+  });
+
+  test("director deterministic merge does not resurrect step narration as recordProcess", () => {
+    const deterministicPlan = deterministicTurnPlan({
+      latestUtterance:
+        "Looks like we first begin by looking at Google Sheets, and then we move data to NetSuite, and then we send off to Sarah for a final check.",
+      evidenceIds: ["00000000-0000-0000-0000-000000000035"],
+      currentSlots: new Map(),
+      currentPhase: "expand",
+      candidateProcessNames: ["payroll"],
+    });
+    const sparseLlmPlan = {
+      ...deterministicPlan,
+      tool_calls: [
+        {
+          name: "recordProcess",
+          arguments: {
+            name: "Then We Send Off To Sarah For A Final Check",
+          },
+        },
+      ],
+    } satisfies DirectorTurnPlan;
+
+    const merged = mergeDeterministicExtractions(sparseLlmPlan, deterministicPlan);
+    const processNames = merged.tool_calls
+      .filter((tool) => tool.name === "recordProcess")
+      .map((tool) => tool.arguments.name);
+
+    expect(processNames).toEqual([]);
+  });
+
+  test("director deterministic extraction only merges when structured output is mocked", () => {
+    const deterministicPlan = deterministicTurnPlan({
+      latestUtterance:
+        "I run finance. We own AP, payroll, and closing books.",
+      evidenceIds: ["00000000-0000-0000-0000-000000000036"],
+      currentSlots: new Map(),
+      currentPhase: "orient",
+      candidateProcessNames: [],
+    });
+    const authoritativeLlmPlan = {
+      ...deterministicPlan,
+      slot_updates: [],
+      tool_calls: [],
+    } satisfies DirectorTurnPlan;
+
+    expect(
+      applyDeterministicFallbackForMockedResult(
+        authoritativeLlmPlan,
+        deterministicPlan,
+        { mocked: false },
+      ).tool_calls,
+    ).toEqual([]);
+    expect(
+      applyDeterministicFallbackForMockedResult(
+        authoritativeLlmPlan,
+        deterministicPlan,
+        { mocked: true },
+      ).tool_calls.map((tool) => tool.name),
+    ).toContain("recordProcess");
+  });
+
+  test("director LLM process inventory materializes candidate process tools", () => {
+    const chosenIntent = {
+      intent: "discover_processes",
+      target_slot: "process.inventory",
+      score: 100,
+      reason: "Capture the named processes.",
+    };
+    const plan = materializeDirectorProcessInventory({
+      utterance_type: "substantive_answer",
+      slot_updates: [
+        {
+          slot_path: "function.name",
+          status: "filled",
+          confidence: 0.91,
+          evidence_ids: ["00000000-0000-0000-0000-000000000037"],
+          priority: 100,
+          value: { name: "finance" },
+        },
+        {
+          slot_path: "process.inventory",
+          status: "filled",
+          confidence: 0.88,
+          evidence_ids: ["00000000-0000-0000-0000-000000000037"],
+          priority: 90,
+          value: {
+            processes: [
+              "Accounts Payable (AP)",
+              "Payroll",
+              "Cost Optimization",
+            ],
+          },
+        },
+      ],
+      claims: [],
+      tool_calls: [
+        {
+          name: "recordCandidateProcessClaim",
+          arguments: {
+            targetProcess: "Accounts Payable (AP)",
+            field: "proposed_name",
+            value: "Accounts Payable (AP)",
+            confidence: 0.88,
+          },
+        },
+      ],
+      contradiction_signals: [],
+      current_phase: "orient",
+      proposed_next_phase: "expand",
+      phase_transition_ready: true,
+      ranked_intents: [chosenIntent],
+      chosen_intent: chosenIntent,
+      planned_agent_utterance: "Which one should we expand first?",
+    } satisfies DirectorTurnPlan);
+
+    expect(
+      plan.tool_calls
+        .filter((tool) => tool.name === "recordProcess")
+        .map((tool) => tool.arguments),
+    ).toEqual([
+      {
+        name: "Accounts Payable (AP)",
+        confidence: 0.88,
+        proposedFunction: "finance",
+      },
+      { name: "Payroll", confidence: 0.88, proposedFunction: "finance" },
+      {
+        name: "Cost Optimization",
+        confidence: 0.88,
+        proposedFunction: "finance",
+      },
+    ]);
+    expect(plan.tool_calls).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "recordCandidateProcessClaim",
+          arguments: expect.objectContaining({ field: "proposed_name" }),
+        }),
+      ]),
+    );
+  });
+
+  test("mocked director structured output can use deterministic factual fallback", () => {
     const deterministicPlan = deterministicTurnPlan({
       latestUtterance:
         "I run revenue operations. My team owns forecasting, territory changes, quote approvals, and weekly pipeline inspection. Sales, finance, and legal are involved, mostly in Salesforce, Clari, and Slack.",
@@ -466,7 +767,7 @@ describe("Week 3 director brain and document pipeline", () => {
       currentPhase: "orient",
       candidateProcessNames: [],
     });
-    const sparseLlmPlan = {
+    const sparseMockPlan = {
       ...deterministicPlan,
       slot_updates: [
         {
@@ -486,7 +787,11 @@ describe("Week 3 director brain and document pipeline", () => {
       },
     } satisfies DirectorTurnPlan;
 
-    const merged = mergeDeterministicExtractions(sparseLlmPlan, deterministicPlan);
+    const merged = applyDeterministicFallbackForMockedResult(
+      sparseMockPlan,
+      deterministicPlan,
+      { mocked: true },
+    );
     const slotPaths = merged.slot_updates.map((slot) => slot.slot_path);
     const processNames = merged.tool_calls
       .filter((tool) => tool.name === "recordProcess")
@@ -641,6 +946,7 @@ describe("Week 3 director brain and document pipeline", () => {
         phase_transition_ready: false,
         ranked_intents: [baseIntent],
         chosen_intent: baseIntent,
+        planned_agent_utterance: "What metric should we use here?",
       },
       [currentEvidence],
     );
@@ -669,11 +975,15 @@ describe("Week 3 director brain and document pipeline", () => {
       title: "DirectorTurnPlan",
       additionalProperties: false,
     });
+    expect(toolSchema.required).toContain("planned_agent_utterance");
     expect(
       ((toolSchema.properties as Record<string, unknown>).tool_calls as {
         items: { additionalProperties: boolean };
       }).items.additionalProperties,
     ).toBe(false);
+    expect(serialized).toContain('"function.name"');
+    expect(serialized).toContain('"process.inventory"');
+    expect(serialized).toContain('"select_process_to_expand"');
   });
 
   test("director TypeScript schemas stay aligned with shared JSON Schema artifacts", () => {
@@ -909,6 +1219,9 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(complete).toContain("completeDirectorInterviewInTransaction");
     expect(complete).toContain('source: "browser"');
     expect(complete).toContain("sendDirectorCompletionEvent(result.eventData)");
+    expect(completion).toContain("requestAndRunDirectorInventorySynthesis");
+    expect(completion).toContain("runInventorySynthesis");
+    expect(completion).toContain('eventType: "capture.director_interview.inline_synthesis_failed"');
     expect(completion.indexOf("await inngest.send")).toBeGreaterThan(
       completion.indexOf("if (!eventData) return;"),
     );
@@ -983,6 +1296,15 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(completion).toContain("directorSlotDefinitions.filter");
     expect(completion).toContain('targetType: "director_slot"');
     expect(completion).toContain("unresolved_priority_follow_up_tasks_created");
+    const synthesisStatus = read("app/api/synthesis/status/route.ts");
+    const synthesisClient = read("app/synthesis/SynthesisClient.tsx");
+    expect(synthesisStatus).toContain('searchParams.get("capture_session_id")');
+    expect(synthesisStatus).toContain("getCaptureInventoryCount");
+    expect(synthesisStatus).toContain("capture_process_count");
+    expect(synthesisStatus).toContain("@> ARRAY[");
+    expect(synthesisClient).toContain('sp.get("capture_session_id")');
+    expect(synthesisClient).toContain("params.set(\"capture_session_id\"");
+    expect(synthesisClient).toContain("!captureSessionId && !synthesisBlocked && statusTimedOut");
     expect(transaction).toContain("capture_session_completed");
     expect(transaction).toContain("capture_session_completed_at");
     expect(transaction).toContain("captureSessions.completedAt");
@@ -1118,7 +1440,8 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(plan.indexOf("await assertDirectorTurnReferences")).toBeLessThan(
       plan.indexOf("await planDirectorTurn"),
     );
-    expect(plan).toContain("degraded_quality: planned.degraded_quality || phrased.metadata.mocked");
+    expect(plan).toContain("voiceMetadataDegrades(phrased.metadata)");
+    expect(plan).toContain("planDirectorTurnStreamed");
     expect(dispatch).toContain("assertDirectorTurnReferences");
     expect(dispatch.indexOf("await assertDirectorTurnReferences")).toBeLessThan(
       dispatch.indexOf("await dispatchDirectorTurnPlan"),
@@ -1133,7 +1456,7 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(brain).toContain("coverage_slots");
     expect(brain).toContain("readCoverageSnapshot");
     expect(brain).toContain("degradedQuality = llmResult.metadata.mocked");
-    expect(brain).toContain("degradedQuality: planned.degraded_quality || phrased.metadata.mocked");
+    expect(brain).toContain("degradedQuality: planned.degraded_quality || voiceMetadataDegrades");
     expect(brain).toContain("preflightDirectorPlanEvidence");
     expect(brain).toContain("Director assertions must cite evidence ids from the current turn");
     expect(brain).toContain("selectActiveCandidateProcessId");
@@ -1152,14 +1475,15 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(brain).toContain("runDirectorTool");
     expect(brain).toContain("const state = await readInterviewState(context, tx);");
     expect(brain).toContain(
-      "const currentSlotsBeforeDispatch = await readCurrentSlots(context, tx);",
+      "const currentSlotsBeforeDispatch = await readCurrentSlots(",
     );
     expect(brain).toContain("tx?: ClaimWriteTx");
-    expect(brain).toContain("isDirectorToolRequiredByChosenIntent");
-    expect(brain).toContain("isMalformedDirectorClaimRequiredByChosenIntent");
-    expect(brain).toContain("directorClaimFieldLooksLikeIntent");
-    expect(brain).toContain("Required director tool failed");
-    expect(brain).toContain("Required director claim failed validation");
+    expect(brain).not.toContain("isDirectorToolRequiredByChosenIntent");
+    expect(brain).not.toContain("isMalformedDirectorClaimRequiredByChosenIntent");
+    expect(brain).not.toContain("directorClaimFieldLooksLikeIntent");
+    expect(brain).not.toContain("Required director tool failed");
+    expect(brain).not.toContain("Required director claim failed validation");
+    expect(brain).toContain("The latest answer does not need to satisfy the chosen intent");
     expect(brain).toContain("Review skipped director enrichment");
     expect(brain).toContain("exhaustedProbeEscalation");
     expect(brain).toContain('source: "probe_max_fires"');
@@ -1247,12 +1571,14 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(transcriptChat).toContain("liveKitDirectorTurnIndexesRef.current = new Set");
     expect(transcriptChat).toContain("liveKitAgentTurnKeysRef.current = new Set");
     expect(transcriptChat).toContain('parsed.event === "director.session.completed"');
-    expect(transcriptChat).toContain("onCompleted();");
+    expect(transcriptChat).toContain("await onCompleted();");
     expect(transcriptChat).toContain("const navigateToSynthesis = useCallback");
     expect(transcriptChat).toContain("completeDirectorInterview(session)");
+    expect(transcriptChat).toContain("completionNavigationStartedRef");
+    expect(transcriptChat).toContain("capture_session_id");
     expect(transcriptChat).toContain("isRetryableCompleteError");
-    expect(transcriptChat).toContain("isDeliveryPendingCompleteError");
-    expect(transcriptChat).toContain("attempt <= 8");
+    expect(transcriptChat).toContain("isCompletionSettlingError");
+    expect(transcriptChat).toContain("attempt <= 60");
     expect(transcriptChat).toContain("error.status === 409");
     expect(transcriptChat.indexOf('sendLiveKitControl(\n          liveKitRoomRef.current,\n          "end"')).toBeLessThan(
       transcriptChat.indexOf("return;\n      } else"),
@@ -1260,6 +1586,14 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(transcriptChat).toContain("const endControlSent = await sendLiveKitControl");
     expect(transcriptChat).toContain("if (!endControlSent)");
     expect(transcriptChat).toContain("await completeDirectorInterview(session)");
+    expect(transcriptChat).toContain("disconnectLiveKitRoom(liveKitRoomRef, liveKitMicTrackRef, liveKitAudioElsRef)");
+    const liveKitEndMicIndex = transcriptChat.indexOf("setMicrophoneEnabled?.(false)");
+    const liveKitEndCompleteIndex = transcriptChat.indexOf(
+      "await completeDirectorInterview(session)",
+      liveKitEndMicIndex,
+    );
+    expect(liveKitEndMicIndex).toBeGreaterThan(-1);
+    expect(liveKitEndCompleteIndex).toBeGreaterThan(liveKitEndMicIndex);
     expect(transcriptChat).toContain("return true");
     expect(transcriptChat).toContain("return false");
     expect(transcriptChat).toContain("Press End again to retry");
@@ -1430,12 +1764,18 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(worker).not.toContain("MAX_USER_TURN_SECONDS");
     expect(worker).not.toContain("user_turn_limit");
     expect(worker).toContain("turn_handling=TurnHandlingOptions(");
-    expect(worker).toContain('endpointing={"min_delay": 1.2, "max_delay": 6.0}');
-    expect(worker).toContain('interruption={"enabled": True}');
+    expect(worker).toContain("turn_detection = None");
+    expect(worker).toContain("if config.use_semantic_turn_detector:");
+    expect(worker).toContain("turn_detection=turn_detection");
+    expect(worker).toContain("endpointing={");
+    expect(worker).toContain('"min_delay": config.endpointing_min_delay');
+    expect(worker).toContain('"max_delay": config.endpointing_max_delay');
+    expect(worker).toContain("interruption={");
+    expect(worker).toContain('"enabled": True');
     expect(worker).toContain("user_away_timeout=None");
     expect(worker).not.toContain('session.on("user_state_changed"');
-    expect(agent).toContain('self.session.on("user_state_changed", self._on_user_state_changed)');
-    expect(agent).toContain('self.session.on("user_input_transcribed", self._on_user_input_transcribed)');
+    expect(agent).toContain('session.on("user_state_changed", self._on_user_state_changed)');
+    expect(agent).toContain('session.on("user_input_transcribed", self._on_user_input_transcribed)');
     expect(agent).toContain("_supersede_active_turn");
     expect(agent).not.toContain("_interrupt_and_wait_for_prior_delivery");
     expect(agent).not.toContain("prior_delivery_timeout");
@@ -1453,7 +1793,8 @@ describe("Week 3 director brain and document pipeline", () => {
     );
     expect(transcriptChat).toContain("room.localParticipant.publishData(payload");
     expect(transcriptChat).not.toContain("const publishData = room?.localParticipant.publishData");
-    expect(transcriptChat).toContain("refreshCoverage(session, parsed.payload.slot_updates ?? [])");
+    expect(transcriptChat).toContain("coverageUpdateFromPayload(session, parsed.payload)");
+    expect(transcriptChat).toContain("refreshCoverage(session, payload.slot_updates)");
     expect(transcriptChat).not.toContain("parsed.payload.slot_updates.map((slot)");
     expect(livekit).toContain("LIVEKIT_AGENT_SERVICE_TOKEN");
     expect(livekit).toContain("OTTO_INTERNAL_API_BASE_URL");
@@ -1657,11 +1998,15 @@ describe("Week 3 director brain and document pipeline", () => {
 
     expect(synthesisClient).toContain("/api/synthesis/status");
     expect(synthesisClient).toContain("sp.get(\"workspace_id\")");
-    expect(synthesisClient).toContain("encodeURIComponent(workspaceId)");
+    expect(synthesisClient).toContain("new URLSearchParams()");
+    expect(synthesisClient).toContain('params.set("workspace_id", workspaceId)');
+    expect(synthesisClient).toContain("appendCaptureContextToOverview");
+    expect(synthesisClient).toContain("params.set(\"capture_session_id\", context.captureSessionId)");
+    expect(synthesisClient).toContain("params.set(\"workspace_id\", context.workspaceId)");
     expect(synthesisClient).toContain("ready_for_overview");
     expect(synthesisClient).toContain("const synthesisBlocked");
     expect(synthesisClient).toContain("status.ready_for_overview !== true");
-    expect(synthesisClient).toContain("(!synthesisBlocked && statusTimedOut)");
+    expect(synthesisClient).toContain("!captureSessionId && !synthesisBlocked && statusTimedOut");
     expect(synthesisClient).not.toContain("status?.terminal === true ||");
     expect(synthesisClient).toContain("STATUS_TIMEOUT_MS");
     expect(statusRoute).toContain("ensureWorkspaceRole");
@@ -1670,6 +2015,12 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(statusRoute).toContain("getOverviewMetrics");
     expect(statusRoute).toContain("ready_for_overview");
     expect(statusRoute).toContain('latestRun?.status === "completed"');
+    const overviewPage = read("app/overview/page.tsx");
+    expect(overviewPage).toContain("capture_session_id");
+    expect(overviewPage).toContain("workspace_id");
+    expect(overviewPage).toContain("getWorkspaceForUser");
+    expect(overviewPage).toContain("getWorkspaceForCaptureSession");
+    expect(read("lib/overview/queries.ts")).toContain("captureSessionId");
     expect(transcriptChat).toContain("workspace_id=");
     expect(transcriptChat).toContain("session.workspaceId");
     expect(uploadClient).toContain("otto.phase0.workspaceId");
@@ -1706,6 +2057,17 @@ describe("Week 3 director brain and document pipeline", () => {
           SYNTHESIS_PLANNER_MODEL: undefined,
           ANTHROPIC_MODEL: undefined,
         },
+        "director.turn.plan",
+      ),
+    ).toBe("claude-sonnet-4-6");
+    expect(
+      anthropicModelForPrompt(
+        {
+          DIRECTOR_BRAIN_MODEL: undefined,
+          DIRECTOR_VOICE_MODEL: undefined,
+          SYNTHESIS_PLANNER_MODEL: undefined,
+          ANTHROPIC_MODEL: undefined,
+        },
         "director.voice.phrase-intent",
       ),
     ).toBe("claude-sonnet-4-6");
@@ -1720,7 +2082,7 @@ describe("Week 3 director brain and document pipeline", () => {
         "synthesis.inventory",
       ),
     ).toBe("claude-opus-4-7");
-    expect(anthropicMaxTokensForPrompt("director.turn.plan")).toBe(500);
+    expect(anthropicMaxTokensForPrompt("director.turn.plan")).toBe(8000);
     expect(anthropicMaxTokensForPrompt("director.voice.phrase-intent")).toBe(200);
     expect(anthropicMaxTokensForPrompt("synthesis.inventory")).toBe(1200);
     expect(anthropicPricingForModel("claude-haiku-4-5").output).toBeLessThan(

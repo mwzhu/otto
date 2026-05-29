@@ -1,0 +1,263 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "valid-linear-evidence-backed",
+      "expected_ok": true,
+      "graph": {
+        "nodes": [
+          {
+            "id": "start",
+            "type": "start",
+            "position": { "x": 0, "y": 0 },
+            "data": { "title": "Start", "confidence": 0.35 }
+          },
+          {
+            "id": "step-1",
+            "type": "task",
+            "position": { "x": 240, "y": 0 },
+            "data": {
+              "title": "Open request",
+              "confidence": 0.72,
+              "evidence_ids": ["evidence-1"]
+            }
+          },
+          {
+            "id": "end",
+            "type": "end",
+            "position": { "x": 480, "y": 0 },
+            "data": { "title": "End", "confidence": 0.35 }
+          }
+        ],
+        "edges": [
+          { "id": "edge-1", "source": "start", "target": "step-1", "edge_type": "seq" },
+          { "id": "edge-2", "source": "step-1", "target": "end", "edge_type": "seq" }
+        ]
+      }
+    },
+    {
+      "id": "valid-low-confidence-inferred-task",
+      "expected_ok": true,
+      "graph": {
+        "nodes": [
+          {
+            "id": "start",
+            "type": "start",
+            "position": { "x": 0, "y": 0 },
+            "data": { "title": "Start", "confidence": 0.35 }
+          },
+          {
+            "id": "step-1",
+            "type": "task",
+            "position": { "x": 240, "y": 0 },
+            "data": {
+              "title": "Follow-up needed",
+              "confidence": 0.2
+            }
+          },
+          {
+            "id": "end",
+            "type": "end",
+            "position": { "x": 480, "y": 0 },
+            "data": { "title": "End", "confidence": 0.35 }
+          }
+        ],
+        "edges": [
+          { "id": "edge-1", "source": "start", "target": "step-1", "edge_type": "seq" },
+          { "id": "edge-2", "source": "step-1", "target": "end", "edge_type": "seq" }
+        ]
+      }
+    },
+    {
+      "id": "invalid-two-starts",
+      "expected_ok": false,
+      "expected_issue_codes": ["invalid_start_count"],
+      "graph": {
+        "nodes": [
+          {
+            "id": "start-a",
+            "type": "start",
+            "position": { "x": 0, "y": 0 },
+            "data": { "title": "Start A" }
+          },
+          {
+            "id": "start-b",
+            "type": "start",
+            "position": { "x": 120, "y": 0 },
+            "data": { "title": "Start B" }
+          },
+          {
+            "id": "end",
+            "type": "end",
+            "position": { "x": 240, "y": 0 },
+            "data": { "title": "End" }
+          }
+        ],
+        "edges": [
+          { "id": "edge-1", "source": "start-a", "target": "end", "edge_type": "seq" }
+        ]
+      }
+    },
+    {
+      "id": "invalid-dangling-edge",
+      "expected_ok": false,
+      "expected_issue_codes": ["dangling_edge"],
+      "graph": {
+        "nodes": [
+          {
+            "id": "start",
+            "type": "start",
+            "position": { "x": 0, "y": 0 },
+            "data": { "title": "Start" }
+          },
+          {
+            "id": "end",
+            "type": "end",
+            "position": { "x": 240, "y": 0 },
+            "data": { "title": "End" }
+          }
+        ],
+        "edges": [
+          { "id": "edge-1", "source": "start", "target": "missing", "edge_type": "seq" }
+        ]
+      }
+    },
+    {
+      "id": "invalid-unreachable-node",
+      "expected_ok": false,
+      "expected_issue_codes": ["unreachable_node"],
+      "graph": {
+        "nodes": [
+          {
+            "id": "start",
+            "type": "start",
+            "position": { "x": 0, "y": 0 },
+            "data": { "title": "Start" }
+          },
+          {
+            "id": "step-1",
+            "type": "task",
+            "position": { "x": 240, "y": 0 },
+            "data": { "title": "Open request", "confidence": 0.72, "evidence_ids": ["e1"] }
+          },
+          {
+            "id": "orphan",
+            "type": "task",
+            "position": { "x": 240, "y": 160 },
+            "data": { "title": "Orphan step", "confidence": 0.72, "evidence_ids": ["e2"] }
+          },
+          {
+            "id": "end",
+            "type": "end",
+            "position": { "x": 480, "y": 0 },
+            "data": { "title": "End" }
+          }
+        ],
+        "edges": [
+          { "id": "edge-1", "source": "start", "target": "step-1", "edge_type": "seq" },
+          { "id": "edge-2", "source": "step-1", "target": "end", "edge_type": "seq" }
+        ]
+      }
+    },
+    {
+      "id": "invalid-unevidenced-high-confidence-task",
+      "expected_ok": false,
+      "expected_issue_codes": ["unevidenced_high_confidence_node"],
+      "graph": {
+        "nodes": [
+          {
+            "id": "start",
+            "type": "start",
+            "position": { "x": 0, "y": 0 },
+            "data": { "title": "Start" }
+          },
+          {
+            "id": "step-1",
+            "type": "task",
+            "position": { "x": 240, "y": 0 },
+            "data": { "title": "Unsupported task", "confidence": 0.8 }
+          },
+          {
+            "id": "end",
+            "type": "end",
+            "position": { "x": 480, "y": 0 },
+            "data": { "title": "End" }
+          }
+        ],
+        "edges": [
+          { "id": "edge-1", "source": "start", "target": "step-1", "edge_type": "seq" },
+          { "id": "edge-2", "source": "step-1", "target": "end", "edge_type": "seq" }
+        ]
+      }
+    },
+    {
+      "id": "invalid-dead-end-task",
+      "expected_ok": false,
+      "expected_issue_codes": ["missing_outgoing_edge", "unreachable_end"],
+      "graph": {
+        "nodes": [
+          {
+            "id": "start",
+            "type": "start",
+            "position": { "x": 0, "y": 0 },
+            "data": { "title": "Start", "confidence": 0.35 }
+          },
+          {
+            "id": "step-1",
+            "type": "task",
+            "position": { "x": 240, "y": 0 },
+            "data": {
+              "title": "Review request",
+              "confidence": 0.72,
+              "evidence_ids": ["evidence-1"]
+            }
+          },
+          {
+            "id": "end",
+            "type": "end",
+            "position": { "x": 480, "y": 0 },
+            "data": { "title": "End", "confidence": 0.35 }
+          }
+        ],
+        "edges": [
+          { "id": "edge-1", "source": "start", "target": "step-1", "edge_type": "seq" }
+        ]
+      }
+    },
+    {
+      "id": "valid-explicit-terminal-exception",
+      "expected_ok": true,
+      "graph": {
+        "nodes": [
+          {
+            "id": "start",
+            "type": "start",
+            "position": { "x": 0, "y": 0 },
+            "data": { "title": "Start", "confidence": 0.35 }
+          },
+          {
+            "id": "terminal-exception",
+            "type": "exception",
+            "position": { "x": 240, "y": 0 },
+            "data": {
+              "title": "Reject invalid request",
+              "confidence": 0.72,
+              "terminal": true,
+              "evidence_ids": ["evidence-1"]
+            }
+          },
+          {
+            "id": "end",
+            "type": "end",
+            "position": { "x": 480, "y": 0 },
+            "data": { "title": "End", "confidence": 0.35 }
+          }
+        ],
+        "edges": [
+          { "id": "edge-1", "source": "start", "target": "terminal-exception", "edge_type": "seq" },
+          { "id": "edge-2", "source": "start", "target": "end", "edge_type": "seq" }
+        ]
+      }
+    }
+  ]
+}

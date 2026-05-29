@@ -49,7 +49,8 @@ def check_environment(env: Mapping[str, str | None] | None = None) -> PreflightR
         "yes",
     }
     strict = is_strict_director_voice_mode(env)
-    planner_runtime = str(env.get("OTTO_DIRECTOR_PLANNER_RUNTIME", "python")).strip().lower()
+    planner_runtime = str(env.get("OTTO_DIRECTOR_PLANNER_RUNTIME", "next")).strip().lower()
+    voice_runtime = voice_runtime_from_env(env)
     if not use_inference:
         for name in ["DEEPGRAM_API_KEY", "CARTESIA_API_KEY"]:
             if not configured_env_value(env, name):
@@ -86,11 +87,9 @@ def check_environment(env: Mapping[str, str | None] | None = None) -> PreflightR
         ]:
             if not acknowledged:
                 missing.append(name)
-        if planner_runtime == "next":
-            missing.append("OTTO_DIRECTOR_PLANNER_RUNTIME=python")
-    if planner_runtime == "next":
+    if planner_runtime == "python":
         warnings.append(
-            "OTTO_DIRECTOR_PLANNER_RUNTIME=next delegates brain/voice planning to Next.js and is debug-only."
+            "OTTO_DIRECTOR_PLANNER_RUNTIME=python uses the buffered Python planner; live early-utterance streaming requires the default Next.js /plan runtime."
         )
     if not use_inference:
         warnings.append(
@@ -106,6 +105,7 @@ def check_environment(env: Mapping[str, str | None] | None = None) -> PreflightR
         warnings=warnings,
         mode={
             "planner_runtime": planner_runtime,
+            "voice_runtime": voice_runtime,
             "use_livekit_inference": use_inference,
             "language": env.get("OTTO_DIRECTOR_LANGUAGE", "en"),
             "deepgram_model": env.get("DEEPGRAM_MODEL", "nova-3"),
@@ -113,6 +113,27 @@ def check_environment(env: Mapping[str, str | None] | None = None) -> PreflightR
             "brain_model": director_brain_model(env),
             "voice_model": director_voice_model(env),
             "voice_phrase_timeout_ms": int_env(env, "OTTO_VOICE_PHRASE_TIMEOUT_MS", 2500),
+            "endpointing_mode": str(
+                env.get("OTTO_DIRECTOR_ENDPOINTING_MODE", "dynamic")
+            ).strip().lower(),
+            "endpointing_min_delay": float_env(
+                env,
+                "OTTO_DIRECTOR_ENDPOINTING_MIN_DELAY",
+                1.2,
+            ),
+            "endpointing_max_delay": float_env(
+                env,
+                "OTTO_DIRECTOR_ENDPOINTING_MAX_DELAY",
+                6.0,
+            ),
+            "interruption_mode": str(
+                env.get("OTTO_DIRECTOR_INTERRUPTION_MODE", "vad")
+            ).strip().lower(),
+            "interruption_min_duration": float_env(
+                env,
+                "OTTO_DIRECTOR_INTERRUPTION_MIN_DURATION",
+                0.25,
+            ),
             "livekit_agent_name": env.get("LIVEKIT_AGENT_NAME", "otto-director"),
             "audio_recording_default": "off",
             "strict": strict,
@@ -177,8 +198,9 @@ def check_smoke_environment(
         mode={
             "smoke_only": True,
             "planner_runtime": str(
-                env.get("OTTO_DIRECTOR_PLANNER_RUNTIME", "python")
+                env.get("OTTO_DIRECTOR_PLANNER_RUNTIME", "next")
             ).strip().lower(),
+            "voice_runtime": voice_runtime_from_env(env),
             "capture_session_id": env.get("OTTO_CAPTURE_SESSION_ID"),
             "brain_model": director_brain_model(env),
             "voice_model": director_voice_model(env),
@@ -255,12 +277,30 @@ def bool_from_env(env: Mapping[str, str | None], name: str) -> bool:
     return str(env.get(name, "")).strip().lower() in {"1", "true", "yes"}
 
 
+def voice_runtime_from_env(env: Mapping[str, str | None]) -> str:
+    value = str(env.get("OTTO_DIRECTOR_VOICE_RUNTIME", "planned_cascade")).strip().lower()
+    if value in {"planned_cascade", "steered_cascade", "steered_realtime"}:
+        return value
+    return "planned_cascade"
+
+
 def int_env(env: Mapping[str, str | None], name: str, default: int) -> int:
     raw_value = str(env.get(name) or "").strip()
     if not configured_value(raw_value):
         return default
     try:
         parsed = int(raw_value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def float_env(env: Mapping[str, str | None], name: str, default: float) -> float:
+    raw_value = str(env.get(name) or "").strip()
+    if not configured_value(raw_value):
+        return default
+    try:
+        parsed = float(raw_value)
     except ValueError:
         return default
     return parsed if parsed > 0 else default

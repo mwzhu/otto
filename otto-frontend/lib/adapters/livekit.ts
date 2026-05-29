@@ -10,6 +10,7 @@ import {
 import { getServerEnv } from "@/lib/env";
 
 const DEFAULT_DIRECTOR_AGENT_NAME = "otto-director";
+const DEFAULT_OPERATOR_AGENT_NAME = "otto-operator";
 const DIRECTOR_BROWSER_TOKEN_TTL_SECONDS = 60 * 60;
 const STRICT_VENDOR_PRIVACY_ACKS = [
   "OTTO_VENDOR_PRIVACY_ACK",
@@ -81,6 +82,10 @@ export type DirectorRoomToken = {
   reason?: string;
 };
 
+export type OperatorRoomToken = DirectorRoomToken & {
+  captureMode: "operator_voice" | "operator_screenshare";
+};
+
 export type DirectorVoiceReadiness = {
   mode: "simulated" | "livekit" | "unconfigured";
   requiresMicrophone: boolean;
@@ -98,10 +103,21 @@ export class DirectorVoiceConfigurationError extends Error {
   }
 }
 
+export class OperatorVoiceConfigurationError extends Error {
+  constructor(
+    public readonly missing: string[],
+    message = `LiveKit operator voice is not fully configured (${missing.join(", ")} missing).`,
+  ) {
+    super(message);
+    this.name = "OperatorVoiceConfigurationError";
+  }
+}
+
 export function directorVoiceReadiness(
   env: LiveKitEnv = getServerEnv(),
 ): DirectorVoiceReadiness {
-  const missing = requiredLiveKitVoiceEnv(env);
+  const strictVoiceMode = isStrictDirectorVoiceMode(env);
+  const missing = requiredLiveKitVoiceEnv(env, strictVoiceMode);
   if (missing.length === 0) {
     return {
       mode: "livekit",
@@ -116,6 +132,35 @@ export function directorVoiceReadiness(
       requiresMicrophone: false,
       missing,
       reason: `Strict director voice mode is enabled, but LiveKit voice is not fully configured (${missing.join(", ")} missing).`,
+    };
+  }
+  return {
+    mode: "simulated",
+    requiresMicrophone: false,
+    missing,
+    reason: `LiveKit voice is not fully configured (${missing.join(", ")} missing); using transcript simulation mode.`,
+  };
+}
+
+export function operatorVoiceReadiness(
+  env: LiveKitEnv = getServerEnv(),
+): DirectorVoiceReadiness {
+  const strictVoiceMode = isStrictOperatorVoiceMode(env);
+  const missing = requiredLiveKitVoiceEnv(env, strictVoiceMode);
+  if (missing.length === 0) {
+    return {
+      mode: "livekit",
+      requiresMicrophone: true,
+      missing: [],
+      reason: null,
+    };
+  }
+  if (strictVoiceMode) {
+    return {
+      mode: "unconfigured",
+      requiresMicrophone: false,
+      missing,
+      reason: `Strict operator voice mode is enabled, but LiveKit voice is not fully configured (${missing.join(", ")} missing).`,
     };
   }
   return {
@@ -213,13 +258,122 @@ export async function createDirectorRoomToken(input: {
   };
 }
 
+export async function createOperatorRoomToken(input: {
+  captureSessionId: string;
+  processId: string;
+  captureMode: "operator_voice" | "operator_screenshare";
+  participantIdentity: string;
+  language: string;
+}, deps: LiveKitRoomDeps = {}): Promise<OperatorRoomToken> {
+  const env = deps.env ?? getServerEnv();
+  const room = `operator-${input.captureSessionId}`;
+  const readiness = operatorVoiceReadiness(env);
+  if (readiness.mode !== "livekit") {
+    if (readiness.mode === "unconfigured") {
+      throw new OperatorVoiceConfigurationError(
+        readiness.missing,
+        readiness.reason ?? undefined,
+      );
+    }
+    return {
+      mode: "simulated",
+      room,
+      url: null,
+      token: null,
+      tokenExpiresAt: null,
+      captureMode: input.captureMode,
+      reason: readiness.reason ?? undefined,
+    };
+  }
+
+  const agentName =
+    env.LIVEKIT_OPERATOR_AGENT_NAME ??
+    env.LIVEKIT_AGENT_NAME ??
+    DEFAULT_OPERATOR_AGENT_NAME;
+  const agentParticipantIdentity = operatorAgentParticipantIdentity(
+    input.captureSessionId,
+  );
+  const roomMetadata = JSON.stringify({
+    capture_session_id: input.captureSessionId,
+    process_id: input.processId,
+    capture_mode: input.captureMode,
+    language: input.language,
+    agent_name: agentName,
+    agent_participant_identity: agentParticipantIdentity,
+    audio_recording_default: "off",
+    egress_recording_default: "off",
+    data_channel_logging: "not_logged_by_livekit",
+    screen_share_expected: input.captureMode === "operator_screenshare",
+    strict_voice_mode: isStrictOperatorVoiceMode(env),
+    vendor_privacy_ack: env.OTTO_VENDOR_PRIVACY_ACK === true,
+    deepgram_no_store_ack: env.OTTO_DEEPGRAM_NO_STORE_ACK === true,
+    cartesia_no_retention_ack: env.OTTO_CARTESIA_NO_RETENTION_ACK === true,
+    anthropic_raw_logging_off_ack:
+      env.OTTO_ANTHROPIC_RAW_LOGGING_OFF_ACK === true,
+  });
+  await ensureLiveKitRoom({
+    liveKitUrl: env.LIVEKIT_URL!,
+    apiKey: env.LIVEKIT_API_KEY!,
+    apiSecret: env.LIVEKIT_API_SECRET!,
+    room,
+    metadata: roomMetadata,
+    roomClientFactory: deps.roomClientFactory,
+  });
+  const dispatchId = await ensureAgentDispatch({
+    liveKitUrl: env.LIVEKIT_URL!,
+    apiKey: env.LIVEKIT_API_KEY!,
+    apiSecret: env.LIVEKIT_API_SECRET!,
+    room,
+    agentName,
+    metadata: roomMetadata,
+    dispatchClientFactory: deps.dispatchClientFactory,
+  });
+
+  const tokenExpiresAt = new Date(
+    Date.now() + DIRECTOR_BROWSER_TOKEN_TTL_SECONDS * 1000,
+  ).toISOString();
+  return {
+    mode: "livekit",
+    room,
+    url: env.LIVEKIT_URL!,
+    token: await (deps.mintToken ?? mintLiveKitJwt)({
+      apiKey: env.LIVEKIT_API_KEY!,
+      apiSecret: env.LIVEKIT_API_SECRET!,
+      room,
+      participantIdentity: input.participantIdentity,
+      metadata: JSON.stringify({
+        role: "operator",
+        capture_session_id: input.captureSessionId,
+        process_id: input.processId,
+        capture_mode: input.captureMode,
+      }),
+      ttlSeconds: DIRECTOR_BROWSER_TOKEN_TTL_SECONDS,
+      canPublishSources:
+        input.captureMode === "operator_screenshare"
+          ? [TrackSource.MICROPHONE, TrackSource.SCREEN_SHARE]
+          : [TrackSource.MICROPHONE],
+    }),
+    tokenExpiresAt,
+    agentName,
+    agentParticipantIdentity,
+    dispatchId,
+    captureMode: input.captureMode,
+  };
+}
+
 export function directorAgentParticipantIdentity(captureSessionId: string) {
   return `otto-director-agent-${captureSessionId}`;
 }
 
-function requiredLiveKitVoiceEnv(env: ReturnType<typeof getServerEnv>): string[] {
+export function operatorAgentParticipantIdentity(captureSessionId: string) {
+  return `otto-operator-agent-${captureSessionId}`;
+}
+
+function requiredLiveKitVoiceEnv(
+  env: ReturnType<typeof getServerEnv>,
+  strictVoiceMode: boolean,
+): string[] {
   const missing: string[] = [];
-  const strictVoiceMode = isStrictDirectorVoiceMode(env);
   for (const [key, value] of [
     ["LIVEKIT_URL", env.LIVEKIT_URL],
     ["LIVEKIT_API_KEY", env.LIVEKIT_API_KEY],
@@ -237,9 +391,6 @@ function requiredLiveKitVoiceEnv(env: ReturnType<typeof getServerEnv>): string[]
     }
     if (!configuredEnvValue(env.ANTHROPIC_API_KEY)) {
       missing.push("ANTHROPIC_API_KEY");
-    }
-    if (normalizedPlannerRuntime(env) === "next") {
-      missing.push("OTTO_DIRECTOR_PLANNER_RUNTIME=python");
     }
   }
   if (env.OTTO_USE_LIVEKIT_INFERENCE !== true) {
@@ -260,9 +411,11 @@ function isStrictDirectorVoiceMode(env: ReturnType<typeof getServerEnv>) {
   );
 }
 
-function normalizedPlannerRuntime(env: ReturnType<typeof getServerEnv>) {
-  const value = env.OTTO_DIRECTOR_PLANNER_RUNTIME;
-  return typeof value === "string" ? value.trim().toLowerCase() : value;
+function isStrictOperatorVoiceMode(env: ReturnType<typeof getServerEnv>) {
+  return (
+    env.OTTO_OPERATOR_PREFLIGHT_STRICT === true ||
+    env.NODE_ENV === "production"
+  );
 }
 
 function configuredEnvValue(value: unknown) {
@@ -322,6 +475,18 @@ async function ensureDirectorAgentDispatch(input: {
   metadata: string;
   dispatchClientFactory?: LiveKitRoomDeps["dispatchClientFactory"];
 }) {
+  return ensureAgentDispatch(input);
+}
+
+async function ensureAgentDispatch(input: {
+  liveKitUrl: string;
+  apiKey: string;
+  apiSecret: string;
+  room: string;
+  agentName: string;
+  metadata: string;
+  dispatchClientFactory?: LiveKitRoomDeps["dispatchClientFactory"];
+}) {
   const client =
     input.dispatchClientFactory?.(input) ??
     new AgentDispatchClient(
@@ -354,7 +519,7 @@ function dispatchHasReusableJob(dispatch: LiveKitDispatchLike) {
 }
 
 function hasEndedAt(value: unknown) {
-  if (typeof value === "bigint") return value !== 0n;
+  if (typeof value === "bigint") return value !== BigInt(0);
   if (typeof value === "number") return value !== 0;
   if (typeof value === "string") return value.trim() !== "" && value !== "0";
   return Boolean(value);
@@ -379,6 +544,7 @@ async function mintLiveKitJwt(input: {
   participantIdentity: string;
   metadata: string;
   ttlSeconds: number;
+  canPublishSources?: TrackSource[];
 }) {
   const token = new AccessToken(input.apiKey, input.apiSecret, {
     identity: input.participantIdentity,
@@ -389,7 +555,7 @@ async function mintLiveKitJwt(input: {
     room: input.room,
     roomJoin: true,
     canPublish: true,
-    canPublishSources: [TrackSource.MICROPHONE],
+    canPublishSources: input.canPublishSources ?? [TrackSource.MICROPHONE],
     canSubscribe: true,
     canPublishData: true,
   });

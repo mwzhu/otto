@@ -1490,6 +1490,7 @@ dependencies = [
     { name = "httpx" },
     { name = "livekit-agents", extra = ["cartesia", "deepgram", "turn-detector"] },
     { name = "livekit-plugins-silero" },
+    { name = "otto-realtime-core" },
     { name = "pydantic" },
     { name = "pyyaml" },
 ]
@@ -1499,9 +1500,15 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "livekit-agents", extras = ["cartesia", "deepgram", "turn-detector"], specifier = "~=1.5" },
     { name = "livekit-plugins-silero", specifier = "~=1.2" },
+    { name = "otto-realtime-core", editable = "../realtime_core" },
     { name = "pydantic", specifier = ">=2.8.0" },
     { name = "pyyaml", specifier = ">=6.0" },
 ]
+
+[[package]]
+name = "otto-realtime-core"
+version = "0.1.0"
+source = { editable = "../realtime_core" }
 
 [[package]]
 name = "packaging"

@@ -9,7 +9,13 @@ import { ApiError } from "@/lib/http/json";
 export type ClaimSubject =
   | { type: "process"; id: string }
   | { type: "process_version"; id: string }
+  | { type: "process_node"; id: string }
+  | { type: "process_edge"; id: string }
   | { type: "candidate_process"; id: string }
+  | { type: "exception"; id: string }
+  | { type: "workaround"; id: string }
+  | { type: "variant"; id: string }
+  | { type: "narrative_paragraph"; id: string }
   | { type: "system"; id: string }
   | { type: "role"; id: string }
   | { type: "person"; id: string };
@@ -235,6 +241,35 @@ async function lockParentRow(
     return;
   }
 
+  if (input.subject.type === "process_node") {
+    await lockSubjectTable(tx, input, "process_nodes", "Process node not found.");
+    return;
+  }
+
+  if (input.subject.type === "process_edge") {
+    await lockSubjectTable(tx, input, "process_edges", "Process edge not found.");
+    return;
+  }
+
+  if (input.subject.type === "exception") {
+    await lockSubjectTable(tx, input, "exceptions", "Exception not found.");
+    return;
+  }
+
+  if (input.subject.type === "workaround") {
+    await lockSubjectTable(tx, input, "workarounds", "Workaround not found.");
+    return;
+  }
+
+  if (input.subject.type === "variant") {
+    await lockSubjectTable(tx, input, "variants", "Variant not found.");
+    return;
+  }
+
+  if (input.subject.type === "narrative_paragraph") {
+    return;
+  }
+
   if (input.subject.type === "candidate_process") {
     const result = await tx.execute(sql`
       SELECT id
@@ -287,6 +322,25 @@ async function lockParentRow(
   `);
   if (result.rows.length === 0) {
     throw new ApiError(404, "not_found", "Person not found.");
+  }
+}
+
+async function lockSubjectTable(
+  tx: Parameters<Parameters<ReturnType<typeof getDb>["transaction"]>[0]>[0],
+  input: WriteClaimInput,
+  tableName: "process_nodes" | "process_edges" | "exceptions" | "workarounds" | "variants",
+  notFoundMessage: string,
+) {
+  const result = await tx.execute(sql`
+    SELECT id
+    FROM ${sql.raw(tableName)}
+    WHERE id = ${input.subject.id}
+      AND org_id = ${input.orgId}
+      AND workspace_id = ${input.workspaceId}
+    FOR UPDATE
+  `);
+  if (result.rows.length === 0) {
+    throw new ApiError(404, "not_found", notFoundMessage);
   }
 }
 

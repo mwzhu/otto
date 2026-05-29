@@ -14,6 +14,11 @@ const directorPlannerRuntimeEnv = z.preprocess(
   z.enum(["python", "next"]).optional(),
 );
 
+const directorVoiceRuntimeEnv = z.preprocess(
+  (value) => (typeof value === "string" ? value.trim().toLowerCase() : value),
+  z.enum(["planned_cascade", "steered_cascade", "steered_realtime"]).optional(),
+);
+
 export const serverEnvSchema = z.object({
   NODE_ENV: z
     .enum(["development", "test", "production"])
@@ -37,11 +42,15 @@ export const serverEnvSchema = z.object({
   LIVEKIT_API_KEY: z.string().optional(),
   LIVEKIT_API_SECRET: z.string().optional(),
   LIVEKIT_AGENT_NAME: z.string().optional(),
+  LIVEKIT_OPERATOR_AGENT_NAME: z.string().optional(),
   LIVEKIT_AGENT_SERVICE_TOKEN: z.string().optional(),
   OTTO_INTERNAL_API_BASE_URL: z.string().url().optional(),
   OTTO_USE_LIVEKIT_INFERENCE: boolEnv,
   OTTO_DIRECTOR_PREFLIGHT_STRICT: boolEnv,
+  OTTO_OPERATOR_PREFLIGHT_STRICT: boolEnv,
   OTTO_DIRECTOR_PLANNER_RUNTIME: directorPlannerRuntimeEnv,
+  OTTO_DIRECTOR_VOICE_RUNTIME: directorVoiceRuntimeEnv,
+  OTTO_OPERATOR_USE_SEPARATE_VOICE_LLM: boolEnv,
   OTTO_VENDOR_PRIVACY_ACK: boolEnv,
   OTTO_DEEPGRAM_NO_STORE_ACK: boolEnv,
   OTTO_CARTESIA_NO_RETENTION_ACK: boolEnv,
@@ -54,6 +63,7 @@ export const serverEnvSchema = z.object({
   ANTHROPIC_MODEL: z.string().optional(),
   DIRECTOR_BRAIN_MODEL: z.string().optional(),
   DIRECTOR_VOICE_MODEL: z.string().optional(),
+  OPERATOR_BRAIN_MODEL: z.string().optional(),
   SYNTHESIS_PLANNER_MODEL: z.string().optional(),
   LLAMAPARSE_API_KEY: z.string().optional(),
   LLAMAPARSE_API_URL: z.string().url().optional(),

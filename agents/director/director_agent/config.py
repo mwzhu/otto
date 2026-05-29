@@ -27,6 +27,8 @@ class DirectorAgentConfig:
     cartesia_voice_id: str
     use_livekit_inference: bool
     livekit_agent_name: str
+    voice_runtime: str = "planned_cascade"
+    use_semantic_turn_detector: bool = False
     livekit_url: str | None = None
     livekit_api_key: str | None = None
     livekit_api_secret: str | None = None
@@ -36,6 +38,13 @@ class DirectorAgentConfig:
     cartesia_no_retention_ack: bool = False
     anthropic_raw_logging_off_ack: bool = False
     voice_phrase_timeout_ms: int = 2500
+    use_separate_voice_llm: bool = False
+    endpointing_mode: str = "dynamic"
+    endpointing_min_delay: float = 1.2
+    endpointing_max_delay: float = 6.0
+    endpointing_alpha: float = 0.8
+    interruption_mode: str = "vad"
+    interruption_min_duration: float = 0.25
 
     @classmethod
     def from_env(cls) -> "DirectorAgentConfig":
@@ -59,12 +68,7 @@ class DirectorAgentConfig:
                 "Missing ANTHROPIC_API_KEY. Strict director voice mode cannot use "
                 "deterministic fallback planning."
             )
-        planner_runtime = os.getenv("OTTO_DIRECTOR_PLANNER_RUNTIME", "python").strip().lower()
-        if strict_preflight and planner_runtime == "next":
-            raise RuntimeError(
-                "OTTO_DIRECTOR_PLANNER_RUNTIME=next is debug-only. Strict director "
-                "voice mode requires the Python-owned brain/voice runtime."
-            )
+        planner_runtime = os.getenv("OTTO_DIRECTOR_PLANNER_RUNTIME", "next").strip().lower()
         use_livekit_inference = bool_env("OTTO_USE_LIVEKIT_INFERENCE")
         otto_api_base_url = required_env("OTTO_INTERNAL_API_BASE_URL").rstrip("/")
         service_token = required_env("LIVEKIT_AGENT_SERVICE_TOKEN")
@@ -94,6 +98,7 @@ class DirectorAgentConfig:
             capture_session_id=env_value("OTTO_CAPTURE_SESSION_ID"),
             language=os.getenv("OTTO_DIRECTOR_LANGUAGE", "en"),
             planner_runtime=planner_runtime,
+            voice_runtime=voice_runtime(os.getenv("OTTO_DIRECTOR_VOICE_RUNTIME")),
             anthropic_api_key=anthropic_api_key,
             brain_model=director_brain_model(),
             voice_model=director_voice_model(),
@@ -104,6 +109,7 @@ class DirectorAgentConfig:
                 "f786b574-daa5-4673-aa0c-cbe3e8534c02",
             ),
             use_livekit_inference=use_livekit_inference,
+            use_semantic_turn_detector=bool_env("OTTO_USE_SEMANTIC_TURN_DETECTOR"),
             livekit_agent_name=os.getenv("LIVEKIT_AGENT_NAME", "otto-director"),
             strict_preflight=strict_preflight,
             vendor_privacy_ack=privacy_acks["OTTO_VENDOR_PRIVACY_ACK"],
@@ -113,6 +119,22 @@ class DirectorAgentConfig:
                 "OTTO_ANTHROPIC_RAW_LOGGING_OFF_ACK"
             ],
             voice_phrase_timeout_ms=int_env("OTTO_VOICE_PHRASE_TIMEOUT_MS", 2500),
+            use_separate_voice_llm=bool_env("OTTO_DIRECTOR_USE_SEPARATE_VOICE_LLM"),
+            endpointing_mode=os.getenv(
+                "OTTO_DIRECTOR_ENDPOINTING_MODE",
+                "dynamic",
+            ).strip().lower(),
+            endpointing_min_delay=float_env("OTTO_DIRECTOR_ENDPOINTING_MIN_DELAY", 1.2),
+            endpointing_max_delay=float_env("OTTO_DIRECTOR_ENDPOINTING_MAX_DELAY", 6.0),
+            endpointing_alpha=float_env("OTTO_DIRECTOR_ENDPOINTING_ALPHA", 0.8),
+            interruption_mode=os.getenv(
+                "OTTO_DIRECTOR_INTERRUPTION_MODE",
+                "vad",
+            ).strip().lower(),
+            interruption_min_duration=float_env(
+                "OTTO_DIRECTOR_INTERRUPTION_MIN_DURATION",
+                0.25,
+            ),
         )
 
 
@@ -150,3 +172,21 @@ def int_env(name: str, default: int) -> int:
     except ValueError:
         return default
     return parsed if parsed > 0 else default
+
+
+def float_env(name: str, default: float) -> float:
+    value = env_value(name)
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def voice_runtime(value: str | None) -> str:
+    normalized = (value or "planned_cascade").strip().lower()
+    if normalized in {"planned_cascade", "steered_cascade", "steered_realtime"}:
+        return normalized
+    return "planned_cascade"

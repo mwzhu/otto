@@ -13,7 +13,7 @@ import httpx
 from pydantic import ValidationError
 
 from director_agent.config import DirectorAgentConfig
-from director_agent.otto_api import IngestedTurn, OttoApiClient, PlannedTurn
+from director_agent.otto_api import IngestedTurn, OttoApiClient, PlannedTurn, RespondedTurn
 from director_agent.schemas import ClaimSubjectFields, DirectorTurnPlan
 
 try:
@@ -29,6 +29,51 @@ class PlanValidationError(ValueError):
 ANTHROPIC_MAX_ATTEMPTS = 3
 ANTHROPIC_RETRY_DELAYS_SECONDS = (0.2, 0.5)
 ANTHROPIC_TRANSIENT_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504, 529}
+DIRECTOR_TURN_PLAN_MAX_TOKENS = 8000
+DIRECTOR_VOICE_PHRASE_MAX_TOKENS = 200
+DIRECTOR_SLOT_PATHS = [
+    "function.name",
+    "process.inventory",
+    "scope.boundaries",
+    "outcomes.business_outcomes",
+    "ownership.roles",
+    "people.key_people",
+    "systems.systems_of_record",
+    "frequency.volume",
+    "handoffs.dependencies",
+    "metrics.kpis",
+    "friction.pain_points",
+    "risk.spofs",
+    "controls.compliance",
+    "documentation.maturity",
+    "priority.executive_priority",
+    "variants.exceptions",
+]
+DIRECTOR_INTENT_NAMES = [
+    "orient_interview",
+    "discover_function",
+    "discover_processes",
+    "select_process_to_expand",
+    "define_process_boundary",
+    "capture_outcome",
+    "capture_owner_roles",
+    "capture_systems",
+    "quantify_frequency_volume",
+    "capture_dependencies",
+    "capture_handoffs",
+    "capture_metrics",
+    "capture_friction",
+    "capture_risk_spof",
+    "capture_variants",
+    "capture_controls",
+    "capture_exec_priority",
+    "capture_priority",
+    "capture_documentation",
+    "reconcile_conflict",
+    "clarify_previous_question",
+    "playback_summary",
+    "open_questions_closeout",
+]
 
 
 class DirectorPlanner:
@@ -50,12 +95,16 @@ class DirectorPlanner:
         capture_session_id: str,
         turn: IngestedTurn,
         idempotency_key: str,
+        on_planned_agent_utterance: Any | None = None,
+        local_turn_correlation_id: str | None = None,
     ) -> PlannedTurn:
         if self._config.planner_runtime == "next":
             return await self._api.plan_turn(
                 capture_session_id=capture_session_id,
                 turn=turn,
                 idempotency_key=idempotency_key,
+                on_planned_agent_utterance=on_planned_agent_utterance,
+                local_turn_correlation_id=local_turn_correlation_id,
             )
 
         context = dict(await self._api.planning_context(capture_session_id=capture_session_id))
@@ -67,6 +116,9 @@ class DirectorPlanner:
         )
         plan = deterministic_facts
         degraded_quality = self._config.anthropic_api_key is None
+        degraded_reasons: list[str] = []
+        if degraded_quality:
+            degraded_reasons.append("missing_anthropic_api_key")
         metadata = metadata_for(
             prompt_template_id="director.turn.plan",
             model="deterministic-python-brain",
@@ -80,7 +132,7 @@ class DirectorPlanner:
                 plan_result = await self._anthropic_validated_plan(
                     model=self._config.brain_model,
                     prompt_template_id="director.turn.plan",
-                    max_tokens=500,
+                    max_tokens=DIRECTOR_TURN_PLAN_MAX_TOKENS,
                     static_input=read_repo_file("prompts/director.turn.plan.md")
                     + "\n\nJSON schema:\n"
                     + read_repo_file("schemas/director-turn-plan.schema.json")
@@ -104,26 +156,40 @@ class DirectorPlanner:
                     deterministic_facts,
                 )
                 metadata = plan_result["metadata"]
-            except (json.JSONDecodeError, PlanValidationError, ValidationError, httpx.HTTPError):
+            except json.JSONDecodeError:
                 degraded_quality = True
+                degraded_reasons.append("anthropic_plan_invalid_json")
+            except PlanValidationError:
+                degraded_quality = True
+                degraded_reasons.append("anthropic_plan_validation_failed")
+            except ValidationError:
+                degraded_quality = True
+                degraded_reasons.append("anthropic_plan_schema_validation_failed")
+            except httpx.HTTPError:
+                degraded_quality = True
+                degraded_reasons.append("anthropic_plan_http_error")
 
         started_voice = time.time()
-        planned_agent_utterance = deterministic_phrase(plan)
-        voice_metadata = metadata_for(
-            prompt_template_id="director.voice.phrase-intent",
-            model="deterministic-python-voice",
-            started=started_voice,
-            input_text=json.dumps(plan),
-            output_text=planned_agent_utterance,
+        planned_agent_utterance = (
+            planned_utterance_from_plan(plan) or deterministic_phrase(plan)
         )
-        if self._config.anthropic_api_key:
+        voice_metadata = brain_planned_voice_metadata(
+            started_voice,
+            plan,
+            planned_agent_utterance,
+            metadata,
+        )
+        if (
+            self._config.anthropic_api_key
+            and getattr(self._config, "use_separate_voice_llm", False)
+        ):
             voice_phrase_timeout_ms = configured_voice_phrase_timeout_ms(self._config)
             try:
                 voice = await asyncio.wait_for(
                     self._anthropic_text(
                         model=self._config.voice_model,
                         prompt_template_id="director.voice.phrase-intent",
-                        max_tokens=200,
+                        max_tokens=DIRECTOR_VOICE_PHRASE_MAX_TOKENS,
                         static_input=read_repo_file("prompts/director.voice.phrase-intent.md"),
                         dynamic_input=json.dumps(
                             {
@@ -150,6 +216,11 @@ class DirectorPlanner:
                 }
             except Exception:
                 degraded_quality = True
+                degraded_reasons.append("voice_phrase_failed")
+        if on_planned_agent_utterance is not None:
+            maybe_awaitable = on_planned_agent_utterance(planned_agent_utterance)
+            if asyncio.iscoroutine(maybe_awaitable):
+                await maybe_awaitable
 
         return PlannedTurn(
             plan=plan,
@@ -157,14 +228,43 @@ class DirectorPlanner:
             metadata=metadata,
             voice_metadata=voice_metadata,
             degraded_quality=degraded_quality,
+            degraded_reasons=unique(degraded_reasons),
+            local_turn_correlation_id=local_turn_correlation_id,
             raw={
                 "plan": plan,
                 "planned_agent_utterance": planned_agent_utterance,
                 "metadata": metadata,
                 "voice_metadata": voice_metadata,
                 "degraded_quality": degraded_quality,
+                "degraded_reasons": unique(degraded_reasons),
                 "planner_runtime": "python",
+                "local_turn_correlation_id": local_turn_correlation_id,
             },
+        )
+
+    async def respond_turn(
+        self,
+        *,
+        capture_session_id: str,
+        turn: IngestedTurn,
+        idempotency_key: str,
+        on_planned_agent_utterance: Any | None = None,
+        local_turn_correlation_id: str | None = None,
+        pending_extraction_turns: list[int] | None = None,
+        pending_slot_paths: list[str] | None = None,
+        last_spoken_intent: str | None = None,
+        extraction_window_id: str | None = None,
+    ) -> RespondedTurn:
+        return await self._api.respond_turn(
+            capture_session_id=capture_session_id,
+            turn=turn,
+            idempotency_key=idempotency_key,
+            on_planned_agent_utterance=on_planned_agent_utterance,
+            local_turn_correlation_id=local_turn_correlation_id,
+            pending_extraction_turns=pending_extraction_turns,
+            pending_slot_paths=pending_slot_paths,
+            last_spoken_intent=last_spoken_intent,
+            extraction_window_id=extraction_window_id,
         )
 
     async def _anthropic_validated_plan(
@@ -289,6 +389,10 @@ class DirectorPlanner:
         )
         response.raise_for_status()
         body = response.json()
+        if body.get("stop_reason") == "max_tokens":
+            raise PlanValidationError(
+                f"Anthropic planner output was truncated at max_tokens={max_tokens}."
+            )
         value = tool_use_input(body, "emit_director_turn_plan")
         usage = body.get("usage", {})
         serialized_value = json.dumps(value, sort_keys=True)
@@ -474,6 +578,11 @@ def normalized_plan_value(value: Any) -> Any:
                 "score": 0.5,
                 "reason": "Fallback intent added because the structured planner omitted chosen_intent.",
             }
+    if not isinstance(normalized.get("planned_agent_utterance"), str) or not normalized.get(
+        "planned_agent_utterance",
+        "",
+    ).strip():
+        normalized["planned_agent_utterance"] = deterministic_phrase(normalized)
     return normalized
 
 
@@ -720,7 +829,7 @@ def enforce_phase_gate(plan: dict[str, Any], context: dict[str, Any]) -> dict[st
         )
         result["chosen_intent"] = closeout_intent
         result["ranked_intents"] = ensure_intent_ranked(closeout_intent, ranked_intents)
-        return validate_plan(result)
+        return validate_plan(with_controller_planned_utterance(plan, result))
     chosen_intent = result.get("chosen_intent")
     requested_intent = (
         cooldown_bridge_intent(gated_phase, chosen_intent, candidate_processes)
@@ -737,7 +846,32 @@ def enforce_phase_gate(plan: dict[str, Any], context: dict[str, Any]) -> dict[st
     )
     result["chosen_intent"] = repaired["chosen_intent"]
     result["ranked_intents"] = repaired["ranked_intents"]
-    return validate_plan(result)
+    return validate_plan(with_controller_planned_utterance(plan, result))
+
+
+def with_controller_planned_utterance(
+    original: dict[str, Any],
+    controlled: dict[str, Any],
+) -> dict[str, Any]:
+    if not controller_changed_next_ask(original, controlled):
+        return controlled
+    result = dict(controlled)
+    result["planned_agent_utterance"] = deterministic_phrase(result)
+    return result
+
+
+def controller_changed_next_ask(
+    original: dict[str, Any],
+    controlled: dict[str, Any],
+) -> bool:
+    original_intent = original.get("chosen_intent") or {}
+    controlled_intent = controlled.get("chosen_intent") or {}
+    return (
+        original.get("proposed_next_phase") != controlled.get("proposed_next_phase")
+        or original_intent.get("intent") != controlled_intent.get("intent")
+        or original_intent.get("target_slot") != controlled_intent.get("target_slot")
+        or original_intent.get("target_process") != controlled_intent.get("target_process")
+    )
 
 
 def slot_covered_for_phase(
@@ -1080,11 +1214,7 @@ def deterministic_plan(
         candidates,
         context.get("focus_candidate_process_id"),
     )
-    current_slots = {
-        slot.get("slot_path"): slot.get("status")
-        for slot in context.get("slots", [])
-        if isinstance(slot, dict) and slot.get("slot_path")
-    }
+    current_slots = current_slot_statuses(context)
     function_name = extract_function_name(text)
     process_names = extract_process_names(text)
     systems = extract_systems(text)
@@ -1396,7 +1526,7 @@ def deterministic_plan(
         )
         ranked = [chosen_intent]
 
-    return {
+    plan = {
         "utterance_type": utterance_type,
         "slot_updates": slot_updates,
         "claims": [],
@@ -1408,6 +1538,8 @@ def deterministic_plan(
         "ranked_intents": ranked,
         "chosen_intent": chosen_intent,
     }
+    plan["planned_agent_utterance"] = deterministic_phrase(plan)
+    return plan
 
 
 def should_force_closeout(
@@ -1436,11 +1568,15 @@ def should_force_closeout(
 
 
 def current_slot_statuses(context: dict[str, Any]) -> dict[str, Any]:
-    return {
-        str(slot.get("slot_path")): slot.get("status")
-        for slot in context.get("slots", [])
-        if isinstance(slot, dict) and slot.get("slot_path")
-    }
+    focus_candidate_process_id = context.get("focus_candidate_process_id")
+    statuses: dict[str, Any] = {}
+    slots = [slot for slot in context.get("slots", []) if isinstance(slot, dict)]
+    for scope in (None, focus_candidate_process_id):
+        for slot in slots:
+            if not slot.get("slot_path") or slot.get("candidate_process_id") != scope:
+                continue
+            statuses[str(slot.get("slot_path"))] = slot.get("status")
+    return statuses
 
 
 def plan_evidence_ids(plan: dict[str, Any]) -> list[str]:
@@ -1718,6 +1854,41 @@ def deterministic_phrase(plan: dict[str, Any]) -> str:
     return limit_to_single_question(_deterministic_phrase(plan))
 
 
+def planned_utterance_from_plan(plan: dict[str, Any]) -> str | None:
+    value = plan.get("planned_agent_utterance")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return limit_to_single_question(value)
+
+
+def brain_planned_voice_metadata(
+    started: float,
+    plan: dict[str, Any],
+    output_text: str,
+    brain_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    metadata = metadata_for(
+        prompt_template_id="director.voice.phrase-intent",
+        model=str(brain_metadata.get("model") or "brain-planned-voice"),
+        started=started,
+        input_text=json.dumps(
+            {
+                "chosen_intent": plan.get("chosen_intent"),
+                "planned_agent_utterance": plan.get("planned_agent_utterance"),
+            },
+            sort_keys=True,
+        ),
+        output_text=output_text,
+    )
+    return {
+        **metadata,
+        "source": "brain_planned_utterance",
+        "utterance_source": "brain_planned_utterance",
+        "llm_call_elided": True,
+        "brain_model": brain_metadata.get("model"),
+    }
+
+
 def limit_to_single_question(utterance: str) -> str:
     normalized = re.sub(r"\s+", " ", utterance).strip()
     first_question = normalized.find("?")
@@ -1890,7 +2061,7 @@ def classify_utterance(text: str) -> str:
         return "correction"
     if re.search(r"\b(that'?s wrong|that is wrong|not true|isn'?t true|not the case|contradicts?|opposite)\b", text, re.I):
         return "contradiction"
-    if re.search(r"\b(what do you mean|can you clarify|could you clarify|what does .* mean|define|do you mean|what are systems of record|what is a system of record)\b", text, re.I):
+    if re.search(r"\b(what do you mean|can you clarify|could you clarify|can you be more specific|could you be more specific|be more specific|what does .* mean|define|do you mean|what are systems of record|what is a system of record)\b", text, re.I):
         return "clarification_request"
     if re.search(r"\b(unrelated|off topic|by the way|quick question)\b", text, re.I) and not has_business_signal(text):
         return "off_topic"
@@ -1921,15 +2092,16 @@ def extract_function_name(text: str) -> str | None:
 
 def extract_process_names(text: str) -> list[str]:
     fragments = []
+    names = extract_ordinal_process_names(text)
     for pattern in [
         r"\b(?:processes are|processes include|main processes are|we own|we handle|we manage|we run)\s+([^.;]+)",
+        r"\b(?:responsible for|responsible for the following|responsible for these|responsible for those)\s+([^.;]+)",
         r"\b(?:including|like)\s+([^.;]+)",
         r"\b(?:process is|process called|process:|workflow is|workflow called)\s+([^,.]+)",
     ]:
         match = re.search(pattern, text, re.I)
         if match:
             fragments.append(match.group(1))
-    names = []
     for fragment in fragments:
         names.extend(split_process_list(fragment))
     blocked = {
@@ -1946,6 +2118,14 @@ def extract_process_names(text: str) -> list[str]:
     return unique([title_case(name) for name in names if name.lower() not in blocked])
 
 
+def extract_ordinal_process_names(text: str) -> list[str]:
+    pattern = (
+        r"\b(?:the\s+)?(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)"
+        r"(?:\s+one)?\s+(?:being|is|was|would be|as)\s+([^,.;]+)"
+    )
+    return [clean_phrase(match.group(1)) for match in re.finditer(pattern, text, re.I)]
+
+
 def split_process_list(value: str) -> list[str]:
     process_fragment = re.split(
         r"\b(?:mostly\s+)?(?:in|using|through)\s+",
@@ -1953,6 +2133,12 @@ def split_process_list(value: str) -> list[str]:
         maxsplit=1,
         flags=re.I,
     )[0]
+    process_fragment = re.sub(
+        r"^(?:three|two|four|five|six|seven|eight|nine|ten|\d+)\s+things[:\s-]*",
+        "",
+        process_fragment,
+        flags=re.I,
+    )
     return [
         clean_phrase(item)
         for item in re.sub(r"\band\b", ",", process_fragment, flags=re.I).split(",")
@@ -2475,7 +2661,33 @@ def director_turn_plan_tool_schema() -> dict[str, Any]:
         "slot-state.schema.json": json.loads(read_repo_file("schemas/slot-state.schema.json")),
         "claim.schema.json": json.loads(read_repo_file("schemas/claim.schema.json")),
     }
-    return inline_schema_refs(schema, refs)
+    return constrain_director_turn_plan_tool_schema(inline_schema_refs(schema, refs))
+
+
+def constrain_director_turn_plan_tool_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    properties = schema.setdefault("properties", {})
+    constrain_director_intent_schema(properties.setdefault("chosen_intent", {}))
+    ranked_intent_schema = (
+        properties
+        .setdefault("ranked_intents", {})
+        .setdefault("items", {})
+    )
+    constrain_director_intent_schema(ranked_intent_schema)
+    slot_path_schema = (
+        properties
+        .setdefault("slot_updates", {})
+        .setdefault("items", {})
+        .setdefault("properties", {})
+        .setdefault("slot_path", {})
+    )
+    slot_path_schema["enum"] = DIRECTOR_SLOT_PATHS
+    return schema
+
+
+def constrain_director_intent_schema(schema: dict[str, Any]) -> None:
+    properties = schema.setdefault("properties", {})
+    properties.setdefault("intent", {})["enum"] = DIRECTOR_INTENT_NAMES
+    properties.setdefault("target_slot", {})["enum"] = DIRECTOR_SLOT_PATHS
 
 
 def inline_schema_refs(schema: Any, refs: dict[str, Any]) -> Any:

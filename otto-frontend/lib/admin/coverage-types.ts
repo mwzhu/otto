@@ -4,6 +4,8 @@ export type CoverageStatus = DirectorSlotStatus;
 
 export type DirectorCoverageSlot = {
   slotPath: string;
+  candidateProcessId: string | null;
+  processName: string | null;
   label: string;
   priority: number;
   status: CoverageStatus;

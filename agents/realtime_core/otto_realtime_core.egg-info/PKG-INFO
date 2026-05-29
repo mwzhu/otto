@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: otto-realtime-core
+Version: 0.1.0
+Summary: Shared realtime worker primitives for Otto LiveKit agents.
+Requires-Python: >=3.11

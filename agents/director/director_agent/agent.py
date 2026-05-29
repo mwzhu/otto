@@ -4,14 +4,26 @@ import asyncio
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 
 from livekit import rtc
 from livekit.agents import Agent, ChatContext, ChatMessage, StopResponse
+from otto_realtime_core import (
+    delivered_utterance_for_status as core_delivered_utterance_for_status,
+    elapsed_ms,
+    estimated_spoken_fraction as core_estimated_spoken_fraction,
+    text_content as core_text_content,
+)
 
-from director_agent.otto_api import OttoApiClient, stable_key
+from director_agent.otto_api import (
+    IngestedTurn,
+    OttoApiClient,
+    PlannedTurn,
+    RespondedTurn,
+    stable_key,
+)
 from director_agent.planner import DirectorPlanner
 
 
@@ -39,7 +51,11 @@ LIVEKIT_CARTESIA_AUDIO_METADATA = {
     "provider": "cartesia",
     "playout": "session.say.wait_for_playout",
 }
-COMPLETION_RETRY_DELAYS_SECONDS = (0.75, 0.75, 1.0, 1.5, 2.0)
+COMPLETION_RETRY_DELAYS_SECONDS = tuple([1.0] * 180)
+COMPLETION_DISCONNECT_GRACE_SECONDS = 0.75
+COMPLETION_EXTRACTION_WAIT_SECONDS = 120.0
+COMPLETION_CHECKER_WAIT_SECONDS = 15.0
+EXTRACTION_WINDOW_DEBOUNCE_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -50,6 +66,20 @@ class TranscriptTiming:
     source: str
     idempotency_parts: tuple[object, ...]
     metadata: dict[str, Any]
+
+
+@dataclass
+class PendingExtractionWindow:
+    extraction_window_id: str
+    local_turn_correlation_id: str
+    turn_index: int
+    turn_indexes: list[int]
+    transcript_segment_ids: list[str]
+    evidence_ids: list[str]
+    utterances: list[str]
+    spoken_utterances: list[str]
+    target_slots: list[str]
+    focus_candidate_process_id: str | None = None
 
 
 class DirectorConsultantAgent(Agent):
@@ -95,8 +125,17 @@ class DirectorConsultantAgent(Agent):
         self._active_turn_done: asyncio.Event | None = None
         self._turn_generation = 0
         self._active_turn_generation: int | None = None
+        self._active_user_utterance: str | None = None
         self._realtime_turn_handlers_installed = False
         self._active_delivery_events: set[asyncio.Event] = set()
+        self._active_extraction_tasks: dict[int, asyncio.Task[Any]] = {}
+        self._active_checker_tasks: dict[int, asyncio.Task[Any]] = {}
+        self._pending_extraction_turns: set[int] = set()
+        self._pending_slot_paths: set[str] = set()
+        self._last_spoken_intent: str | None = None
+        self._extraction_window_lock = asyncio.Lock()
+        self._open_extraction_window: PendingExtractionWindow | None = None
+        self._open_extraction_task: asyncio.Task[Any] | None = None
         self._room.on("data_received", self._on_data_received)
 
     async def on_enter(self) -> None:
@@ -333,6 +372,7 @@ class DirectorConsultantAgent(Agent):
                 self._active_turn_done = None
             if self._active_turn_generation == generation:
                 self._active_turn_generation = None
+                self._active_user_utterance = None
 
     async def _run_user_turn_completed(
         self,
@@ -349,6 +389,7 @@ class DirectorConsultantAgent(Agent):
             raise StopResponse()
         if self._is_turn_superseded(generation):
             raise StopResponse()
+        self._active_user_utterance = utterance
 
         turn_started = time.perf_counter()
         ordinal = self._turn_counter
@@ -384,70 +425,171 @@ class DirectorConsultantAgent(Agent):
                 "asr_timing_source": timing.source,
             },
         )
-        planned = await self._planner.plan_turn(
-            capture_session_id=self._capture_session_id,
-            turn=ingest,
-            idempotency_key=stable_key("plan", self._capture_session_id, ingest.turn_index),
+        local_turn_correlation_id = stable_key(
+            "local-turn",
+            self._capture_session_id,
+            ingest.turn_index,
         )
-        planned_at = time.perf_counter()
-        if self._is_turn_superseded(generation):
-            raise StopResponse()
-        dispatched = await self._api.dispatch_turn(
-            capture_session_id=self._capture_session_id,
-            turn=ingest,
-            planned=planned,
-            idempotency_key=stable_key("turn", self._capture_session_id, ingest.turn_index),
-        )
-        dispatched_at = time.perf_counter()
-        if self._is_turn_superseded(generation):
-            await self._mark_delivery_not_spoken(
-                turn_index=ingest.turn_index,
-                decision_log_id=dispatched.decision_log_id,
+        extraction_window_id = await self._extraction_window_id_for_ingest(ingest)
+        if (
+            getattr(
+                getattr(self._planner, "config", None),
+                "voice_runtime",
+                "planned_cascade",
+            )
+            == "steered_cascade"
+        ):
+            await self._run_decoupled_user_turn(
+                ingest=ingest,
+                utterance=utterance,
                 turn_started=turn_started,
-                dispatched_at=dispatched_at,
+                ingested_at=ingested_at,
+                timing_source=timing.source,
+                local_turn_correlation_id=local_turn_correlation_id,
+                extraction_window_id=extraction_window_id,
+                generation=generation,
             )
             raise StopResponse()
+        early_utterance: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+        def on_planned_agent_utterance(utterance: str) -> None:
+            if not early_utterance.done() and utterance.strip():
+                early_utterance.set_result(utterance.strip())
+
+        plan_task = asyncio.create_task(
+            self._planner.plan_turn(
+                capture_session_id=self._capture_session_id,
+                turn=ingest,
+                idempotency_key=stable_key("plan", self._capture_session_id, ingest.turn_index),
+                on_planned_agent_utterance=on_planned_agent_utterance,
+                local_turn_correlation_id=local_turn_correlation_id,
+            )
+        )
+        done, _pending = await asyncio.wait(
+            {plan_task, early_utterance},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        planned: PlannedTurn | None = None
+        speech = None
+        speech_started_at = 0.0
+        spoken_utterance: str | None = None
+        if early_utterance in done and not self._is_turn_superseded(generation):
+            spoken_utterance = early_utterance.result()
+            speech_started_at = time.perf_counter()
+            speech = self.session.say(spoken_utterance, allow_interruptions=True)
+            self._active_speech = speech
+        if plan_task in done:
+            planned = plan_task.result()
+        else:
+            planned = await plan_task
+        planned_at = time.perf_counter()
+        if spoken_utterance is None:
+            spoken_utterance = planned.planned_agent_utterance
+        if self._is_turn_superseded(generation):
+            raise StopResponse()
+        planned_for_dispatch = (
+            replace(
+                planned,
+                planned_agent_utterance=spoken_utterance,
+                raw={
+                    **planned.raw,
+                    "spoken_planned_agent_utterance": spoken_utterance,
+                    "local_turn_correlation_id": local_turn_correlation_id,
+                },
+            )
+            if planned.planned_agent_utterance != spoken_utterance
+            else planned
+        )
+        dispatch_task = asyncio.create_task(
+            self._api.dispatch_turn(
+                capture_session_id=self._capture_session_id,
+                turn=ingest,
+                planned=planned_for_dispatch,
+                idempotency_key=stable_key("turn", self._capture_session_id, ingest.turn_index),
+                local_turn_correlation_id=local_turn_correlation_id,
+            )
+        )
+        try:
+            dispatched = await dispatch_task
+        except Exception:
+            if speech is not None:
+                await self._publish_data(
+                    "director.session.notice",
+                    {
+                        "notice_type": "dispatch_failed_after_tts_start",
+                        "local_turn_correlation_id": local_turn_correlation_id,
+                        "turn_index": ingest.turn_index,
+                    },
+                )
+            raise
+        dispatched_at = time.perf_counter()
+        if self._is_turn_superseded(generation):
+            if speech is None:
+                await self._mark_delivery_not_spoken(
+                    turn_index=ingest.turn_index,
+                    decision_log_id=dispatched.decision_log_id,
+                    turn_started=turn_started,
+                    dispatched_at=dispatched_at,
+                    local_turn_correlation_id=local_turn_correlation_id,
+                )
+            else:
+                await self._mark_delivery_interrupted_after_tts(
+                    turn_index=ingest.turn_index,
+                    decision_log_id=dispatched.decision_log_id,
+                    utterance=spoken_utterance,
+                    turn_started=turn_started,
+                    dispatched_at=dispatched_at,
+                    speech_started_at=speech_started_at,
+                    interrupted_at=time.perf_counter(),
+                    local_turn_correlation_id=local_turn_correlation_id,
+                )
+            raise StopResponse()
+        if speech is None:
+            speech_started_at = time.perf_counter()
+            speech = self.session.say(spoken_utterance, allow_interruptions=True)
+            self._active_speech = speech
         await self._publish_data(
             "director.turn.dispatched",
             {
                 "turn_index": ingest.turn_index,
                 "stage_name": "director.turn",
                 "transcript": utterance,
-                "agent_utterance": dispatched.next_prompt,
+                "agent_utterance": spoken_utterance,
                 "decision_log_id": dispatched.decision_log_id,
+                "local_turn_correlation_id": local_turn_correlation_id,
                 "candidate_process_ids": dispatched.raw.get("candidate_process_ids", []),
                 "slot_updates": dispatched.raw.get("slot_updates", []),
                 "coverage_slots": dispatched.raw.get("coverage_slots", []),
                 "degraded_quality": dispatched.raw.get("degraded_quality", False),
+                "degraded_reasons": dispatched.raw.get("degraded_reasons", []),
             },
         )
         await self._publish_turn_telemetry(
             ingest_turn_index=ingest.turn_index,
             decision_log_id=dispatched.decision_log_id,
-            planned=planned,
+            planned=planned_for_dispatch,
             timing={
                 "ingest_ms": elapsed_ms(turn_started, ingested_at),
                 "plan_ms": elapsed_ms(ingested_at, planned_at),
                 "dispatch_ms": elapsed_ms(planned_at, dispatched_at),
-                "pre_tts_total_ms": elapsed_ms(turn_started, dispatched_at),
+                "pre_tts_total_ms": elapsed_ms(turn_started, speech_started_at),
             },
             asr_timing_source=timing.source,
         )
         if self._is_turn_superseded(generation):
-            await self._mark_delivery_not_spoken(
+            await self._mark_delivery_interrupted_after_tts(
                 turn_index=ingest.turn_index,
                 decision_log_id=dispatched.decision_log_id,
+                utterance=spoken_utterance,
                 turn_started=turn_started,
                 dispatched_at=dispatched_at,
+                speech_started_at=speech_started_at,
+                interrupted_at=time.perf_counter(),
+                local_turn_correlation_id=local_turn_correlation_id,
             )
             raise StopResponse()
 
-        speech = None
-        speech_started_at = 0.0
         try:
-            speech_started_at = time.perf_counter()
-            speech = self.session.say(dispatched.next_prompt, allow_interruptions=True)
-            self._active_speech = speech
             await speech.wait_for_playout()
         except Exception:
             failed_at = time.perf_counter()
@@ -455,11 +597,12 @@ class DirectorConsultantAgent(Agent):
                 await self._mark_delivery_interrupted_after_tts(
                     turn_index=ingest.turn_index,
                     decision_log_id=dispatched.decision_log_id,
-                    utterance=dispatched.next_prompt,
+                    utterance=spoken_utterance,
                     turn_started=turn_started,
                     dispatched_at=dispatched_at,
                     speech_started_at=speech_started_at,
                     interrupted_at=failed_at,
+                    local_turn_correlation_id=local_turn_correlation_id,
                 )
                 raise StopResponse()
             failed_latency = {
@@ -471,10 +614,11 @@ class DirectorConsultantAgent(Agent):
                 turn_index=ingest.turn_index,
                 decision_log_id=dispatched.decision_log_id,
                 delivery_status="failed_text_fallback",
-                delivered_utterance=dispatched.next_prompt,
+                delivered_utterance=spoken_utterance,
                 spoken_fraction=0,
                 latency_ms=failed_latency,
                 audio_metadata=self._tts_audio_metadata,
+                local_turn_correlation_id=local_turn_correlation_id,
                 idempotency_key=delivery_idempotency_key(
                     self._capture_session_id,
                     ingest.turn_index,
@@ -484,7 +628,7 @@ class DirectorConsultantAgent(Agent):
                 turn_index=ingest.turn_index,
                 decision_log_id=dispatched.decision_log_id,
                 delivery_status="failed_text_fallback",
-                agent_utterance=dispatched.next_prompt,
+                agent_utterance=spoken_utterance,
                 spoken_fraction=0,
                 latency_ms=failed_latency,
             )
@@ -499,7 +643,7 @@ class DirectorConsultantAgent(Agent):
             else "completed"
         )
         spoken_fraction = (
-            estimated_spoken_fraction(dispatched.next_prompt, speech_started_at, delivered_at)
+            estimated_spoken_fraction(spoken_utterance, speech_started_at, delivered_at)
             if speech.interrupted
             else 1
         )
@@ -508,7 +652,7 @@ class DirectorConsultantAgent(Agent):
             "turn_total_ms": elapsed_ms(turn_started, delivered_at),
         }
         delivered_utterance = delivered_utterance_for_status(
-            dispatched.next_prompt,
+            spoken_utterance,
             delivery_status=delivery_status,
             spoken_fraction=spoken_fraction,
         )
@@ -521,6 +665,7 @@ class DirectorConsultantAgent(Agent):
             spoken_fraction=spoken_fraction,
             latency_ms=delivery_latency,
             audio_metadata=self._tts_audio_metadata,
+            local_turn_correlation_id=local_turn_correlation_id,
             idempotency_key=delivery_idempotency_key(
                 self._capture_session_id,
                 ingest.turn_index,
@@ -536,6 +681,498 @@ class DirectorConsultantAgent(Agent):
         )
         raise StopResponse()
 
+    async def _run_decoupled_user_turn(
+        self,
+        *,
+        ingest: Any,
+        utterance: str,
+        turn_started: float,
+        ingested_at: float,
+        timing_source: str,
+        local_turn_correlation_id: str,
+        extraction_window_id: str,
+        generation: int,
+    ) -> None:
+        early_utterance: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+        def on_planned_agent_utterance(utterance: str) -> None:
+            if not early_utterance.done() and utterance.strip():
+                early_utterance.set_result(utterance.strip())
+
+        respond_task = asyncio.create_task(
+            self._planner.respond_turn(
+                capture_session_id=self._capture_session_id,
+                turn=ingest,
+                idempotency_key=stable_key(
+                    "respond",
+                    self._capture_session_id,
+                    ingest.turn_index,
+                ),
+                on_planned_agent_utterance=on_planned_agent_utterance,
+                local_turn_correlation_id=local_turn_correlation_id,
+                extraction_window_id=extraction_window_id,
+                pending_extraction_turns=sorted(self._pending_extraction_turns),
+                pending_slot_paths=sorted(self._pending_slot_paths),
+                last_spoken_intent=self._last_spoken_intent,
+            )
+        )
+        done, _pending = await asyncio.wait(
+            {respond_task, early_utterance},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        responded: RespondedTurn | None = None
+        speech = None
+        speech_started_at = 0.0
+        spoken_utterance: str | None = None
+        if early_utterance in done and not self._is_turn_superseded(generation):
+            spoken_utterance = early_utterance.result()
+            speech_started_at = time.perf_counter()
+            speech = self.session.say(spoken_utterance, allow_interruptions=True)
+            self._active_speech = speech
+        if respond_task in done:
+            responded = respond_task.result()
+        else:
+            responded = await respond_task
+        responded_at = time.perf_counter()
+        if spoken_utterance is None:
+            spoken_utterance = responded.planned_agent_utterance
+        steering_context = responded.steering_context or {}
+        target_slots = [
+            str(slot)
+            for slot in steering_context.get("target_slots", [])
+            if str(slot).strip()
+        ]
+        self._pending_extraction_turns.add(ingest.turn_index)
+        self._pending_slot_paths.update(target_slots)
+        self._last_spoken_intent = (
+            responded.plan.get("chosen_intent", {}).get("intent")
+            if isinstance(responded.plan.get("chosen_intent"), dict)
+            else self._last_spoken_intent
+        )
+        await self._queue_background_extraction(
+            ingest=ingest,
+            spoken_utterance=spoken_utterance,
+            target_slots=target_slots,
+            extraction_window_id=extraction_window_id,
+            local_turn_correlation_id=local_turn_correlation_id,
+            focus_candidate_process_id=(
+                str(steering_context.get("focus_candidate_process_id"))
+                if steering_context.get("focus_candidate_process_id")
+                else None
+            ),
+        )
+        if self._is_turn_superseded(generation):
+            if speech is None:
+                await self._mark_delivery_not_spoken(
+                    turn_index=ingest.turn_index,
+                    decision_log_id=responded.decision_log_id,
+                    turn_started=turn_started,
+                    dispatched_at=responded_at,
+                    local_turn_correlation_id=local_turn_correlation_id,
+                )
+            else:
+                await self._mark_delivery_interrupted_after_tts(
+                    turn_index=ingest.turn_index,
+                    decision_log_id=responded.decision_log_id,
+                    utterance=spoken_utterance,
+                    turn_started=turn_started,
+                    dispatched_at=responded_at,
+                    speech_started_at=speech_started_at,
+                    interrupted_at=time.perf_counter(),
+                    local_turn_correlation_id=local_turn_correlation_id,
+                )
+            return
+        if speech is None:
+            speech_started_at = time.perf_counter()
+            speech = self.session.say(spoken_utterance, allow_interruptions=True)
+            self._active_speech = speech
+        checker_task = asyncio.create_task(
+            self._run_background_output_check(
+                ingest=ingest,
+                spoken_utterance=spoken_utterance,
+                steering_context=steering_context,
+                local_turn_correlation_id=local_turn_correlation_id,
+                extraction_window_id=extraction_window_id,
+            )
+        )
+        self._active_checker_tasks[ingest.turn_index] = checker_task
+        checker_task.add_done_callback(
+            lambda task, turn_index=ingest.turn_index: self._on_checker_task_done(
+                turn_index,
+                task,
+            )
+        )
+
+        await self._publish_data(
+            "director.turn.dispatched",
+            {
+                "turn_index": ingest.turn_index,
+                "stage_name": "director.turn",
+                "transcript": utterance,
+                "agent_utterance": spoken_utterance,
+                "decision_log_id": responded.decision_log_id,
+                "local_turn_correlation_id": local_turn_correlation_id,
+                "slot_updates": [],
+                "coverage_slots": [],
+                "degraded_quality": responded.degraded_quality,
+                "degraded_reasons": responded.degraded_reasons,
+                "extraction_status": "pending",
+            },
+        )
+        await self._publish_turn_telemetry(
+            ingest_turn_index=ingest.turn_index,
+            decision_log_id=responded.decision_log_id,
+            planned=responded,
+            timing={
+                "ingest_ms": elapsed_ms(turn_started, ingested_at),
+                "respond_ms": elapsed_ms(ingested_at, responded_at),
+                "speech_pre_tts_total_ms": elapsed_ms(turn_started, speech_started_at),
+                "ttfa_ms": elapsed_ms(turn_started, speech_started_at),
+                "pending_extraction_count": len(self._pending_extraction_turns),
+                "steering_lag_turns": len(self._pending_extraction_turns),
+                "steering_lag_ms": 0,
+            },
+            asr_timing_source=timing_source,
+        )
+
+        try:
+            await speech.wait_for_playout()
+        except Exception:
+            failed_at = time.perf_counter()
+            if self._paused or self._muted or self._ended or getattr(speech, "interrupted", False):
+                await self._mark_delivery_interrupted_after_tts(
+                    turn_index=ingest.turn_index,
+                    decision_log_id=responded.decision_log_id,
+                    utterance=spoken_utterance,
+                    turn_started=turn_started,
+                    dispatched_at=responded_at,
+                    speech_started_at=speech_started_at,
+                    interrupted_at=failed_at,
+                    local_turn_correlation_id=local_turn_correlation_id,
+                )
+                return
+            failed_latency = {
+                "tts_playout_ms": elapsed_ms(responded_at, failed_at),
+                "speech_latency_ms": elapsed_ms(speech_started_at, failed_at),
+                "turn_total_ms": elapsed_ms(turn_started, failed_at),
+            }
+            await self._api.update_delivery(
+                capture_session_id=self._capture_session_id,
+                turn_index=ingest.turn_index,
+                decision_log_id=responded.decision_log_id,
+                delivery_status="failed_text_fallback",
+                delivered_utterance=spoken_utterance,
+                spoken_fraction=0,
+                latency_ms=failed_latency,
+                audio_metadata=self._tts_audio_metadata,
+                local_turn_correlation_id=local_turn_correlation_id,
+                idempotency_key=delivery_idempotency_key(
+                    self._capture_session_id,
+                    ingest.turn_index,
+                ),
+            )
+            await self._publish_delivery_update(
+                turn_index=ingest.turn_index,
+                decision_log_id=responded.decision_log_id,
+                delivery_status="failed_text_fallback",
+                agent_utterance=spoken_utterance,
+                spoken_fraction=0,
+                latency_ms=failed_latency,
+            )
+            return
+        finally:
+            self._active_speech = None
+
+        delivered_at = time.perf_counter()
+        delivery_status = (
+            "truncated"
+            if speech.interrupted or self._is_turn_superseded(generation)
+            else "completed"
+        )
+        spoken_fraction = (
+            estimated_spoken_fraction(spoken_utterance, speech_started_at, delivered_at)
+            if speech.interrupted
+            else 1
+        )
+        delivery_latency = {
+            "tts_playout_ms": elapsed_ms(responded_at, delivered_at),
+            "speech_latency_ms": elapsed_ms(speech_started_at, delivered_at),
+            "turn_total_ms": elapsed_ms(turn_started, delivered_at),
+        }
+        delivered_utterance = delivered_utterance_for_status(
+            spoken_utterance,
+            delivery_status=delivery_status,
+            spoken_fraction=spoken_fraction,
+        )
+        await self._api.update_delivery(
+            capture_session_id=self._capture_session_id,
+            turn_index=ingest.turn_index,
+            decision_log_id=responded.decision_log_id,
+            delivery_status=delivery_status,
+            delivered_utterance=delivered_utterance,
+            spoken_fraction=spoken_fraction,
+            latency_ms=delivery_latency,
+            audio_metadata=self._tts_audio_metadata,
+            local_turn_correlation_id=local_turn_correlation_id,
+            idempotency_key=delivery_idempotency_key(
+                self._capture_session_id,
+                ingest.turn_index,
+            ),
+        )
+        await self._publish_delivery_update(
+            turn_index=ingest.turn_index,
+            decision_log_id=responded.decision_log_id,
+            delivery_status=delivery_status,
+            agent_utterance=delivered_utterance,
+            spoken_fraction=spoken_fraction,
+            latency_ms=delivery_latency,
+        )
+
+    async def _run_background_extraction(
+        self,
+        *,
+        window: PendingExtractionWindow,
+    ) -> None:
+        combined_utterance = " ".join(window.utterances).strip()
+        window_turn = IngestedTurn(
+            latest_utterance=combined_utterance,
+            transcript_segment_ids=unique_preserve_order(window.transcript_segment_ids),
+            evidence_ids=unique_preserve_order(window.evidence_ids),
+            turn_index=window.turn_index,
+            raw={
+                "extraction_window_id": window.extraction_window_id,
+                "windowed_turn_count": len(window.utterances),
+                "window_turn_indexes": unique_ints_preserve_order(window.turn_indexes),
+            },
+        )
+        try:
+            result = await self._api.extract_turn(
+                capture_session_id=self._capture_session_id,
+                turn=window_turn,
+                spoken_agent_utterance=window.spoken_utterances[-1]
+                if window.spoken_utterances
+                else combined_utterance,
+                local_turn_correlation_id=window.local_turn_correlation_id,
+                extraction_window_id=window.extraction_window_id,
+                focus_candidate_process_id=window.focus_candidate_process_id,
+                idempotency_key=stable_key(
+                    "extract",
+                    self._capture_session_id,
+                    window.extraction_window_id,
+                ),
+            )
+            await self._publish_data(
+                "director.turn.extracted",
+                {
+                    "turn_index": window.turn_index,
+                    "decision_log_id": result.get("decision_log_id"),
+                    "extraction_status": result.get("extraction_status", "complete"),
+                    "extraction_latency_ms": result.get("extraction_latency_ms"),
+                    "slot_update_latency_ms": result.get("slot_update_latency_ms"),
+                    "extraction_window_id": window.extraction_window_id,
+                    "slot_updates": result.get("slot_updates", []),
+                    "coverage_slots": result.get("coverage_slots", []),
+                    "degraded_quality": result.get("degraded_quality", False),
+                    "degraded_reasons": result.get("degraded_reasons", []),
+                },
+            )
+        except Exception:
+            raise
+        else:
+            for turn_index in window.turn_indexes:
+                self._pending_extraction_turns.discard(turn_index)
+            for slot_path in window.target_slots:
+                self._pending_slot_paths.discard(slot_path)
+
+    async def _extraction_window_id_for_ingest(self, ingest: IngestedTurn) -> str:
+        async with self._extraction_window_lock:
+            if (
+                self._open_extraction_window is not None
+                and self._open_extraction_task is not None
+                and not self._open_extraction_task.done()
+            ):
+                return self._open_extraction_window.extraction_window_id
+            return stable_key(
+                "extraction-window",
+                self._capture_session_id,
+                "from-turn",
+                ingest.turn_index,
+            )
+
+    async def _queue_background_extraction(
+        self,
+        *,
+        ingest: IngestedTurn,
+        spoken_utterance: str,
+        target_slots: list[str],
+        extraction_window_id: str,
+        local_turn_correlation_id: str,
+        focus_candidate_process_id: str | None,
+    ) -> None:
+        async with self._extraction_window_lock:
+            if (
+                self._open_extraction_window is None
+                or self._open_extraction_window.extraction_window_id != extraction_window_id
+            ):
+                self._open_extraction_window = PendingExtractionWindow(
+                    extraction_window_id=extraction_window_id,
+                    local_turn_correlation_id=local_turn_correlation_id,
+                    turn_index=ingest.turn_index,
+                    turn_indexes=[],
+                    transcript_segment_ids=[],
+                    evidence_ids=[],
+                    utterances=[],
+                    spoken_utterances=[],
+                    target_slots=[],
+                    focus_candidate_process_id=focus_candidate_process_id,
+                )
+            window = self._open_extraction_window
+            if window.focus_candidate_process_id is None:
+                window.focus_candidate_process_id = focus_candidate_process_id
+            window.transcript_segment_ids.extend(ingest.transcript_segment_ids)
+            window.evidence_ids.extend(ingest.evidence_ids)
+            window.turn_indexes.append(ingest.turn_index)
+            window.utterances.append(ingest.latest_utterance)
+            window.spoken_utterances.append(spoken_utterance)
+            window.target_slots.extend(target_slots)
+            self._pending_extraction_turns.add(ingest.turn_index)
+            self._pending_slot_paths.update(target_slots)
+            if self._open_extraction_task is not None and not self._open_extraction_task.done():
+                self._open_extraction_task.cancel()
+            task = asyncio.create_task(
+                self._run_debounced_background_extraction(extraction_window_id)
+            )
+            self._open_extraction_task = task
+            self._active_extraction_tasks[ingest.turn_index] = task
+            task.add_done_callback(
+                lambda task, turn_index=ingest.turn_index: self._on_extraction_task_done(
+                    turn_index,
+                    task,
+                )
+            )
+
+    async def _run_debounced_background_extraction(
+        self,
+        extraction_window_id: str,
+    ) -> None:
+        await asyncio.sleep(EXTRACTION_WINDOW_DEBOUNCE_SECONDS)
+        async with self._extraction_window_lock:
+            if (
+                self._open_extraction_window is None
+                or self._open_extraction_window.extraction_window_id != extraction_window_id
+            ):
+                return
+            window = self._open_extraction_window
+            self._open_extraction_window = None
+            self._open_extraction_task = None
+        await self._run_background_extraction(window=window)
+
+    def _on_extraction_task_done(
+        self,
+        turn_index: int,
+        task: asyncio.Task[Any],
+    ) -> None:
+        self._active_extraction_tasks.pop(turn_index, None)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            LOGGER.warning(
+                "Director async extraction failed for turn %s: %s",
+                turn_index,
+                error,
+            )
+
+    async def _flush_open_extraction_window_for_completion(self) -> None:
+        async with self._extraction_window_lock:
+            if self._open_extraction_window is None:
+                return
+            window = self._open_extraction_window
+            debounce_task = self._open_extraction_task
+            self._open_extraction_window = None
+            self._open_extraction_task = None
+            if debounce_task is not None and not debounce_task.done():
+                debounce_task.cancel()
+
+            task = asyncio.create_task(self._run_background_extraction(window=window))
+            for turn_index in window.turn_indexes:
+                self._active_extraction_tasks[turn_index] = task
+            task.add_done_callback(
+                lambda task, turn_indexes=list(window.turn_indexes): self._on_window_extraction_task_done(
+                    turn_indexes,
+                    task,
+                )
+            )
+
+    def _on_window_extraction_task_done(
+        self,
+        turn_indexes: list[int],
+        task: asyncio.Task[Any],
+    ) -> None:
+        for turn_index in turn_indexes:
+            self._active_extraction_tasks.pop(turn_index, None)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            LOGGER.warning(
+                "Director async extraction failed for turns %s: %s",
+                turn_indexes,
+                error,
+            )
+
+    async def _run_background_output_check(
+        self,
+        *,
+        ingest: Any,
+        spoken_utterance: str,
+        steering_context: dict[str, Any],
+        local_turn_correlation_id: str,
+        extraction_window_id: str,
+    ) -> None:
+        result = await self._api.check_turn(
+            capture_session_id=self._capture_session_id,
+            turn=ingest,
+            spoken_agent_utterance=spoken_utterance,
+            steering_context=steering_context,
+            local_turn_correlation_id=local_turn_correlation_id,
+            extraction_window_id=extraction_window_id,
+            idempotency_key=stable_key(
+                "check",
+                self._capture_session_id,
+                extraction_window_id,
+                ingest.turn_index,
+            ),
+        )
+        await self._publish_data(
+            "director.turn.output_checked",
+            {
+                "turn_index": ingest.turn_index,
+                "checker_status": result.get("checker_status", "complete"),
+                "checker_violations": result.get("checker_violations", []),
+                "checker_violation_count": result.get("checker_violation_count", 0),
+                "stale_question_count": result.get("stale_question_count", 0),
+                "extraction_window_id": extraction_window_id,
+                "local_turn_correlation_id": local_turn_correlation_id,
+            },
+        )
+
+    def _on_checker_task_done(
+        self,
+        turn_index: int,
+        task: asyncio.Task[Any],
+    ) -> None:
+        self._active_checker_tasks.pop(turn_index, None)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            LOGGER.warning(
+                "Director async output checker failed for turn %s: %s",
+                turn_index,
+                error,
+            )
+
     async def _mark_delivery_not_spoken(
         self,
         *,
@@ -543,6 +1180,7 @@ class DirectorConsultantAgent(Agent):
         decision_log_id: str,
         turn_started: float,
         dispatched_at: float,
+        local_turn_correlation_id: str | None = None,
     ) -> None:
         stopped_at = time.perf_counter()
         latency = {
@@ -557,6 +1195,7 @@ class DirectorConsultantAgent(Agent):
             delivered_utterance="",
             spoken_fraction=0,
             latency_ms=latency,
+            local_turn_correlation_id=local_turn_correlation_id,
             idempotency_key=delivery_idempotency_key(
                 self._capture_session_id,
                 turn_index,
@@ -584,6 +1223,7 @@ class DirectorConsultantAgent(Agent):
         dispatched_at: float,
         speech_started_at: float,
         interrupted_at: float,
+        local_turn_correlation_id: str | None = None,
     ) -> None:
         spoken_fraction = estimated_spoken_fraction(
             utterance,
@@ -608,6 +1248,7 @@ class DirectorConsultantAgent(Agent):
             spoken_fraction=spoken_fraction,
             latency_ms=latency,
             audio_metadata=self._tts_audio_metadata,
+            local_turn_correlation_id=local_turn_correlation_id,
             idempotency_key=delivery_idempotency_key(
                 self._capture_session_id,
                 turn_index,
@@ -662,9 +1303,13 @@ class DirectorConsultantAgent(Agent):
                 "latency_ms": timing,
                 "asr_timing_source": asr_timing_source,
                 "planner_runtime": raw.get("planner_runtime"),
+                "extraction_status": raw.get("extraction_status"),
                 "brain": raw.get("metadata") or getattr(planned, "metadata", None),
                 "voice": raw.get("voice_metadata") or getattr(planned, "voice_metadata", None),
                 "degraded_quality": getattr(planned, "degraded_quality", False),
+                "degraded_reasons": getattr(planned, "degraded_reasons", []),
+                "local_turn_correlation_id": raw.get("local_turn_correlation_id")
+                or getattr(planned, "local_turn_correlation_id", None),
             },
         )
 
@@ -678,6 +1323,7 @@ class DirectorConsultantAgent(Agent):
         spoken_fraction: float,
         stage_name: str = "director.turn",
         latency_ms: dict[str, int] | None = None,
+        local_turn_correlation_id: str | None = None,
     ) -> None:
         await self._publish_data(
             "director.turn.delivery_updated",
@@ -689,6 +1335,7 @@ class DirectorConsultantAgent(Agent):
                 "agent_utterance": agent_utterance,
                 "spoken_fraction": spoken_fraction,
                 "latency_ms": latency_ms or {},
+                "local_turn_correlation_id": local_turn_correlation_id,
             },
         )
 
@@ -784,8 +1431,14 @@ class DirectorConsultantAgent(Agent):
             return
         self._realtime_turn_handlers_installed = True
         try:
-            self.session.on("user_state_changed", self._on_user_state_changed)
-            self.session.on("user_input_transcribed", self._on_user_input_transcribed)
+            session = self.session
+        except RuntimeError:
+            return
+        if not hasattr(session, "on"):
+            return
+        try:
+            session.on("user_state_changed", self._on_user_state_changed)
+            session.on("user_input_transcribed", self._on_user_input_transcribed)
         except Exception as error:
             LOGGER.warning("Failed to install realtime turn handlers: %s", error)
 
@@ -795,8 +1448,20 @@ class DirectorConsultantAgent(Agent):
 
     def _on_user_input_transcribed(self, event: Any) -> None:
         transcript = str(getattr(event, "transcript", "") or "").strip()
-        if transcript and not bool(getattr(event, "is_final", False)):
+        if not transcript:
+            return
+        is_final = bool(getattr(event, "is_final", False))
+        if not is_final:
             self._supersede_active_turn()
+            return
+        if self._active_turn_generation is None and self._active_speech is None:
+            return
+        active_utterance = normalize_transcript_for_supersede(
+            self._active_user_utterance or ""
+        )
+        if active_utterance and normalize_transcript_for_supersede(transcript) == active_utterance:
+            return
+        self._supersede_active_turn()
 
     def _start_turn_generation(self) -> int:
         self._turn_generation += 1
@@ -861,6 +1526,37 @@ class DirectorConsultantAgent(Agent):
                     LOGGER.warning(
                         "Timed out waiting for active voice delivery before completion."
                     )
+            await self._flush_open_extraction_window_for_completion()
+            active_extractions = [
+                task for task in set(self._active_extraction_tasks.values()) if not task.done()
+            ]
+            if active_extractions:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(
+                            asyncio.gather(*active_extractions, return_exceptions=True)
+                        ),
+                        timeout=COMPLETION_EXTRACTION_WAIT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    LOGGER.warning(
+                        "Timed out waiting for async director extraction before completion."
+                    )
+            active_checkers = [
+                task for task in set(self._active_checker_tasks.values()) if not task.done()
+            ]
+            if active_checkers:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(
+                            asyncio.gather(*active_checkers, return_exceptions=True)
+                        ),
+                        timeout=COMPLETION_CHECKER_WAIT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    LOGGER.warning(
+                        "Timed out waiting for async director output checker before completion."
+                    )
             await self._complete_session_with_retry()
             completed = True
         except Exception as error:
@@ -874,6 +1570,7 @@ class DirectorConsultantAgent(Agent):
             )
         finally:
             if completed:
+                await asyncio.sleep(COMPLETION_DISCONNECT_GRACE_SECONDS)
                 await self._room.disconnect()
 
     async def _complete_session_with_retry(self) -> None:
@@ -900,7 +1597,7 @@ class DirectorConsultantAgent(Agent):
             except Exception as error:
                 last_error = error
                 if (
-                    not is_delivery_pending_completion_error(error)
+                    not is_retryable_completion_settling_error(error)
                     or attempt >= len(COMPLETION_RETRY_DELAYS_SECONDS)
                 ):
                     raise
@@ -930,10 +1627,11 @@ class DirectorConsultantAgent(Agent):
         self._active_delivery_events.discard(delivery_done)
 
 def text_content(message: ChatMessage) -> str:
-    content = getattr(message, "text_content", "")
-    if callable(content):
-        return str(content())
-    return str(content or "")
+    return core_text_content(message)
+
+
+def normalize_transcript_for_supersede(value: str) -> str:
+    return " ".join(value.casefold().split())
 
 
 def transcript_timing_from_message(
@@ -1050,8 +1748,31 @@ def delivery_idempotency_key(
     return stable_key("delivery", capture_session_id, stage_name, turn_index)
 
 
-def is_delivery_pending_completion_error(error: Exception) -> bool:
-    return "delivery_pending" in str(error)
+def is_retryable_completion_settling_error(error: Exception) -> bool:
+    message = str(error)
+    return "delivery_pending" in message or "extraction_pending" in message
+
+
+def unique_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        unique.append(value)
+    return unique
+
+
+def unique_ints_preserve_order(values: list[int]) -> list[int]:
+    seen: set[int] = set()
+    unique: list[int] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        unique.append(value)
+    return unique
 
 
 def delivered_utterance_for_status(
@@ -1060,18 +1781,13 @@ def delivered_utterance_for_status(
     delivery_status: str,
     spoken_fraction: float,
 ) -> str:
-    if delivery_status != "truncated":
-        return utterance
-    trimmed = utterance.strip()
-    if not trimmed:
-        return trimmed
-    if spoken_fraction <= 0:
-        return ""
-    boundary = max(1, min(len(trimmed), int(len(trimmed) * spoken_fraction)))
-    next_space = trimmed.find(" ", boundary)
-    if 0 <= next_space <= boundary + 24:
-        boundary = next_space
-    return trimmed[:boundary].rstrip() + "..."
+    delivered = core_delivered_utterance_for_status(
+        utterance,
+        delivery_status=delivery_status,
+        spoken_fraction=spoken_fraction,
+        truncate_on_word_boundary=True,
+    )
+    return delivered or ""
 
 
 def estimated_spoken_fraction(
@@ -1079,18 +1795,16 @@ def estimated_spoken_fraction(
     speech_started_at: float,
     delivered_at: float,
 ) -> float:
-    trimmed = utterance.strip()
-    if not trimmed:
-        return 0
-    playout_ms = elapsed_ms(speech_started_at, delivered_at)
-    estimated_total_ms = estimated_tts_duration_ms(trimmed)
-    fraction = playout_ms / estimated_total_ms
-    return round(max(0.05, min(0.95, fraction)), 2)
-
-
-def estimated_tts_duration_ms(utterance: str) -> int:
-    word_count = max(1, len(utterance.split()))
-    return max(700, word_count * 360)
+    return core_estimated_spoken_fraction(
+        utterance,
+        speech_started_at,
+        delivered_at,
+        seconds_per_word=0.36,
+        minimum_duration_seconds=0.7,
+        minimum_fraction=0.05,
+        maximum_fraction=0.95,
+        decimals=2,
+    )
 
 
 def number_from_mapping(mapping: Any, key: str) -> float | None:
@@ -1153,10 +1867,6 @@ def optional_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
-
-
-def elapsed_ms(start: float, end: float) -> int:
-    return max(0, int((end - start) * 1000))
 
 
 def state_name(state: Any) -> str:

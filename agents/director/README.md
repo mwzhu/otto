@@ -9,12 +9,17 @@ The worker owns the realtime audio loop:
 3. For each finalized user turn, checkpoint transcript/evidence through Otto's internal API:
    - `POST /api/internal/director-turns/opening`
    - `POST /api/internal/director-turns/ingest`
-   - `POST /api/internal/director-turns/context`
+   - `POST /api/internal/director-turns/context` during worker startup/recovery
+   - `POST /api/internal/director-turns/plan` as SSE for live planning
+   - `POST /api/internal/director-turns/respond` as SSE for decoupled fast speech
    - `POST /api/internal/director-turns/dispatch`
+   - `POST /api/internal/director-turns/extract` for async structured extraction
+   - `POST /api/internal/director-turns/check` for async spoken-output checks
    - `POST /api/internal/director-turns/:turnIndex/delivery`
    - `POST /api/internal/director-turns/complete`
-4. Run the director brain + voice planner in Python by default, then speak only after dispatch has
-   committed and returned a decision log id.
+4. Stream the Next.js director plan response by default, speak from the first complete
+   `planned_agent_utterance`, and let dispatch commit concurrently with TTS. The Python planner
+   remains a buffered fallback runtime.
 5. Listen for reliable LiveKit data-channel controls on `otto.director.control`:
    - `mute` and `unmute` track intentional silence without ending or recovering the interview.
    - `pause` and `resume` stop or resume turn handling and interrupt active speech.
@@ -83,7 +88,7 @@ Required environment:
 - `DATABASE_SERVICE_URL` in the Next.js deployment. This must be the service-role database URL,
   not the RLS-limited app URL, because internal director endpoints resolve `capture_session_id` to
   org/workspace/user before they can set tenant RLS context.
-- `ANTHROPIC_API_KEY` for Python-owned brain/voice LLM calls. Without it, the worker uses the
+- `ANTHROPIC_API_KEY` for the Next.js `/plan` runtime. Without it, the server/worker use the
   deterministic conversational fallback.
 - `OTTO_DIRECTOR_PREFLIGHT_STRICT=true` for production readiness checks in non-production
   environments. `NODE_ENV=production` automatically enables the same strict requirements. In strict
@@ -96,14 +101,14 @@ Required environment:
   `OTTO_ANTHROPIC_RAW_LOGGING_OFF_ACK=true` in strict mode, after confirming Deepgram no-store or
   LiveKit Inference equivalent controls, Cartesia no-retention controls, and Anthropic raw-payload
   logging controls.
-- `DIRECTOR_BRAIN_MODEL` and `DIRECTOR_VOICE_MODEL` to override model roles.
+- `DIRECTOR_BRAIN_MODEL` and `DIRECTOR_VOICE_MODEL` to override model roles. Director planning now
+  defaults to Sonnet because the same plan call also chooses the spoken utterance.
 - `OTTO_VOICE_PHRASE_TIMEOUT_MS` to bound the Sonnet voice rewrite before speech. The default is
   `2500`; if the voice model misses that deadline, the worker speaks the deterministic consultant
   phrasing for the brain's chosen intent and records `voice_timeout_fallback` in decision metadata.
   This marks voice phrasing as degraded without marking transcript extraction or claims as degraded.
-- `OTTO_DIRECTOR_PLANNER_RUNTIME=next` to temporarily delegate planning to the Next.js `/plan`
-  endpoint for debugging in non-strict local sessions. The default is `python`; strict production
-  voice mode refuses `next` so calls use the Python-owned brain/voice runtime.
+- `OTTO_DIRECTOR_PLANNER_RUNTIME=next` to use the default streamed Next.js `/plan` endpoint. Set
+  `python` only for local buffered fallback testing.
 
 Provider environment depends on whether you use LiveKit Inference or direct provider plugins:
 
@@ -142,7 +147,7 @@ path.
    - `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, and `LIVEKIT_AGENT_NAME`
    - `LIVEKIT_AGENT_SERVICE_TOKEN`, which must exactly match the worker value
    - `OTTO_INTERNAL_API_BASE_URL`, usually `http://localhost:3000` for local proof
-   - `OTTO_DIRECTOR_PLANNER_RUNTIME=python`
+   - `OTTO_DIRECTOR_PLANNER_RUNTIME=next`
    - `OTTO_DIRECTOR_PREFLIGHT_STRICT=true`
    - `OTTO_VENDOR_PRIVACY_ACK=true`, `OTTO_DEEPGRAM_NO_STORE_ACK=true`,
      `OTTO_CARTESIA_NO_RETENTION_ACK=true`, and `OTTO_ANTHROPIC_RAW_LOGGING_OFF_ACK=true` after the
@@ -243,7 +248,7 @@ and avoids stale local entry points.
 capture session:
 
 1. ingest transcript/evidence through the internal API
-2. run the Python-owned brain + voice planner
+2. run the configured planner runtime, defaulting to the streamed Next.js `/plan` route
 3. dispatch tool/claim/slot updates through the internal API
 4. mark delivery completed
 5. print `decision_log_id`, candidate ids, slot updates, degraded flag, latency timings, and a

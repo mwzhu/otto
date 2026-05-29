@@ -5,6 +5,12 @@ import {
   documentArtifactUploadedEventName,
   inventorySynthesisRequestedEventName,
   inngest,
+  operatorCaptureCompletedEventName,
+  operatorProcessSynthesisRequestedEventName,
+  operatorRedactionRequestedEventName,
+  operatorScreenFrameCapturedEventName,
+  operatorScreenRecordingUploadedEventName,
+  processDocumentUploadedEventName,
 } from "@/lib/inngest/client";
 import { getDb, setOrgContext } from "@/lib/db/client";
 import { getServiceDbPool } from "@/lib/db/service";
@@ -18,11 +24,16 @@ import {
 } from "@/lib/db/schema";
 import { writeAgentDecision } from "@/lib/db/write-agent-decision";
 import { processDocumentArtifact } from "@/lib/documents/pipeline";
+import { processSpecificDocumentArtifact } from "@/lib/documents/process-document";
+import { processScreenRecordingArtifact } from "@/lib/video/process-screen-recording";
+import { processOperatorScreenFrame } from "@/lib/vision/operator-screen-frame";
+import { runOperatorRedaction } from "@/lib/redactions/operator-redaction";
 import {
   dispatchDirectorTurnPlan,
   planDirectorTurn,
 } from "@/lib/interview/director/brain";
 import { runInventorySynthesis } from "@/lib/synthesis/inventory";
+import { runOperatorProcessSynthesis } from "@/lib/synthesis/operator-process";
 
 export const artifactUploaded = inngest.createFunction(
   {
@@ -178,6 +189,188 @@ export const inventorySynthesis = inngest.createFunction(
   },
 );
 
+export const operatorCaptureReady = inngest.createFunction(
+  {
+    id: "operator-capture-ready-v1",
+    triggers: [
+      { event: operatorCaptureCompletedEventName },
+      { event: operatorScreenRecordingUploadedEventName },
+      { event: processDocumentUploadedEventName },
+    ],
+  },
+  async ({ event, step }) => {
+    let captureProcessingResult:
+      | { ok: boolean; reason?: string }
+      | undefined;
+    if (event.name === processDocumentUploadedEventName) {
+      captureProcessingResult = await step.run("parse-process-specific-document", async () =>
+        processSpecificDocumentArtifact({
+          artifactId: event.data.artifactId as string,
+          orgId: event.data.orgId as string,
+          captureSessionId: event.data.captureSessionId as string,
+          processId: event.data.processId as string,
+          userId: event.data.userId as string | undefined,
+          idempotencyKey: event.data.idempotencyKey as string | undefined,
+        }),
+      );
+    }
+    if (event.name === operatorScreenRecordingUploadedEventName) {
+      captureProcessingResult = await step.run("process-operator-screen-recording", async () =>
+        processScreenRecordingArtifact({
+          artifactId: event.data.artifactId as string,
+          orgId: event.data.orgId as string,
+          captureSessionId: event.data.captureSessionId as string,
+          processId: event.data.processId as string,
+          userId: event.data.userId as string | undefined,
+          idempotencyKey: event.data.idempotencyKey as string | undefined,
+        }),
+      );
+    }
+    if (captureProcessingResult && captureProcessingResult.ok !== true) {
+      return {
+        ok: false as const,
+        reason: "operator_capture_processing_failed",
+        processing: captureProcessingResult,
+      };
+    }
+    return step.run("request-operator-process-synthesis", async () => {
+      const captureSessionId = event.data.captureSessionId as string;
+      const processId = event.data.processId as string;
+      const orgId = event.data.orgId as string;
+      const workspaceId = event.data.workspaceId as string;
+      const userId = event.data.userId as string | undefined;
+      const idempotencyKey = event.data.idempotencyKey as string | undefined;
+
+      const queued = await getDb().transaction(async (tx) => {
+        await setOrgContext(tx, orgId);
+        await tx.execute(sql`
+          SELECT pg_advisory_xact_lock(hashtext(${`synthesis.operator.queued:${captureSessionId}:${idempotencyKey ?? ""}`}))
+        `);
+        const existing = await tx.execute<{ id: string }>(sql`
+          SELECT id
+          FROM audit_log
+          WHERE org_id = ${orgId}
+            AND workspace_id = ${workspaceId}
+            AND subject_type = 'capture_session'
+            AND subject_id = ${captureSessionId}
+            AND event_type = 'synthesis.operator.queued'
+            AND metadata_json->>'idempotency_key' = ${idempotencyKey ?? ""}
+          LIMIT 1
+        `);
+        if (existing.rows[0]) {
+          return { ok: true as const, alreadyQueued: true };
+        }
+        await tx.insert(auditLog).values({
+          orgId,
+          workspaceId,
+          userId: userId ?? null,
+          eventType: "synthesis.operator.queued",
+          subjectType: "capture_session",
+          subjectId: captureSessionId,
+          metadataJson: {
+            process_id: processId,
+            capture_session_id: captureSessionId,
+            source_event: event.name,
+            idempotency_key: idempotencyKey,
+          },
+        });
+        return { ok: true as const, alreadyQueued: false };
+      });
+
+      if (!queued.alreadyQueued) {
+        await inngest.send({
+          name: operatorProcessSynthesisRequestedEventName,
+          data: {
+            orgId,
+            workspaceId,
+            processId,
+            captureSessionIds: [captureSessionId],
+            userId,
+            idempotencyKey,
+          },
+        });
+      }
+      return queued;
+    });
+  },
+);
+
+export const operatorProcessSynthesis = inngest.createFunction(
+  {
+    id: "operator-process-synthesis-v1",
+    triggers: [{ event: operatorProcessSynthesisRequestedEventName }],
+  },
+  async ({ event, step }) => {
+    return step.run("create-operator-process-synthesis-run", async () =>
+      runOperatorProcessSynthesis({
+        orgId: event.data.orgId as string,
+        workspaceId: event.data.workspaceId as string,
+        processId: event.data.processId as string,
+        captureSessionIds: event.data.captureSessionIds as string[],
+        userId: event.data.userId as string | undefined,
+        idempotencyKey: event.data.idempotencyKey as string | undefined,
+      }),
+    );
+  },
+);
+
+export const operatorScreenFrameCaptured = inngest.createFunction(
+  {
+    id: "operator-screen-frame-captured-v1",
+    triggers: [{ event: operatorScreenFrameCapturedEventName }],
+  },
+  async ({ event, step }) => {
+    return step.run("process-operator-screen-frame-vision", async () =>
+      processOperatorScreenFrame({
+        orgId: event.data.orgId as string,
+        workspaceId: event.data.workspaceId as string,
+        processId: event.data.processId as string,
+        captureSessionId: event.data.captureSessionId as string,
+        artifactId: event.data.artifactId as string,
+        screenEventId: event.data.screenEventId as string,
+        userId: event.data.userId as string | undefined,
+        idempotencyKey: event.data.idempotencyKey as string | undefined,
+      }),
+    );
+  },
+);
+
+export const operatorRedactionRequested = inngest.createFunction(
+  {
+    id: "operator-redaction-requested-v1",
+    triggers: [{ event: operatorRedactionRequestedEventName }],
+  },
+  async ({ event, step }) => {
+    const result = await step.run("cascade-operator-redaction", async () =>
+      runOperatorRedaction({
+        orgId: event.data.orgId as string,
+        workspaceId: event.data.workspaceId as string,
+        processId: event.data.processId as string,
+        captureSessionId: event.data.captureSessionId as string,
+        redactionId: event.data.redactionId as string,
+        userId: event.data.userId as string | undefined,
+        idempotencyKey: event.data.idempotencyKey as string | undefined,
+      }),
+    );
+    if (isCompletedOperatorRedaction(result)) {
+      await step.run("request-post-redaction-operator-synthesis", async () =>
+        inngest.send({
+          name: operatorProcessSynthesisRequestedEventName,
+          data: {
+            orgId: event.data.orgId as string,
+            workspaceId: event.data.workspaceId as string,
+            processId: event.data.processId as string,
+            captureSessionIds: [event.data.captureSessionId as string],
+            userId: event.data.userId as string | undefined,
+            idempotencyKey: `redaction:${event.data.redactionId as string}`,
+          },
+        }),
+      );
+    }
+    return result;
+  },
+);
+
 export const reExtractDegradedTurns = inngest.createFunction(
   {
     id: "re-extract-degraded-turns-v1",
@@ -208,6 +401,10 @@ export const inngestFunctions = [
   artifactUploaded,
   directorInterviewCompleted,
   inventorySynthesis,
+  operatorCaptureReady,
+  operatorProcessSynthesis,
+  operatorScreenFrameCaptured,
+  operatorRedactionRequested,
   reExtractDegradedTurns,
 ];
 
@@ -228,6 +425,15 @@ function isDecisionResult(
     typeof (result as { workspaceId?: unknown }).workspaceId === "string" &&
     typeof (result as { captureSessionId?: unknown }).captureSessionId ===
       "string"
+  );
+}
+
+function isCompletedOperatorRedaction(value: unknown): value is { ok: true } {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      "ok" in value &&
+      (value as { ok?: unknown }).ok === true,
   );
 }
 

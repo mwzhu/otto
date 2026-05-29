@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://otto.local/schemas/operator-turn-plan.schema.json",
+  "title": "OperatorTurnPlan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "utterance_type",
+    "chosen_intent",
+    "current_phase",
+    "proposed_next_phase",
+    "phase_transition_ready",
+    "step_updates",
+    "slot_updates",
+    "claims",
+    "tool_calls",
+    "contradiction_signals",
+    "ranked_intents"
+  ],
+  "properties": {
+    "utterance_type": {
+      "enum": [
+        "substantive_answer",
+        "partial_answer",
+        "dont_know",
+        "correction",
+        "contradiction",
+        "meta_question",
+        "off_topic"
+      ]
+    },
+    "chosen_intent": { "$ref": "#/$defs/intent" },
+    "planned_agent_utterance": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The exact next sentence or short pair of sentences Otto should say aloud. It must be concise, natural, and ask at most one question."
+    },
+    "current_phase": { "$ref": "#/$defs/interview_phase" },
+    "proposed_next_phase": { "$ref": "#/$defs/interview_phase" },
+    "phase_transition_ready": { "type": "boolean" },
+    "step_updates": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/step_update" }
+    },
+    "slot_updates": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/slot_update" }
+    },
+    "claims": {
+      "type": "array",
+      "items": { "$ref": "claim.schema.json" }
+    },
+    "tool_calls": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "arguments"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "arguments": { "type": "object" }
+        }
+      }
+    },
+    "contradiction_signals": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "ranked_intents": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/intent" }
+    }
+  },
+  "$defs": {
+    "interview_phase": {
+      "enum": [
+        "orient",
+        "happy_path",
+        "hard_case",
+        "exception_sweep",
+        "playback",
+        "closeout"
+      ]
+    },
+    "intent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intent", "score", "reason"],
+      "properties": {
+        "intent": { "type": "string", "minLength": 1 },
+        "target_slot": { "type": "string" },
+        "target_step_title": { "type": "string" },
+        "score": { "type": "number" },
+        "reason": { "type": "string", "minLength": 1 },
+        "style_hint": { "type": "string" }
+      }
+    },
+    "step_update": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "confidence"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1 },
+        "action_verb": { "type": "string" },
+        "action_object": { "type": "string" },
+        "ts_start_ms": { "type": "integer", "minimum": 0 },
+        "ts_end_ms": { "type": "integer", "minimum": 0 },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "evidence_ids": {
+          "type": "array",
+          "items": { "type": "string", "format": "uuid" }
+        }
+      }
+    },
+    "slot_update": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["slot_path", "status", "confidence"],
+      "properties": {
+        "slot_path": { "type": "string", "minLength": 1 },
+        "provisional_step_id": { "type": "string", "format": "uuid" },
+        "value": true,
+        "status": {
+          "enum": [
+            "empty",
+            "asked_unknown",
+            "partial",
+            "filled",
+            "conflicting",
+            "pending_re_extract"
+          ]
+        },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "evidence_ids": {
+          "type": "array",
+          "items": { "type": "string", "format": "uuid" }
+        },
+        "candidates": {
+          "type": "array",
+          "items": true
+        }
+      }
+    }
+  }
+}

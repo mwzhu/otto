@@ -1,29 +1,68 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
 import { GradientMark } from "@/components/brand/GradientMark";
 
-export function ScreenSharePreview() {
+export function ScreenSharePreview({ stream }: { stream?: MediaStream | null }) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [showPreview, setShowPreview] = useState(false);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.srcObject = stream ?? null;
+    if (stream && showPreview) {
+      void video.play().catch(() => undefined);
+    }
+    return () => {
+      video.srcObject = null;
+    };
+  }, [stream, showPreview]);
+
   return (
     <div className="relative aspect-[16/10] w-full overflow-hidden rounded-md border border-subtle bg-[#1F1F1B]">
-      <FakeBrowserChrome />
-      <div className="absolute inset-x-6 bottom-6 top-12 grid grid-cols-2 gap-3">
-        <FakePane title="Promo System" hint="proposal_2026Q2" />
-        <FakePane title="promo-funding-jul.xlsx" hint="14 rows · Excel" />
-      </div>
+      {stream ? (
+        <video
+          ref={videoRef}
+          muted
+          playsInline
+          className="size-full object-contain"
+          aria-label="Shared screen preview"
+        />
+      ) : (
+        <>
+          <FakeBrowserChrome />
+          <div className="absolute inset-x-6 bottom-6 top-12 grid grid-cols-2 gap-3">
+            <FakePane title="Promo System" hint="proposal_2026Q2" />
+            <FakePane title="promo-funding-jul.xlsx" hint="14 rows · Excel" />
+          </div>
+        </>
+      )}
 
-      {/* Dimmed overlay matching mockup */}
-      <div className="absolute inset-0 bg-canvas/55 backdrop-blur-[1px]" />
-      <div className="absolute inset-0 grid place-items-center">
-        <div className="flex flex-col items-center gap-2.5 text-center">
-          <GradientMark variant="logo" size={56} />
-          <div className="text-[13px] font-semibold text-ink">Preview dimmed</div>
-          <p className="max-w-[280px] text-[11.5px] leading-relaxed text-ink-secondary">
-            We&apos;ve dimmed the recording preview so you don&apos;t have to watch the
-            infinite mirror effect. Sharing is unaffected.
-          </p>
-          <button className="mt-1 rounded-full bg-surface px-2.5 py-1 text-[11px] font-medium text-ink-secondary shadow-card">
-            Show preview anyway
-          </button>
+      {!showPreview && (
+        <div className="absolute inset-0 bg-canvas/55 backdrop-blur-[1px]" />
+      )}
+      {!showPreview && (
+        <div className="absolute inset-0 grid place-items-center">
+          <div className="flex flex-col items-center gap-2.5 text-center">
+            <GradientMark variant="logo" size={56} />
+            <div className="text-[13px] font-semibold text-ink">
+              Preview dimmed
+            </div>
+            <p className="max-w-[280px] text-[11.5px] leading-relaxed text-ink-secondary">
+              We&apos;ve dimmed the recording preview so you don&apos;t have to watch the
+              infinite mirror effect. Sharing is unaffected.
+            </p>
+            <button
+              type="button"
+              onClick={() => setShowPreview(true)}
+              className="mt-1 rounded-full bg-surface px-2.5 py-1 text-[11px] font-medium text-ink-secondary shadow-card"
+            >
+              Show preview anyway
+            </button>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

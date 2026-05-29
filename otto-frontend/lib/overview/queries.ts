@@ -14,6 +14,10 @@ export type OverviewMetrics = {
   hasPartialSynthesis: boolean;
 };
 
+export type OverviewQueryOptions = {
+  captureSessionId?: string | null;
+};
+
 type CardRow = {
   id: string;
   source: "process" | "candidate";
@@ -30,7 +34,12 @@ type CardRow = {
   narrative_summary: string | null;
 };
 
-export async function getOverviewMetrics(orgId: string, workspaceId: string): Promise<OverviewMetrics> {
+export async function getOverviewMetrics(
+  orgId: string,
+  workspaceId: string,
+  options: OverviewQueryOptions = {},
+): Promise<OverviewMetrics> {
+  const captureSessionId = options.captureSessionId ?? null;
   const result = await getDb().transaction(async (tx) => {
     await setOrgContext(tx, orgId);
     return tx.execute<{
@@ -48,12 +57,24 @@ export async function getOverviewMetrics(orgId: string, workspaceId: string): Pr
         WHERE org_id = ${orgId}
           AND workspace_id = ${workspaceId}
           AND status IN ('draft', 'approved')
+          ${captureSessionId ? sql`AND false` : sql``}
         UNION ALL
         SELECT id, 'candidate' AS source
         FROM candidate_processes
         WHERE org_id = ${orgId}
           AND workspace_id = ${workspaceId}
           AND status = 'pending'
+          AND lower(proposed_name) NOT IN (
+            'a couple different things',
+            'couple different things',
+            'different things',
+            'a few things',
+            'several things',
+            'some things',
+            'multiple things',
+            'things'
+          )
+          ${captureSessionId ? sql`AND capture_session_id = ${captureSessionId}` : sql``}
       ),
       complexity AS (
         SELECT
@@ -135,7 +156,12 @@ export async function getOverviewMetrics(orgId: string, workspaceId: string): Pr
   };
 }
 
-export async function getProcessCards(orgId: string, workspaceId: string): Promise<ProcessSummary[]> {
+export async function getProcessCards(
+  orgId: string,
+  workspaceId: string,
+  options: OverviewQueryOptions = {},
+): Promise<ProcessSummary[]> {
+  const captureSessionId = options.captureSessionId ?? null;
   const result = await getDb().transaction(async (tx) => {
     await setOrgContext(tx, orgId);
     return tx.execute<CardRow>(sql`
@@ -204,6 +230,17 @@ export async function getProcessCards(orgId: string, workspaceId: string): Promi
         WHERE cp.org_id = ${orgId}
           AND cp.workspace_id = ${workspaceId}
           AND cp.status = 'pending'
+          AND lower(cp.proposed_name) NOT IN (
+            'a couple different things',
+            'couple different things',
+            'different things',
+            'a few things',
+            'several things',
+            'some things',
+            'multiple things',
+            'things'
+          )
+          ${captureSessionId ? sql`AND cp.capture_session_id = ${captureSessionId}` : sql``}
         GROUP BY cp.id
       ),
       process_cards AS (
@@ -260,6 +297,7 @@ export async function getProcessCards(orgId: string, workspaceId: string): Promi
         WHERE p.org_id = ${orgId}
           AND p.workspace_id = ${workspaceId}
           AND p.status IN ('draft', 'approved')
+          ${captureSessionId ? sql`AND false` : sql``}
         GROUP BY p.id, pv.id, r.id
       )
       SELECT * FROM candidate_cards

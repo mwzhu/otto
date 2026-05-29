@@ -1,0 +1,2 @@
+[console_scripts]
+otto-operator-agent = operator_agent.worker:main

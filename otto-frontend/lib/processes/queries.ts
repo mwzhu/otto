@@ -89,7 +89,8 @@ export async function getDirectorProcessDetail(
         ) AS risk_claims,
         count(DISTINCT ce.evidence_id)::int AS evidence_count
       FROM processes p
-      LEFT JOIN process_versions pv ON pv.id = p.current_draft_version_id
+      LEFT JOIN process_versions pv
+        ON pv.id = COALESCE(p.current_draft_version_id, p.current_approved_version_id)
       LEFT JOIN roles owner ON owner.id = p.owner_role_id
       LEFT JOIN process_systems ps ON ps.process_id = p.id
       LEFT JOIN systems s ON s.id = ps.system_id
@@ -229,6 +230,7 @@ function rowToDetail(row: DetailRow): ProcessDetail {
     source: "process",
     href: `/process/${row.id}`,
     name: row.name,
+    process_status: row.status as "candidate" | "draft" | "approved" | "archived",
     function: row.owner_role ?? "Captured process",
     department: row.owner_role ?? "Commercial Department",
     status: "documented",

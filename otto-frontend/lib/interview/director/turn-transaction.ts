@@ -108,6 +108,8 @@ export async function assertDirectorTurnReferences(input: {
   transcriptSegmentIds: string[];
   evidenceIds: string[];
   expectedTurnIndex?: number;
+  expectedTurnIndexes?: number[];
+  allowMultipleTurnIndexes?: boolean;
   tx?: TransactionHandle;
 }) {
   const transcriptSegmentIds = [...new Set(input.transcriptSegmentIds)];
@@ -151,14 +153,37 @@ export async function assertDirectorTurnReferences(input: {
         .map((row) => row.turnIndex)
         .filter((turnIndex): turnIndex is number => turnIndex !== null),
     );
-    if (segmentTurnIndexes.size > 1) {
+    const expectedTurnIndexes = new Set(
+      input.expectedTurnIndexes?.length
+        ? input.expectedTurnIndexes
+        : input.expectedTurnIndex !== undefined
+          ? [input.expectedTurnIndex]
+          : [],
+    );
+    if (segmentTurnIndexes.size > 1 && !input.allowMultipleTurnIndexes) {
       throw new ApiError(
         400,
         "bad_request",
         "All transcript_segment_ids for a director turn must share the same turn_index.",
       );
     }
-    if (input.expectedTurnIndex !== undefined) {
+    if (input.allowMultipleTurnIndexes && expectedTurnIndexes.size > 0) {
+      const invalidTurnIndexes = [...segmentTurnIndexes].filter(
+        (turnIndex) => !expectedTurnIndexes.has(turnIndex),
+      );
+      if (
+        segmentTurnIndexes.size === 0 ||
+        invalidTurnIndexes.length > 0 ||
+        [...expectedTurnIndexes].some((turnIndex) => !segmentTurnIndexes.has(turnIndex))
+      ) {
+        throw new ApiError(
+          400,
+          "bad_request",
+          "Windowed director transcript segments must match the submitted turn indexes.",
+        );
+      }
+    }
+    if (input.expectedTurnIndex !== undefined && !input.allowMultipleTurnIndexes) {
       const [segmentTurnIndex] = [...segmentTurnIndexes];
       if (
         segmentTurnIndex === undefined ||
@@ -409,6 +434,7 @@ export async function updateDirectorTurnDelivery(input: {
   spokenFraction?: number;
   latencyMs?: Record<string, number>;
   audioMetadata?: Record<string, unknown>;
+  localTurnCorrelationId?: string;
   tx?: Parameters<Parameters<ReturnType<typeof getDb>["transaction"]>[0]>[0];
 }) {
   const update = async (
@@ -464,6 +490,7 @@ export async function updateDirectorTurnDelivery(input: {
       spoken_fraction: input.spokenFraction ?? 0,
       latency_ms: input.latencyMs ?? {},
       audio_metadata: input.audioMetadata ?? {},
+      local_turn_correlation_id: input.localTurnCorrelationId ?? null,
     });
     const result = await activeTx.execute<{ id: string; delivery_json: unknown }>(sql`
       UPDATE agent_decision_log
@@ -597,6 +624,7 @@ export async function readDirectorPlanningContext(
     const slotRows = await tx
       .select({
         slotPath: slotStates.slotPath,
+        candidateProcessId: slotStates.candidateProcessId,
         value: slotStates.value,
         status: slotStates.status,
         confidence: slotStates.confidence,
@@ -813,6 +841,9 @@ export async function readDirectorPlanningContext(
       opening_prompt_delivery_status: openingDeliveryStatus,
       slots: slotRows.map((slot) => ({
         slot_path: slot.slotPath,
+        ...(slot.candidateProcessId
+          ? { candidate_process_id: slot.candidateProcessId }
+          : {}),
         value: slot.value,
         status: slot.status,
         confidence: Number(slot.confidence ?? 0),

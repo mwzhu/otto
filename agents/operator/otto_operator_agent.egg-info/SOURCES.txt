@@ -1,0 +1,15 @@
+README.md
+pyproject.toml
+operator_agent/__init__.py
+operator_agent/agent.py
+operator_agent/config.py
+operator_agent/otto_api.py
+operator_agent/schemas.py
+operator_agent/worker.py
+otto_operator_agent.egg-info/PKG-INFO
+otto_operator_agent.egg-info/SOURCES.txt
+otto_operator_agent.egg-info/dependency_links.txt
+otto_operator_agent.egg-info/entry_points.txt
+otto_operator_agent.egg-info/requires.txt
+otto_operator_agent.egg-info/top_level.txt
+tests/test_worker_contract.py

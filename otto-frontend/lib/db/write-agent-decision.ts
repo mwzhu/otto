@@ -51,6 +51,7 @@ export async function writeAgentDecisionInTransaction(
     latencyMs: parsed.latencyMs,
     cacheHit: parsed.cacheHit,
     degradedQuality: parsed.degradedQuality,
+    degradedReasons: sanitizeJsonForLogs(parsed.degradedReasons),
   };
   return (
     await tx
@@ -84,6 +85,7 @@ export async function writeAgentDecisionInTransaction(
           latencyMs: values.latencyMs,
           cacheHit: values.cacheHit,
           degradedQuality: values.degradedQuality,
+          degradedReasons: values.degradedReasons,
           updatedAt: new Date(),
         },
       })

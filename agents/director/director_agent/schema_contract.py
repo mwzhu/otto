@@ -76,6 +76,16 @@ def check_schema_contract() -> dict[str, Any]:
         parsed_allowlist = ClaimSubjectFields.model_validate(claim_subject_fields)
         if not parsed_allowlist.allows("candidate_process", "kpi"):
             errors.append("ClaimSubjectFields must allow candidate_process.kpi.")
+        for subject_type, field in [
+            ("process_node", "evidence_coverage"),
+            ("process_edge", "handoff"),
+            ("exception", "trigger"),
+            ("workaround", "why_it_exists"),
+            ("variant", "condition"),
+            ("narrative_paragraph", "gap_warning"),
+        ]:
+            if not parsed_allowlist.allows(subject_type, field):
+                errors.append(f"ClaimSubjectFields must allow {subject_type}.{field}.")
     except Exception as exc:  # pragma: no cover - reported by CLI output
         errors.append(f"ClaimSubjectFields failed Pydantic validation: {exc}")
 

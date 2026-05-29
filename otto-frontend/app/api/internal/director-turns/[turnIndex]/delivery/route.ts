@@ -29,6 +29,7 @@ const bodySchema = z
     spoken_fraction: z.number().min(0).max(1),
     latency_ms: z.record(z.string(), z.number().int().min(0)).optional(),
     audio_metadata: z.record(z.string(), z.unknown()).optional(),
+    local_turn_correlation_id: z.string().min(1).optional(),
   })
   .strict()
   .superRefine((body, ctx) => {
@@ -147,6 +148,7 @@ export async function POST(
         spokenFraction: body.spoken_fraction,
         latencyMs: body.latency_ms,
         audioMetadata: body.audio_metadata,
+        localTurnCorrelationId: body.local_turn_correlation_id,
         tx,
       });
       const response = { delivery };

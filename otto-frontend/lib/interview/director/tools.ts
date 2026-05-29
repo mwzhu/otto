@@ -1,7 +1,7 @@
 import "server-only";
 
 import { createHash, randomUUID } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { getDb, setOrgContext } from "@/lib/db/client";
 import {
   auditLog,
@@ -37,6 +37,7 @@ export type DirectorToolContext = {
 
 export type SlotUpdateInput = {
   slotPath: string;
+  candidateProcessId?: string;
   value?: unknown;
   status: DirectorSlotStatus;
   confidence: number;
@@ -111,20 +112,17 @@ export async function touchSlotAskedAt(
   slotPath: string,
   askedAt = new Date(),
   options: DirectorToolOptions = {},
+  candidateProcessId?: string,
 ) {
   assertDirectorSlotPath(slotPath);
   return withDirectorToolTx(context, options, async (tx) => {
-    const updated = await tx.execute<{ id: string }>(sql`
-      UPDATE slot_states
-      SET last_asked_at = ${askedAt},
-          updated_at = now()
-      WHERE org_id = ${context.orgId}
-        AND workspace_id = ${context.workspaceId}
-        AND capture_session_id = ${context.captureSessionId}
-        AND slot_path = ${slotPath}
-      RETURNING id
-    `);
-    if (updated.rows[0]) return updated.rows[0];
+    await lockSlotState(tx, context.captureSessionId, slotPath, candidateProcessId);
+    const rows = await tx
+      .update(slotStates)
+      .set({ lastAskedAt: askedAt, updatedAt: new Date() })
+      .where(slotIdentityWhere(context, slotPath, candidateProcessId))
+      .returning({ id: slotStates.id });
+    if (rows[0]) return rows[0];
     return (
       await tx
         .insert(slotStates)
@@ -132,6 +130,7 @@ export async function touchSlotAskedAt(
           orgId: context.orgId,
           workspaceId: context.workspaceId,
           captureSessionId: context.captureSessionId,
+          candidateProcessId,
           slotPath,
           status: "empty",
           confidence: "0",
@@ -152,6 +151,39 @@ export async function updateSlotState(
   assertDirectorSlotPath(update.slotPath);
   const value = normalizeDirectorSlotValue(update.slotPath, update.value);
   return withDirectorToolTx(context, options, async (tx) => {
+    await lockSlotState(
+      tx,
+      context.captureSessionId,
+      update.slotPath,
+      update.candidateProcessId,
+    );
+    const existing = (
+      await tx
+        .select({ id: slotStates.id })
+        .from(slotStates)
+        .where(slotIdentityWhere(context, update.slotPath, update.candidateProcessId))
+        .limit(1)
+        .for("update")
+    )[0];
+    const values = {
+      value,
+      status: update.status,
+      confidence: String(update.confidence),
+      evidenceIds: update.evidenceIds ?? [],
+      lastAskedAt: update.lastAskedAt,
+      priority: slotPriority(update.slotPath),
+      candidates: update.candidates,
+      updatedAt: new Date(),
+    };
+    if (existing) {
+      return (
+        await tx
+          .update(slotStates)
+          .set(values)
+          .where(eq(slotStates.id, existing.id))
+          .returning()
+      )[0];
+    }
     return (
       await tx
         .insert(slotStates)
@@ -159,31 +191,45 @@ export async function updateSlotState(
           orgId: context.orgId,
           workspaceId: context.workspaceId,
           captureSessionId: context.captureSessionId,
+          candidateProcessId: update.candidateProcessId,
           slotPath: update.slotPath,
-          value,
-          status: update.status,
-          confidence: String(update.confidence),
-          evidenceIds: update.evidenceIds ?? [],
-          lastAskedAt: update.lastAskedAt,
-          priority: slotPriority(update.slotPath),
-          candidates: update.candidates,
-        })
-        .onConflictDoUpdate({
-          target: [slotStates.captureSessionId, slotStates.slotPath],
-          set: {
-            value,
-            status: update.status,
-            confidence: String(update.confidence),
-            evidenceIds: update.evidenceIds ?? [],
-            lastAskedAt: update.lastAskedAt,
-            priority: slotPriority(update.slotPath),
-            candidates: update.candidates,
-            updatedAt: new Date(),
-          },
+          ...values,
         })
         .returning()
     )[0];
   });
+}
+
+function slotIdentityWhere(
+  context: DirectorToolContext,
+  slotPath: string,
+  candidateProcessId?: string,
+) {
+  return and(
+    eq(slotStates.orgId, context.orgId),
+    eq(slotStates.workspaceId, context.workspaceId),
+    eq(slotStates.captureSessionId, context.captureSessionId),
+    eq(slotStates.slotPath, slotPath),
+    candidateProcessId
+      ? eq(slotStates.candidateProcessId, candidateProcessId)
+      : isNull(slotStates.candidateProcessId),
+  );
+}
+
+async function lockSlotState(
+  tx: DirectorToolTx,
+  captureSessionId: string,
+  slotPath: string,
+  candidateProcessId?: string,
+) {
+  await tx.execute(sql`
+    SELECT pg_advisory_xact_lock(
+      hashtextextended(
+        ${`${captureSessionId}:slot:${candidateProcessId ?? "global"}:${slotPath}`},
+        17
+      )
+    )
+  `);
 }
 
 export async function recordProcess(

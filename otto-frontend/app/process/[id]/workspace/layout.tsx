@@ -2,7 +2,7 @@ import { notFound } from "next/navigation";
 import { BreadcrumbHeader } from "@/components/layout/BreadcrumbHeader";
 import { WorkspaceTopNav } from "@/components/workspace/WorkspaceTopNav";
 import { requirePageAuth } from "@/lib/auth/session";
-import { getCurrentWorkspace } from "@/lib/workspaces/current";
+import { getWorkspaceForProcess } from "@/lib/workspaces/current";
 import { getDirectorProcessDetail } from "@/lib/processes/queries";
 
 export default async function WorkspaceLayout({
@@ -14,17 +14,18 @@ export default async function WorkspaceLayout({
 }) {
   const { id } = await params;
   const auth = await requirePageAuth();
-  const workspace = await getCurrentWorkspace(auth);
+  const workspace = await getWorkspaceForProcess(auth, id);
   if (!workspace) notFound();
   const process = await getDirectorProcessDetail(auth.orgId, workspace.id, id);
   if (!process) notFound();
+  const overviewHref = `/overview?workspace_id=${encodeURIComponent(workspace.id)}`;
 
   return (
     <div className="flex min-h-screen flex-col">
       <BreadcrumbHeader
-        back={{ href: "/overview", label: "Overview" }}
+        back={{ href: overviewHref, label: "Overview" }}
         crumbs={[
-          { label: process.function, href: "/overview" },
+          { label: process.function, href: overviewHref },
           { label: process.name },
         ]}
       />

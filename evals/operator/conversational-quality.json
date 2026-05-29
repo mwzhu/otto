@@ -1,0 +1,41 @@
+{
+  "description": "Operator one-call planned_agent_utterance smoke evals for OPERATOR_CAPTURE_PLAN.md conversational-quality gate.",
+  "cases": [
+    {
+      "id": "normal-next-step",
+      "utterance": "I open the promo request, check the customer and effective date, then save the draft.",
+      "expected": {
+        "chosen_intent": "capture_next_step",
+        "required_phrase_fragments": ["what happens"],
+        "forbidden_phrase_fragments": ["slot", "schema", "please describe"]
+      }
+    },
+    {
+      "id": "decision-rule",
+      "utterance": "When the margin warning shows up, we decide whether finance needs to approve it.",
+      "expected": {
+        "chosen_intent": "capture_decision_rule",
+        "required_phrase_fragments": ["what decides"],
+        "forbidden_phrase_fragments": ["all applicable", "survey"]
+      }
+    },
+    {
+      "id": "exception-workaround",
+      "utterance": "If the upload fails, I manually copy the rows into Excel and re-upload the file.",
+      "expected": {
+        "chosen_intent": "capture_exception_or_workaround",
+        "required_phrase_fragments": ["unstuck"],
+        "forbidden_phrase_fragments": ["internal", "tool"]
+      }
+    },
+    {
+      "id": "needs-concrete-step",
+      "utterance": "It depends. Sometimes we just handle it.",
+      "expected": {
+        "chosen_intent": "clarify_operator_step",
+        "required_phrase_fragments": ["concrete step"],
+        "forbidden_phrase_fragments": ["ranked intent", "slot"]
+      }
+    }
+  ]
+}

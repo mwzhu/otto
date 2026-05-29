@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from typing import Mapping
 
-DEFAULT_DIRECTOR_BRAIN_MODEL = "claude-haiku-4-5"
+DEFAULT_DIRECTOR_BRAIN_MODEL = "claude-sonnet-4-6"
 DEFAULT_DIRECTOR_VOICE_MODEL = "claude-sonnet-4-6"
 DEFAULT_SYNTHESIS_PLANNER_MODEL = "claude-opus-4-7"
 

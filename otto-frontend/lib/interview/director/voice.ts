@@ -2,6 +2,7 @@ import "server-only";
 
 import { generate, type Generation } from "@/lib/adapters/llm";
 import { getServerEnv } from "@/lib/env";
+import { limitToSingleQuestion } from "@/lib/interview/_core/utterance";
 import { fallbackProbeForSlot, type ProbeIntent } from "@/lib/interview/director/probe-library";
 import type { DirectorInterviewPhase, DirectorTurnPlan } from "@/lib/schemas/phase1";
 
@@ -14,11 +15,16 @@ export type PhrasedDirectorTurn = {
   metadata: Omit<Generation, "text">;
 };
 
+type PhraseableDirectorPlan = Omit<DirectorTurnPlan, "planned_agent_utterance"> & {
+  planned_agent_utterance?: string;
+};
+
 export async function phraseDirectorTurn(input: {
   plan: DirectorTurnPlan;
   recentTurns: string[];
   coverageSummary: string;
   focusProcessName?: string;
+  forceSeparateVoiceLlm?: boolean;
 }) {
   const phrased = await phraseDirectorTurnDetailed(input);
   return phrased.utterance;
@@ -29,14 +35,38 @@ export async function phraseDirectorTurnDetailed(input: {
   recentTurns: string[];
   coverageSummary: string;
   focusProcessName?: string;
+  forceSeparateVoiceLlm?: boolean;
 }): Promise<PhrasedDirectorTurn> {
   const started = Date.now();
   const fallback = limitToSingleQuestion(deterministicPhrase(input.plan, input.focusProcessName));
   const env = getServerEnv();
+  const useSeparateVoiceLlm =
+    input.forceSeparateVoiceLlm ||
+    process.env.OTTO_DIRECTOR_USE_SEPARATE_VOICE_LLM === "true";
+  if (
+    input.plan.planned_agent_utterance &&
+    !useSeparateVoiceLlm
+  ) {
+    const utterance = limitToSingleQuestion(input.plan.planned_agent_utterance);
+    return {
+      utterance,
+      metadata: brainPlannedVoiceMetadata(started, input, utterance, env),
+    };
+  }
+  if (!useSeparateVoiceLlm) {
+    return {
+      utterance: fallback,
+      metadata: deterministicVoiceMetadata(started, input, fallback, {
+        reason: "missing_planned_agent_utterance",
+      }),
+    };
+  }
   if (!env.ANTHROPIC_API_KEY) {
     return {
       utterance: fallback,
-      metadata: deterministicVoiceMetadata(started, input, fallback),
+      metadata: deterministicVoiceMetadata(started, input, fallback, {
+        reason: "missing_anthropic_api_key",
+      }),
     };
   }
 
@@ -67,14 +97,53 @@ export async function phraseDirectorTurnDetailed(input: {
     const utterance = limitToSingleQuestion(result.text.trim() || fallback);
     return {
       utterance,
-      metadata: generationMetadata(result),
+      metadata: {
+        ...generationMetadata(result),
+        utterance_source: "separate_voice_llm",
+      } as Omit<Generation, "text">,
     };
   } catch {
     return {
       utterance: fallback,
-      metadata: deterministicVoiceMetadata(started, input, fallback),
+      metadata: deterministicVoiceMetadata(started, input, fallback, {
+        reason: "voice_phrase_failed",
+      }),
     };
   }
+}
+
+function brainPlannedVoiceMetadata(
+  started: number,
+  input: {
+    plan: DirectorTurnPlan;
+    recentTurns: string[];
+    coverageSummary: string;
+    focusProcessName?: string;
+  },
+  output: string,
+  env: ReturnType<typeof getServerEnv>,
+): Omit<Generation, "text"> {
+  const inputText = JSON.stringify({
+    chosenIntent: input.plan.chosen_intent,
+    plannedAgentUtterance: input.plan.planned_agent_utterance,
+    focusProcessName: input.focusProcessName,
+  });
+  return {
+    model: env.DIRECTOR_BRAIN_MODEL ?? env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6",
+    prompt_template_id: "director.voice.phrase-intent",
+    prompt_template_version: "1",
+    token_count_input: estimateTokens(inputText),
+    token_count_output: estimateTokens(output),
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+    cost_cents: 0,
+    latency_ms: Math.max(1, Date.now() - started),
+    cache_hit: false,
+    mocked: false,
+    source: "brain_planned_utterance",
+    utterance_source: "brain_planned_utterance",
+    llm_call_elided: true,
+  } as Omit<Generation, "text">;
 }
 
 function deterministicVoiceMetadata(
@@ -86,6 +155,7 @@ function deterministicVoiceMetadata(
     focusProcessName?: string;
   },
   output: string,
+  options: { reason?: string } = {},
 ): Omit<Generation, "text"> {
   const inputText = JSON.stringify({
     plan: input.plan,
@@ -105,7 +175,10 @@ function deterministicVoiceMetadata(
     latency_ms: Math.max(1, Date.now() - started),
     cache_hit: false,
     mocked: true,
-  };
+    utterance_source: "deterministic_phrase_fallback",
+    reason: options.reason,
+    llm_call_elided: true,
+  } as Omit<Generation, "text">;
 }
 
 function estimateTokens(input: string) {
@@ -128,18 +201,12 @@ function generationMetadata(result: Generation): Omit<Generation, "text"> {
   };
 }
 
-export function limitToSingleQuestion(utterance: string) {
-  const normalized = utterance.replace(/\s+/g, " ").trim();
-  const firstQuestion = normalized.indexOf("?");
-  if (firstQuestion === -1) return normalized;
-  const firstQuestionOnly = normalized.slice(0, firstQuestion + 1);
-  return firstQuestionOnly.replace(
-    /(?:,\s+|\s+)and\s+(?:what|who|which|where|how|when|why|is|are|does|do|can|could|would|should)\b[^?]*\?$/i,
-    "?",
-  );
-}
+export { limitToSingleQuestion } from "@/lib/interview/_core/utterance";
 
-function deterministicPhrase(plan: DirectorTurnPlan, focusProcessName?: string) {
+export function deterministicPhrase(
+  plan: PhraseableDirectorPlan,
+  focusProcessName?: string,
+) {
   const target = plan.chosen_intent.target_process ?? focusProcessName;
   if (
     plan.chosen_intent.intent === "open_questions_closeout" ||
@@ -182,7 +249,7 @@ function deterministicPhrase(plan: DirectorTurnPlan, focusProcessName?: string) 
   }
 }
 
-function lastAttemptPhrase(plan: DirectorTurnPlan, phrase: string) {
+function lastAttemptPhrase(plan: PhraseableDirectorPlan, phrase: string) {
   if (!plan.chosen_intent.style_hint?.includes("last_attempt")) return phrase;
   return `Last try on this one before I mark it as unknown: ${lowercaseFirst(phrase)}`;
 }
@@ -191,7 +258,7 @@ function lowercaseFirst(value: string) {
   return value ? value[0].toLowerCase() + value.slice(1) : value;
 }
 
-function clarificationPhrase(plan: DirectorTurnPlan, target?: string) {
+function clarificationPhrase(plan: PhraseableDirectorPlan, target?: string) {
   if (plan.chosen_intent.target_slot === "systems.systems_of_record") {
     return target
       ? `By systems of record, I mean the tools people trust as the source of truth, like Salesforce, NetSuite, or Sheets. Which systems does ${target} rely on?`
@@ -200,7 +267,7 @@ function clarificationPhrase(plan: DirectorTurnPlan, target?: string) {
   return "I mean the recurring work your team is responsible for: who is involved, the systems it runs through, and the outcome it produces. What part of that should we start with?";
 }
 
-function partialFollowUp(plan: DirectorTurnPlan, target?: string) {
+function partialFollowUp(plan: PhraseableDirectorPlan, target?: string) {
   if (plan.chosen_intent.intent === "discover_processes") {
     return "Got it. Could you give me the rough list of recurring processes your team owns? Names are enough for now.";
   }
@@ -210,7 +277,7 @@ function partialFollowUp(plan: DirectorTurnPlan, target?: string) {
   return "Got it. Can you make that concrete with one recurring process your team owns?";
 }
 
-function intentPhrase(plan: DirectorTurnPlan, target?: string) {
+function intentPhrase(plan: PhraseableDirectorPlan, target?: string) {
   switch (plan.chosen_intent.intent) {
     case "discover_function":
     case "orient_interview":

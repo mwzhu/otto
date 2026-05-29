@@ -36,6 +36,7 @@ class SmokeDirectorConfig:
     capture_session_id: str | None
     language: str
     planner_runtime: str
+    voice_runtime: str
     anthropic_api_key: str | None
     brain_model: str
     voice_model: str
@@ -48,7 +49,11 @@ class SmokeDirectorConfig:
             service_token=required_env("LIVEKIT_AGENT_SERVICE_TOKEN"),
             capture_session_id=env_value("OTTO_CAPTURE_SESSION_ID"),
             language=os.getenv("OTTO_DIRECTOR_LANGUAGE", "en"),
-            planner_runtime=os.getenv("OTTO_DIRECTOR_PLANNER_RUNTIME", "python").strip().lower(),
+            planner_runtime=os.getenv("OTTO_DIRECTOR_PLANNER_RUNTIME", "next").strip().lower(),
+            voice_runtime=os.getenv(
+                "OTTO_DIRECTOR_VOICE_RUNTIME",
+                "planned_cascade",
+            ).strip().lower(),
             anthropic_api_key=env_value("ANTHROPIC_API_KEY"),
             brain_model=director_brain_model(),
             voice_model=director_voice_model(),
@@ -128,6 +133,119 @@ async def run_turn_smoke(
             ),
         )
         ingested_at = time.perf_counter()
+        if getattr(config, "voice_runtime", "planned_cascade") == "steered_cascade":
+            local_turn_correlation_id = stable_key(
+                "smoke-local-turn",
+                capture_session_id,
+                ingest.turn_index,
+            )
+            extraction_window_id = stable_key(
+                "smoke-extraction-window",
+                capture_session_id,
+                ingest.turn_index,
+            )
+            responded = await planner.respond_turn(
+                capture_session_id=capture_session_id,
+                turn=ingest,
+                idempotency_key=stable_key(
+                    "smoke-respond",
+                    capture_session_id,
+                    ingest.turn_index,
+                ),
+                local_turn_correlation_id=local_turn_correlation_id,
+                extraction_window_id=extraction_window_id,
+            )
+            responded_at = time.perf_counter()
+            delivery_marker = responded_at
+            if complete_delivery:
+                await api.update_delivery(
+                    capture_session_id=capture_session_id,
+                    turn_index=ingest.turn_index,
+                    decision_log_id=responded.decision_log_id,
+                    delivery_status="completed",
+                    delivered_utterance=responded.planned_agent_utterance,
+                    spoken_fraction=1,
+                    latency_ms={
+                        "ttfa_ms": elapsed_ms(started, responded_at),
+                        "speech_latency_ms": 0,
+                        "turn_total_ms": elapsed_ms(started, delivery_marker),
+                    },
+                    idempotency_key=stable_key(
+                        "smoke-delivery",
+                        capture_session_id,
+                        "director.turn",
+                        ingest.turn_index,
+                    ),
+                )
+            delivered_at = time.perf_counter()
+            checked = await api.check_turn(
+                capture_session_id=capture_session_id,
+                turn=ingest,
+                spoken_agent_utterance=responded.planned_agent_utterance,
+                steering_context=responded.steering_context,
+                local_turn_correlation_id=local_turn_correlation_id,
+                extraction_window_id=extraction_window_id,
+                idempotency_key=stable_key(
+                    "smoke-check",
+                    capture_session_id,
+                    ingest.turn_index,
+                ),
+            )
+            checked_at = time.perf_counter()
+            extracted = await api.extract_turn(
+                capture_session_id=capture_session_id,
+                turn=ingest,
+                spoken_agent_utterance=responded.planned_agent_utterance,
+                local_turn_correlation_id=local_turn_correlation_id,
+                extraction_window_id=extraction_window_id,
+                idempotency_key=stable_key(
+                    "smoke-extract",
+                    capture_session_id,
+                    extraction_window_id,
+                ),
+            )
+            extracted_at = time.perf_counter()
+            latency_ms = {
+                "ingest_ms": elapsed_ms(started, ingested_at),
+                "respond_ms": elapsed_ms(ingested_at, responded_at),
+                "ttfa_ms": elapsed_ms(started, responded_at),
+                "delivery_ms": elapsed_ms(responded_at, delivered_at),
+                "checker_ms": elapsed_ms(delivered_at, checked_at),
+                "extraction_latency_ms": elapsed_ms(checked_at, extracted_at),
+                "backend_pre_tts_ms": elapsed_ms(started, responded_at),
+                "total_ms": elapsed_ms(started, extracted_at),
+            }
+            return SmokeResult(
+                ok=True,
+                capture_session_id=capture_session_id,
+                turn_index=ingest.turn_index,
+                decision_log_id=responded.decision_log_id,
+                next_prompt=responded.planned_agent_utterance,
+                candidate_process_ids=extracted.get("candidate_process_ids", []),
+                slot_updates=extracted.get("slot_updates", []),
+                degraded_quality=bool(
+                    responded.degraded_quality
+                    or extracted.get("degraded_quality", False)
+                    or checked.get("checker_violation_count", 0)
+                ),
+                latency_ms=latency_ms,
+                planner_metadata={
+                    "brain": smoke_metadata_summary(responded.metadata),
+                    "voice": smoke_metadata_summary(responded.voice_metadata),
+                    "checker": smoke_metadata_summary(checked.get("metadata")),
+                },
+                latency_budget={
+                    "backend_pre_tts_budget_ms": BACKEND_PRE_TTS_BUDGET_MS,
+                    "backend_pre_tts_ok": latency_ms["backend_pre_tts_ms"]
+                    <= BACKEND_PRE_TTS_BUDGET_MS,
+                    "note": (
+                        "Steered cascade smoke measures ingest+respond before TTS "
+                        "and runs checker/extraction after delivery. Full voice acceptance "
+                        "still needs LiveKit ASR/TTS trace timing."
+                    ),
+                },
+                preflight=preflight.to_dict(),
+            )
         planned = await planner.plan_turn(
             capture_session_id=capture_session_id,
             turn=ingest,

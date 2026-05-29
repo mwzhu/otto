@@ -114,6 +114,8 @@ const requiredSlotEvidenceCaptureId =
   "c6c6c6c6-c6c6-5c6c-8c6c-c6c6c6c6c6c6";
 const requiredClaimEvidenceCaptureId =
   "c7c7c7c7-c7c7-5c7c-8c7c-c7c7c7c7c7c7";
+const slotSatisfiedInvalidSubjectCaptureId =
+  "c8d8c8d8-c8d8-58d8-88d8-c8d8c8d8c8d8";
 
 let connectionString = "";
 let appClient: Client;
@@ -148,6 +150,7 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
     applyMigration("0001_phase1_director_intake.sql");
     applyMigration("0002_workspace_data_tier_real.sql");
     applyMigration("0003_director_voice_m1.sql");
+    applyMigration("0004_director_process_slots_and_degraded_reasons.sql");
     execFileSync(
       "docker",
       [
@@ -758,7 +761,7 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
     ]);
   });
 
-  test("director dispatch rolls back chosen-intent hard enrichment failures", async () => {
+  test("director dispatch preserves the turn when chosen-intent enrichment degrades", async () => {
     await seedWeek2Graph(appClient);
     await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
       orgId,
@@ -777,45 +780,46 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
       reason: "The metric answer is the selected intent for this turn.",
     };
 
-    await expect(
-      dispatchDirectorTurnPlan({
-        orgId,
-        workspaceId,
-        captureSessionId: hardRequiredToolCaptureId,
-        userId,
-        latestUtterance: "Quote approvals are measured by approval cycle time.",
-        transcriptSegmentIds: [],
-        evidenceIds: [evidenceId],
-        turnIndex: 44,
-        plannedAgentUtterance: "What target cycle time do you manage toward?",
-        plan: {
-          utterance_type: "substantive_answer",
-          slot_updates: [],
-          claims: [],
-          tool_calls: [
-            {
-              name: "recordProcess",
-              arguments: { name: "Quote Approvals", confidence: 0.9 },
+    const result = await dispatchDirectorTurnPlan({
+      orgId,
+      workspaceId,
+      captureSessionId: hardRequiredToolCaptureId,
+      userId,
+      latestUtterance: "Quote approvals are measured by approval cycle time.",
+      transcriptSegmentIds: [],
+      evidenceIds: [evidenceId],
+      turnIndex: 44,
+      plannedAgentUtterance: "What target cycle time do you manage toward?",
+      plan: {
+        utterance_type: "substantive_answer",
+        slot_updates: [],
+        claims: [],
+        tool_calls: [
+          {
+            name: "recordProcess",
+            arguments: { name: "Quote Approvals", confidence: 0.9 },
+          },
+          {
+            name: "recordCandidateProcessClaim",
+            arguments: {
+              targetProcess: "Quote Approvals",
+              field: "metric_not_in_allowlist",
+              value: { name: "approval cycle time" },
+              confidence: 0.8,
             },
-            {
-              name: "recordCandidateProcessClaim",
-              arguments: {
-                targetProcess: "Quote Approvals",
-                field: "metric_not_in_allowlist",
-                value: { name: "approval cycle time" },
-                confidence: 0.8,
-              },
-            },
-          ],
-          contradiction_signals: [],
-          current_phase: "expand",
-          proposed_next_phase: "enrich",
-          phase_transition_ready: true,
-          ranked_intents: [chosenIntent],
-          chosen_intent: chosenIntent,
-        },
-      }),
-    ).rejects.toThrow(/Required director tool failed for capture_metrics/);
+          },
+        ],
+        contradiction_signals: [],
+        current_phase: "expand",
+        proposed_next_phase: "enrich",
+        phase_transition_ready: true,
+        ranked_intents: [chosenIntent],
+        chosen_intent: chosenIntent,
+        planned_agent_utterance: "What target cycle time do you manage toward?",
+      },
+    });
+
+    expect(result.degraded_quality).toBe(true);
 
     const rows = await appClient.query(
       `
@@ -834,9 +838,9 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
     );
 
     expect(rows.rows[0]).toEqual({
-      candidates: 0,
-      decisions: 0,
-      follow_ups: 0,
+      candidates: 1,
+      decisions: 1,
+      follow_ups: 2,
     });
   });
 
@@ -939,7 +943,7 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
     });
   }, 30_000);
 
-  test("director dispatch rolls back malformed generic claims required by chosen intent", async () => {
+  test("director dispatch preserves slot data when chosen-intent claims are malformed", async () => {
     await seedWeek2Graph(appClient);
     await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
       orgId,
@@ -958,49 +962,50 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
       reason: "The metric claim is the selected intent for this turn.",
     };
 
-    await expect(
-      dispatchDirectorTurnPlan({
-        orgId,
-        workspaceId,
-        captureSessionId: hardRequiredClaimCaptureId,
-        userId,
-        latestUtterance: "Quote approvals are measured by approval cycle time.",
-        transcriptSegmentIds: [],
-        evidenceIds: [evidenceId],
-        turnIndex: 45,
-        plannedAgentUtterance: "What target cycle time do you manage toward?",
-        plan: {
-          utterance_type: "substantive_answer",
-          slot_updates: [
-            {
-              slot_path: "metrics.kpis",
-              status: "filled",
-              confidence: 0.8,
-              evidence_ids: [evidenceId],
-              priority: 70,
-              value: { metrics: ["approval cycle time"] },
-            },
-          ],
-          claims: [
-            {
-              subject_type: "candidate_process",
-              subject_id: candidateProcessId,
-              field: "metric_not_in_allowlist",
-              value: { name: "approval cycle time" },
-              confidence: 0.8,
-              evidence_ids: [evidenceId],
-            },
-          ],
-          tool_calls: [],
-          contradiction_signals: [],
-          current_phase: "expand",
-          proposed_next_phase: "enrich",
-          phase_transition_ready: true,
-          ranked_intents: [chosenIntent],
-          chosen_intent: chosenIntent,
-        },
-      }),
-    ).rejects.toThrow(/Required director claim failed validation for capture_metrics/);
+    const result = await dispatchDirectorTurnPlan({
+      orgId,
+      workspaceId,
+      captureSessionId: hardRequiredClaimCaptureId,
+      userId,
+      latestUtterance: "Quote approvals are measured by approval cycle time.",
+      transcriptSegmentIds: [],
+      evidenceIds: [evidenceId],
+      turnIndex: 45,
+      plannedAgentUtterance: "What target cycle time do you manage toward?",
+      plan: {
+        utterance_type: "substantive_answer",
+        slot_updates: [
+          {
+            slot_path: "metrics.kpis",
+            status: "filled",
+            confidence: 0.8,
+            evidence_ids: [evidenceId],
+            priority: 70,
+            value: { metrics: ["approval cycle time"] },
+          },
+        ],
+        claims: [
+          {
+            subject_type: "candidate_process",
+            subject_id: candidateProcessId,
+            field: "metric_not_in_allowlist",
+            value: { name: "approval cycle time" },
+            confidence: 0.8,
+            evidence_ids: [evidenceId],
+          },
+        ],
+        tool_calls: [],
+        contradiction_signals: [],
+        current_phase: "expand",
+        proposed_next_phase: "enrich",
+        phase_transition_ready: true,
+        ranked_intents: [chosenIntent],
+        chosen_intent: chosenIntent,
+        planned_agent_utterance: "What target cycle time do you manage toward?",
+      },
+    });
+
+    expect(result.degraded_quality).toBe(true);
 
     const rows = await appClient.query(
       `
@@ -1019,13 +1024,13 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
     );
 
     expect(rows.rows[0]).toEqual({
-      slots: 0,
-      decisions: 0,
-      follow_ups: 0,
+      slots: 1,
+      decisions: 1,
+      follow_ups: 2,
     });
   });
 
-  test("director dispatch rolls back selected slot updates with stale evidence", async () => {
+  test("director dispatch drops stale-evidence slot updates without blocking the turn", async () => {
     await seedWeek2Graph(appClient);
     await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
       orgId,
@@ -1044,40 +1049,41 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
       reason: "The metric slot is the selected intent for this turn.",
     };
 
-    await expect(
-      dispatchDirectorTurnPlan({
-        orgId,
-        workspaceId,
-        captureSessionId: requiredSlotEvidenceCaptureId,
-        userId,
-        latestUtterance: "Quote approvals are measured by approval cycle time.",
-        transcriptSegmentIds: [],
-        evidenceIds: [evidenceId],
-        turnIndex: 48,
-        plannedAgentUtterance: "What target cycle time do you manage toward?",
-        plan: {
-          utterance_type: "substantive_answer",
-          slot_updates: [
-            {
-              slot_path: "metrics.kpis",
-              status: "filled",
-              confidence: 0.8,
-              evidence_ids: [week4EvidenceAId],
-              priority: 70,
-              value: { metrics: ["approval cycle time"] },
-            },
-          ],
-          claims: [],
-          tool_calls: [],
-          contradiction_signals: [],
-          current_phase: "expand",
-          proposed_next_phase: "enrich",
-          phase_transition_ready: true,
-          ranked_intents: [chosenIntent],
-          chosen_intent: chosenIntent,
-        },
-      }),
-    ).rejects.toThrow(/Required director assertion cited invalid evidence for capture_metrics/);
+    const result = await dispatchDirectorTurnPlan({
+      orgId,
+      workspaceId,
+      captureSessionId: requiredSlotEvidenceCaptureId,
+      userId,
+      latestUtterance: "Quote approvals are measured by approval cycle time.",
+      transcriptSegmentIds: [],
+      evidenceIds: [evidenceId],
+      turnIndex: 48,
+      plannedAgentUtterance: "What target cycle time do you manage toward?",
+      plan: {
+        utterance_type: "substantive_answer",
+        slot_updates: [
+          {
+            slot_path: "metrics.kpis",
+            status: "filled",
+            confidence: 0.8,
+            evidence_ids: [week4EvidenceAId],
+            priority: 70,
+            value: { metrics: ["approval cycle time"] },
+          },
+        ],
+        claims: [],
+        tool_calls: [],
+        contradiction_signals: [],
+        current_phase: "expand",
+        proposed_next_phase: "enrich",
+        phase_transition_ready: true,
+        ranked_intents: [chosenIntent],
+        chosen_intent: chosenIntent,
+        planned_agent_utterance: "What target cycle time do you manage toward?",
+      },
+    });
+
+    expect(result.degraded_quality).toBe(true);
 
     const rows = await appClient.query(
       `
@@ -1097,12 +1103,12 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
 
     expect(rows.rows[0]).toEqual({
       slots: 0,
-      decisions: 0,
-      follow_ups: 0,
+      decisions: 1,
+      follow_ups: 2,
     });
   });
 
-  test("director dispatch rolls back required claims with missing evidence", async () => {
+  test("director dispatch drops claims with missing evidence without blocking the turn", async () => {
     await seedWeek2Graph(appClient);
     await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
       orgId,
@@ -1121,40 +1127,41 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
       reason: "The metric claim is the selected intent for this turn.",
     };
 
-    await expect(
-      dispatchDirectorTurnPlan({
-        orgId,
-        workspaceId,
-        captureSessionId: requiredClaimEvidenceCaptureId,
-        userId,
-        latestUtterance: "Quote approvals are measured by approval cycle time.",
-        transcriptSegmentIds: [],
-        evidenceIds: [evidenceId],
-        turnIndex: 49,
-        plannedAgentUtterance: "What target cycle time do you manage toward?",
-        plan: {
-          utterance_type: "substantive_answer",
-          slot_updates: [],
-          claims: [
-            {
-              subject_type: "candidate_process",
-              subject_id: candidateProcessId,
-              field: "kpi",
-              value: { name: "approval cycle time" },
-              confidence: 0.8,
-              evidence_ids: [],
-            },
-          ],
-          tool_calls: [],
-          contradiction_signals: [],
-          current_phase: "expand",
-          proposed_next_phase: "enrich",
-          phase_transition_ready: true,
-          ranked_intents: [chosenIntent],
-          chosen_intent: chosenIntent,
-        },
-      }),
-    ).rejects.toThrow(/Required director assertion cited invalid evidence for capture_metrics/);
+    const result = await dispatchDirectorTurnPlan({
+      orgId,
+      workspaceId,
+      captureSessionId: requiredClaimEvidenceCaptureId,
+      userId,
+      latestUtterance: "Quote approvals are measured by approval cycle time.",
+      transcriptSegmentIds: [],
+      evidenceIds: [evidenceId],
+      turnIndex: 49,
+      plannedAgentUtterance: "What target cycle time do you manage toward?",
+      plan: {
+        utterance_type: "substantive_answer",
+        slot_updates: [],
+        claims: [
+          {
+            subject_type: "candidate_process",
+            subject_id: candidateProcessId,
+            field: "kpi",
+            value: { name: "approval cycle time" },
+            confidence: 0.8,
+            evidence_ids: [],
+          },
+        ],
+        tool_calls: [],
+        contradiction_signals: [],
+        current_phase: "expand",
+        proposed_next_phase: "enrich",
+        phase_transition_ready: true,
+        ranked_intents: [chosenIntent],
+        chosen_intent: chosenIntent,
+        planned_agent_utterance: "What target cycle time do you manage toward?",
+      },
+    });
+
+    expect(result.degraded_quality).toBe(true);
 
     const rows = await appClient.query(
       `
@@ -1176,8 +1183,8 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
 
     expect(rows.rows[0]).toEqual({
       claims: 0,
-      decisions: 0,
-      follow_ups: 0,
+      decisions: 1,
+      follow_ups: 2,
     });
   });
 
@@ -1258,6 +1265,7 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
         phase_transition_ready: false,
         ranked_intents: [chosenIntent],
         chosen_intent: chosenIntent,
+        planned_agent_utterance: "What margin outcome matters most for that approval flow?",
       },
     });
 
@@ -1311,6 +1319,106 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
     });
   });
 
+  test("director dispatch preserves chosen slot data when required claim subject degrades", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [slotSatisfiedInvalidSubjectCaptureId, orgId, workspaceId],
+    );
+
+    const { dispatchDirectorTurnPlan } = await import("@/lib/interview/director/brain");
+    const chosenIntent = {
+      intent: "capture_outcome",
+      target_slot: "outcomes.business_outcomes",
+      target_process: "Payroll",
+      score: 100,
+      reason: "The outcome answer is the selected intent for this turn.",
+    };
+
+    const result = await dispatchDirectorTurnPlan({
+      orgId,
+      workspaceId,
+      captureSessionId: slotSatisfiedInvalidSubjectCaptureId,
+      userId,
+      latestUtterance:
+        "For payroll, success is making sure everyone gets paid with no errors.",
+      transcriptSegmentIds: [],
+      evidenceIds: [evidenceId],
+      turnIndex: 50,
+      plannedAgentUtterance: "What metric tells you payroll is healthy?",
+      plan: {
+        utterance_type: "substantive_answer",
+        slot_updates: [
+          {
+            slot_path: "outcomes.business_outcomes",
+            status: "filled",
+            confidence: 0.84,
+            evidence_ids: [evidenceId],
+            priority: 65,
+            value: {
+              outcomes: ["everyone gets paid with no errors"],
+            },
+          },
+        ],
+        claims: [
+          {
+            subject_type: "process",
+            subject_id: evidenceId,
+            field: "business_outcome",
+            value: { name: "everyone gets paid with no errors" },
+            confidence: 0.84,
+            evidence_ids: [evidenceId],
+          },
+        ],
+        tool_calls: [],
+        contradiction_signals: [],
+        current_phase: "expand",
+        proposed_next_phase: "enrich",
+        phase_transition_ready: false,
+        ranked_intents: [chosenIntent],
+        chosen_intent: chosenIntent,
+        planned_agent_utterance: "What metric tells you payroll is healthy?",
+      },
+    });
+
+    expect(result.degraded_quality).toBe(true);
+    const rows = await appClient.query(
+      `
+        SELECT
+          (SELECT count(*)::int
+             FROM slot_states
+            WHERE capture_session_id = $1
+              AND slot_path = 'outcomes.business_outcomes'
+              AND status = 'filled') AS slots,
+          (SELECT count(*)::int
+             FROM claims
+            WHERE subject_type = 'process'
+              AND subject_id = $2
+              AND field = 'business_outcome') AS invalid_claims,
+          (SELECT count(*)::int
+             FROM follow_up_tasks
+            WHERE capture_session_id = $1
+              AND title = 'Review invalid director claim subject: process.business_outcome') AS invalid_subject_follow_ups,
+          (SELECT count(*)::int
+             FROM agent_decision_log
+            WHERE capture_session_id = $1
+              AND turn_index = 50
+              AND degraded_quality = true) AS degraded_decisions
+      `,
+      [slotSatisfiedInvalidSubjectCaptureId, evidenceId],
+    );
+
+    expect(rows.rows[0]).toEqual({
+      slots: 1,
+      invalid_claims: 0,
+      invalid_subject_follow_ups: 1,
+      degraded_decisions: 1,
+    });
+  });
+
   test("director dispatch rejects model-invented slot paths before commit", async () => {
     await seedWeek2Graph(appClient);
     await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
@@ -1360,6 +1468,7 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
           phase_transition_ready: true,
           ranked_intents: [chosenIntent],
           chosen_intent: chosenIntent,
+          planned_agent_utterance: "What part of the business do you oversee?",
         },
       }),
     ).rejects.toThrow("Unknown director slot path: outcomes.business");
@@ -1452,6 +1561,8 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
         phase_transition_ready: false,
         ranked_intents: [chosenIntent],
         chosen_intent: chosenIntent,
+        planned_agent_utterance:
+          "Email jane@example.com or call 415-555-1212 before we map processes.",
       },
     });
 
@@ -4437,6 +4548,7 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
         )
         VALUES ($1, $2, $3, 'function.name', 'filled', 0.92, 100)
         ON CONFLICT (capture_session_id, slot_path)
+          WHERE candidate_process_id IS NULL
         DO UPDATE SET status = 'filled', confidence = 0.92, priority = 100
       `,
       [orgId, workspaceId, priorityCoverageCaptureId],
@@ -4786,7 +4898,9 @@ async function seedWeek5CoverageGraph(client: Client) {
         ($1, $2, $3, 'scope.boundaries', $4::jsonb, 'filled', 0.91, ARRAY[$5]::uuid[], now(), 100),
         ($1, $2, $3, 'frequency.volume', $6::jsonb, 'partial', 0.55, ARRAY[$5]::uuid[], now(), 80),
         ($1, $2, $3, 'systems.systems_of_record', $7::jsonb, 'conflicting', 0.42, ARRAY[]::uuid[], now(), 85)
-      ON CONFLICT (capture_session_id, slot_path) DO UPDATE SET
+      ON CONFLICT (capture_session_id, slot_path)
+        WHERE candidate_process_id IS NULL
+      DO UPDATE SET
         value = excluded.value,
         status = excluded.status,
         confidence = excluded.confidence,

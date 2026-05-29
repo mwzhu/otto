@@ -61,6 +61,8 @@ describe("Week 5 hardening contracts", () => {
     expect(drawer).toContain("/api/workspaces/${workspaceId}/evidence");
     expect(drawer).toContain("evidence_id=");
     expect(processPage).toContain("workspaceId={workspace.id}");
+    expect(processPage).toContain("getWorkspaceForProcess(auth, id)");
+    expect(processPage).toContain("overviewHref");
   });
 
   test("configured document parser paths call vendors instead of falling back to generated text", async () => {

@@ -38,7 +38,8 @@ async def entrypoint(ctx: JobContext) -> None:
     async def mark_job_done(_reason: str = "") -> None:
         job_done.set()
 
-    ctx.add_shutdown_callback(mark_job_done)
+    if hasattr(ctx, "add_shutdown_callback"):
+        ctx.add_shutdown_callback(mark_job_done)
     try:
         config = DirectorAgentConfig.from_env()
         api = OttoApiClient(config.otto_api_base_url, config.service_token)
@@ -66,16 +67,32 @@ async def entrypoint(ctx: JobContext) -> None:
         )
 
         from livekit.plugins import silero
-        from livekit.plugins.turn_detector.multilingual import MultilingualModel
+
+        turn_detection = None
+        if config.use_semantic_turn_detector:
+            from livekit.plugins.turn_detector.multilingual import MultilingualModel
+
+            turn_detection = MultilingualModel()
 
         session = AgentSession(
             stt=stt_provider(config),
             tts=tts_provider(config),
             vad=silero.VAD.load(),
             turn_handling=TurnHandlingOptions(
-                turn_detection=MultilingualModel(),
-                endpointing={"min_delay": 1.2, "max_delay": 6.0},
-                interruption={"enabled": True},
+                turn_detection=turn_detection,
+                endpointing={
+                    "mode": endpointing_mode(config.endpointing_mode),
+                    "min_delay": config.endpointing_min_delay,
+                    "max_delay": config.endpointing_max_delay,
+                    "alpha": config.endpointing_alpha,
+                },
+                interruption={
+                    "enabled": True,
+                    "mode": interruption_mode(config.interruption_mode),
+                    "min_duration": config.interruption_min_duration,
+                    "min_words": 0,
+                    "resume_false_interruption": False,
+                },
             ),
             user_away_timeout=None,
         )
@@ -110,10 +127,10 @@ async def publish_worker_startup_failure(room, capture_session_id: str, error: E
                         "message": (
                             "The voice agent could not start. You can keep going with "
                             "typed answers while the voice worker is restarted. "
-                            f"{error.__class__.__name__}: {error}"
+                            f"{error.__class__.__name__}: {safe_startup_error_message(error)}"
                         ),
                         "error_type": error.__class__.__name__,
-                        "error_message": str(error),
+                        "error_message": safe_startup_error_message(error),
                     },
                 }
             ).encode("utf-8"),
@@ -127,6 +144,13 @@ async def publish_worker_startup_failure(room, capture_session_id: str, error: E
             publish_error,
         )
         return False
+
+
+def safe_startup_error_message(error: Exception) -> str:
+    message = str(error)
+    if re.search(r"\b[A-Z][A-Z0-9_]{2,}\b", message):
+        return "required voice configuration is missing"
+    return message
 
 
 def stt_provider(config: DirectorAgentConfig):
@@ -190,6 +214,14 @@ def cartesia_audio_metadata(config: DirectorAgentConfig) -> dict[str, str | bool
     }
 
 
+def endpointing_mode(value: str) -> str:
+    return value if value in {"fixed", "dynamic"} else "dynamic"
+
+
+def interruption_mode(value: str) -> str:
+    return value if value in {"adaptive", "vad"} else "vad"
+
+
 def capture_session_id_from_room(room_name: str) -> str:
     match = re.fullmatch(r"director-([0-9a-fA-F-]{36})", room_name)
     if not match:
@@ -250,6 +282,7 @@ def control_participant_identity_from_context(context: dict) -> str:
 
 def main() -> None:
     load_env_file_arg(sys.argv)
+    register_turn_detector_runner_if_enabled()
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
@@ -272,6 +305,18 @@ def load_env_file_arg(argv: list[str]) -> None:
         if not configured_env_value(existing, key):
             os.environ[key] = value
     del argv[index : index + 2]
+
+
+def register_turn_detector_runner_if_enabled() -> None:
+    if os.getenv("OTTO_USE_SEMANTIC_TURN_DETECTOR", "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+    }:
+        return
+    # Import before cli.run_app constructs the Worker, so LiveKit can create the
+    # local EOU inference executor with the registered multilingual runner.
+    import livekit.plugins.turn_detector.multilingual  # noqa: F401
 
 
 if __name__ == "__main__":

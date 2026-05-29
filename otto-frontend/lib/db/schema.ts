@@ -1,4 +1,5 @@
 import {
+  type AnyPgColumn,
   boolean,
   customType,
   index,
@@ -133,6 +134,7 @@ export const synthesisRunTypeEnum = pgEnum("synthesis_run_type", [
   "document_inventory",
   "director_inventory",
   "combined_inventory",
+  "process_graph",
 ]);
 export const synthesisStageStatusEnum = pgEnum("synthesis_stage_status", [
   "queued",
@@ -141,6 +143,30 @@ export const synthesisStageStatusEnum = pgEnum("synthesis_stage_status", [
   "skipped",
   "failed",
 ]);
+export const captureModeEnum = pgEnum("capture_mode", [
+  "director_voice",
+  "operator_voice",
+  "operator_screenshare",
+  "screen_recording_upload",
+  "process_document_upload",
+  "mixed",
+]);
+export const processNodeTypeEnum = pgEnum("process_node_type", [
+  "start",
+  "task",
+  "decision",
+  "wait",
+  "handoff",
+  "exception",
+  "end",
+]);
+export const processEdgeTypeEnum = pgEnum("process_edge_type", [
+  "seq",
+  "conditional",
+  "handoff",
+  "parallel",
+]);
+export const processNodeLevelEnum = pgEnum("process_node_level", ["L3", "L4"]);
 
 export const vector = customType<{ data: number[]; driverData: string }>({
   dataType(config) {
@@ -280,6 +306,224 @@ export const processVersions = pgTable(
   }),
 );
 
+export const processNodes = pgTable(
+  "process_nodes",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id").references(() => organizations.id).notNull(),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id).notNull(),
+    processId: uuid("process_id").references(() => processes.id).notNull(),
+    versionId: uuid("version_id").references(() => processVersions.id).notNull(),
+    parentNodeId: uuid("parent_node_id").references(
+      (): AnyPgColumn => processNodes.id,
+    ),
+    ordinal: integer("ordinal").notNull(),
+    level: processNodeLevelEnum("level").default("L4").notNull(),
+    nodeType: processNodeTypeEnum("node_type").notNull(),
+    title: text("title").notNull(),
+    description: text("description"),
+    laneRoleId: uuid("lane_role_id").references(() => roles.id),
+    ownerRoleId: uuid("owner_role_id").references(() => roles.id),
+    ownerPersonId: uuid("owner_person_id").references(() => people.id),
+    slaSeconds: integer("sla_seconds"),
+    frequency: text("frequency"),
+    estMinutesPerRun: numeric("est_minutes_per_run", {
+      precision: 10,
+      scale: 2,
+    }),
+    automationCandidate: boolean("automation_candidate").default(false).notNull(),
+    confidence: numeric("confidence", { precision: 4, scale: 3 })
+      .default("0")
+      .notNull(),
+    positionJson: jsonb("position_json").default(sql`'{}'::jsonb`).notNull(),
+    metadataJson: jsonb("metadata_json").default(sql`'{}'::jsonb`).notNull(),
+    evidenceCount: integer("evidence_count").default(0).notNull(),
+    topEvidenceIds: uuid("top_evidence_ids")
+      .array()
+      .default(sql`'{}'::uuid[]`)
+      .notNull(),
+    ...timestamps,
+  },
+  (table) => ({
+    orgIdx: index("process_nodes_org_id_idx").on(table.orgId),
+    workspaceProcessIdx: index("process_nodes_workspace_process_idx").on(
+      table.workspaceId,
+      table.processId,
+    ),
+    versionOrdinalIdx: index("process_nodes_version_ordinal_idx").on(
+      table.versionId,
+      table.ordinal,
+    ),
+    parentIdx: index("process_nodes_parent_node_id_idx").on(table.parentNodeId),
+  }),
+);
+
+export const processEdges = pgTable(
+  "process_edges",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id").references(() => organizations.id).notNull(),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id).notNull(),
+    processId: uuid("process_id").references(() => processes.id).notNull(),
+    versionId: uuid("version_id").references(() => processVersions.id).notNull(),
+    sourceNodeId: uuid("source_node_id").references(() => processNodes.id).notNull(),
+    targetNodeId: uuid("target_node_id").references(() => processNodes.id).notNull(),
+    edgeType: processEdgeTypeEnum("edge_type").notNull(),
+    label: text("label"),
+    condition: text("condition"),
+    probability: numeric("probability", { precision: 5, scale: 4 }),
+    isExceptionPath: boolean("is_exception_path").default(false).notNull(),
+    metadataJson: jsonb("metadata_json").default(sql`'{}'::jsonb`).notNull(),
+    evidenceCount: integer("evidence_count").default(0).notNull(),
+    topEvidenceIds: uuid("top_evidence_ids")
+      .array()
+      .default(sql`'{}'::uuid[]`)
+      .notNull(),
+    ...timestamps,
+  },
+  (table) => ({
+    versionIdx: index("process_edges_version_id_idx").on(table.versionId),
+    sourceIdx: index("process_edges_source_node_id_idx").on(table.sourceNodeId),
+    targetIdx: index("process_edges_target_node_id_idx").on(table.targetNodeId),
+    orgIdx: index("process_edges_org_id_idx").on(table.orgId),
+    workspaceProcessIdx: index("process_edges_workspace_process_idx").on(
+      table.workspaceId,
+      table.processId,
+    ),
+  }),
+);
+
+export const nodeSystems = pgTable(
+  "node_systems",
+  {
+    orgId: uuid("org_id").references(() => organizations.id).notNull(),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id).notNull(),
+    nodeId: uuid("node_id").references(() => processNodes.id).notNull(),
+    systemId: uuid("system_id").references(() => systems.id).notNull(),
+    usage: text("usage").notNull(),
+    evidenceIds: uuid("evidence_ids")
+      .array()
+      .default(sql`'{}'::uuid[]`)
+      .notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.nodeId, table.systemId, table.usage] }),
+    orgIdx: index("node_systems_org_id_idx").on(table.orgId),
+    workspaceIdx: index("node_systems_workspace_id_idx").on(table.workspaceId),
+    systemIdx: index("node_systems_system_id_idx").on(table.systemId),
+  }),
+);
+
+export const nodeIo = pgTable(
+  "node_io",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id").references(() => organizations.id).notNull(),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id).notNull(),
+    nodeId: uuid("node_id").references(() => processNodes.id).notNull(),
+    kind: text("kind").notNull(),
+    name: text("name").notNull(),
+    description: text("description"),
+    evidenceIds: uuid("evidence_ids")
+      .array()
+      .default(sql`'{}'::uuid[]`)
+      .notNull(),
+    ...timestamps,
+  },
+  (table) => ({
+    orgIdx: index("node_io_org_id_idx").on(table.orgId),
+    workspaceIdx: index("node_io_workspace_id_idx").on(table.workspaceId),
+    nodeIdx: index("node_io_node_id_idx").on(table.nodeId),
+  }),
+);
+
+export const exceptions = pgTable(
+  "exceptions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id").references(() => organizations.id).notNull(),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id).notNull(),
+    processId: uuid("process_id").references(() => processes.id).notNull(),
+    versionId: uuid("version_id").references(() => processVersions.id).notNull(),
+    nodeId: uuid("node_id").references(() => processNodes.id).notNull(),
+    subType: text("sub_type").notNull(),
+    label: text("label").notNull(),
+    trigger: text("trigger"),
+    detection: text("detection"),
+    handlerRoleId: uuid("handler_role_id").references(() => roles.id),
+    frequencyPct: numeric("frequency_pct", { precision: 5, scale: 2 }),
+    timeToResolveSeconds: integer("time_to_resolve_seconds"),
+    impactCents: integer("impact_cents"),
+    evidenceCount: integer("evidence_count").default(0).notNull(),
+    topEvidenceIds: uuid("top_evidence_ids")
+      .array()
+      .default(sql`'{}'::uuid[]`)
+      .notNull(),
+    ...timestamps,
+  },
+  (table) => ({
+    orgIdx: index("exceptions_org_id_idx").on(table.orgId),
+    versionIdx: index("exceptions_version_id_idx").on(table.versionId),
+    nodeIdx: index("exceptions_node_id_idx").on(table.nodeId),
+  }),
+);
+
+export const workarounds = pgTable(
+  "workarounds",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id").references(() => organizations.id).notNull(),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id).notNull(),
+    processId: uuid("process_id").references(() => processes.id).notNull(),
+    versionId: uuid("version_id").references(() => processVersions.id).notNull(),
+    nodeId: uuid("node_id").references(() => processNodes.id).notNull(),
+    description: text("description").notNull(),
+    whyItExists: text("why_it_exists"),
+    evidenceCount: integer("evidence_count").default(0).notNull(),
+    topEvidenceIds: uuid("top_evidence_ids")
+      .array()
+      .default(sql`'{}'::uuid[]`)
+      .notNull(),
+    ...timestamps,
+  },
+  (table) => ({
+    orgIdx: index("workarounds_org_id_idx").on(table.orgId),
+    versionIdx: index("workarounds_version_id_idx").on(table.versionId),
+    nodeIdx: index("workarounds_node_id_idx").on(table.nodeId),
+  }),
+);
+
+export const variants = pgTable(
+  "variants",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id").references(() => organizations.id).notNull(),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id).notNull(),
+    processId: uuid("process_id").references(() => processes.id).notNull(),
+    versionId: uuid("version_id").references(() => processVersions.id).notNull(),
+    nodeId: uuid("node_id").references(() => processNodes.id).notNull(),
+    condition: text("condition").notNull(),
+    altNodeId: uuid("alt_node_id").references(() => processNodes.id),
+    evidenceCount: integer("evidence_count").default(0).notNull(),
+    topEvidenceIds: uuid("top_evidence_ids")
+      .array()
+      .default(sql`'{}'::uuid[]`)
+      .notNull(),
+    ...timestamps,
+  },
+  (table) => ({
+    orgIdx: index("variants_org_id_idx").on(table.orgId),
+    versionIdx: index("variants_version_id_idx").on(table.versionId),
+    nodeIdx: index("variants_node_id_idx").on(table.nodeId),
+  }),
+);
+
 export const captureSessions = pgTable(
   "capture_sessions",
   {
@@ -289,6 +533,7 @@ export const captureSessions = pgTable(
     processId: uuid("process_id").references(() => processes.id),
     participantPersonId: uuid("participant_person_id"),
     captureType: captureTypeEnum("capture_type").notNull(),
+    captureMode: captureModeEnum("capture_mode"),
     frameEgressDir: text("frame_egress_dir"),
     recordingUrl: text("recording_url"),
     metadataJson: jsonb("metadata_json").default(sql`'{}'::jsonb`).notNull(),
@@ -356,6 +601,39 @@ export const transcriptSegments = pgTable(
     orgIdx: index("transcript_segments_org_id_idx").on(table.orgId),
     captureIdx: index("transcript_segments_capture_session_id_idx").on(
       table.captureSessionId,
+    ),
+  }),
+);
+
+export const directorExtractionWindows = pgTable(
+  "director_extraction_windows",
+  {
+    extractionWindowId: text("extraction_window_id").primaryKey(),
+    orgId: uuid("org_id").references(() => organizations.id).notNull(),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id).notNull(),
+    captureSessionId: uuid("capture_session_id")
+      .references(() => captureSessions.id)
+      .notNull(),
+    turnIndex: integer("turn_index"),
+    transcriptSegmentIds: uuid("transcript_segment_ids")
+      .array()
+      .default(sql`'{}'::uuid[]`)
+      .notNull(),
+    openedAt: timestamp("opened_at", { withTimezone: true }).notNull(),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    closedBy: text("closed_by"),
+    status: text("status").default("pending").notNull(),
+    metadataJson: jsonb("metadata_json").default(sql`'{}'::jsonb`).notNull(),
+    ...timestamps,
+  },
+  (table) => ({
+    orgIdx: index("director_extraction_windows_org_id_idx").on(table.orgId),
+    captureIdx: index("director_extraction_windows_capture_session_id_idx").on(
+      table.captureSessionId,
+    ),
+    captureTurnIdx: index("director_extraction_windows_capture_turn_idx").on(
+      table.captureSessionId,
+      table.turnIndex,
     ),
   }),
 );
@@ -584,6 +862,95 @@ export const ontologyTerms = pgTable(
   }),
 );
 
+export const screenEvents = pgTable(
+  "screen_events",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id").references(() => organizations.id).notNull(),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id).notNull(),
+    captureSessionId: uuid("capture_session_id")
+      .references(() => captureSessions.id)
+      .notNull(),
+    tsMs: integer("ts_ms").notNull(),
+    eventType: text("event_type").notNull(),
+    appName: text("app_name"),
+    windowTitle: text("window_title"),
+    url: text("url"),
+    ocrText: text("ocr_text"),
+    uiStateLabel: text("ui_state_label"),
+    screenshotArtifactId: uuid("screenshot_artifact_id").references(
+      () => artifacts.id,
+    ),
+    signalTags: text("signal_tags")
+      .array()
+      .default(sql`ARRAY[]::text[]`)
+      .notNull(),
+    metadataJson: jsonb("metadata_json").default(sql`'{}'::jsonb`).notNull(),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    redactedAt: timestamp("redacted_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => ({
+    captureTsIdx: index("screen_events_capture_ts_idx").on(
+      table.captureSessionId,
+      table.tsMs,
+    ),
+    orgIdx: index("screen_events_org_id_idx").on(table.orgId),
+    workspaceIdx: index("screen_events_workspace_id_idx").on(table.workspaceId),
+    screenshotIdx: index("screen_events_screenshot_artifact_id_idx").on(
+      table.screenshotArtifactId,
+    ),
+  }),
+);
+
+export const provisionalSteps = pgTable(
+  "provisional_steps",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id").references(() => organizations.id).notNull(),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id).notNull(),
+    captureSessionId: uuid("capture_session_id")
+      .references(() => captureSessions.id)
+      .notNull(),
+    processId: uuid("process_id").references(() => processes.id),
+    tsStartMs: integer("ts_start_ms").notNull(),
+    tsEndMs: integer("ts_end_ms"),
+    ordinalHint: integer("ordinal_hint"),
+    actionVerb: text("action_verb"),
+    actionObject: text("action_object"),
+    systemIdSet: uuid("system_id_set")
+      .array()
+      .default(sql`'{}'::uuid[]`)
+      .notNull(),
+    candidateRoleId: uuid("candidate_role_id").references(() => roles.id),
+    source: text("source").notNull(),
+    sourceEventId: text("source_event_id"),
+    idempotencyKey: text("idempotency_key"),
+    supersededByNodeId: uuid("superseded_by_node_id").references(
+      () => processNodes.id,
+    ),
+    confidence: numeric("confidence", { precision: 4, scale: 3 })
+      .default("0")
+      .notNull(),
+    metadataJson: jsonb("metadata_json").default(sql`'{}'::jsonb`).notNull(),
+    ...timestamps,
+  },
+  (table) => ({
+    captureTsIdx: index("provisional_steps_capture_ts_idx").on(
+      table.captureSessionId,
+      table.tsStartMs,
+    ),
+    processIdx: index("provisional_steps_process_id_idx").on(table.processId),
+    orgIdx: index("provisional_steps_org_id_idx").on(table.orgId),
+    workspaceIdx: index("provisional_steps_workspace_id_idx").on(
+      table.workspaceId,
+    ),
+    idempotencyIdx: uniqueIndex("provisional_steps_capture_idempotency_idx")
+      .on(table.captureSessionId, table.idempotencyKey)
+      .where(sql`idempotency_key IS NOT NULL`),
+  }),
+);
+
 export const slotStates = pgTable(
   "slot_states",
   {
@@ -593,6 +960,12 @@ export const slotStates = pgTable(
     captureSessionId: uuid("capture_session_id")
       .references(() => captureSessions.id)
       .notNull(),
+    candidateProcessId: uuid("candidate_process_id").references(
+      () => candidateProcesses.id,
+    ),
+    provisionalStepId: uuid("provisional_step_id").references(
+      () => provisionalSteps.id,
+    ),
     slotPath: text("slot_path").notNull(),
     value: jsonb("value"),
     status: slotStateStatusEnum("status").default("empty").notNull(),
@@ -609,7 +982,31 @@ export const slotStates = pgTable(
     ...timestamps,
   },
   (table) => ({
-    captureSlotIdx: uniqueIndex("slot_states_capture_slot_idx").on(
+    captureGlobalSlotIdx: uniqueIndex("slot_states_capture_global_slot_idx")
+      .on(
+        table.captureSessionId,
+        table.slotPath,
+      )
+      .where(sql`candidate_process_id IS NULL AND provisional_step_id IS NULL`),
+    captureCandidateSlotIdx: uniqueIndex("slot_states_capture_candidate_slot_idx")
+      .on(
+        table.captureSessionId,
+        table.candidateProcessId,
+        table.slotPath,
+      )
+      .where(sql`candidate_process_id IS NOT NULL`),
+    captureProvisionalStepSlotIdx: uniqueIndex(
+      "slot_states_capture_provisional_step_slot_idx",
+    )
+      .on(table.captureSessionId, table.provisionalStepId, table.slotPath)
+      .where(sql`provisional_step_id IS NOT NULL`),
+    candidateProcessIdx: index("slot_states_candidate_process_id_idx")
+      .on(table.candidateProcessId)
+      .where(sql`candidate_process_id IS NOT NULL`),
+    provisionalStepIdx: index("slot_states_provisional_step_id_idx")
+      .on(table.provisionalStepId)
+      .where(sql`provisional_step_id IS NOT NULL`),
+    captureSlotIdx: index("slot_states_capture_slot_idx").on(
       table.captureSessionId,
       table.slotPath,
     ),
@@ -728,6 +1125,46 @@ export const followUpTasks = pgTable(
   }),
 );
 
+export const redactions = pgTable(
+  "redactions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id").references(() => organizations.id).notNull(),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id).notNull(),
+    captureSessionId: uuid("capture_session_id")
+      .references(() => captureSessions.id)
+      .notNull(),
+    startMs: integer("start_ms").notNull(),
+    endMs: integer("end_ms").notNull(),
+    requestedByUserId: uuid("requested_by_user_id").references(() => users.id),
+    reason: text("reason"),
+    status: text("status").notNull(),
+    failureReason: text("failure_reason"),
+    affectedArtifactIds: uuid("affected_artifact_ids")
+      .array()
+      .default(sql`'{}'::uuid[]`)
+      .notNull(),
+    affectedTraceIds: uuid("affected_trace_ids")
+      .array()
+      .default(sql`'{}'::uuid[]`)
+      .notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => ({
+    orgIdx: index("redactions_org_id_idx").on(table.orgId),
+    workspaceIdx: index("redactions_workspace_id_idx").on(table.workspaceId),
+    captureIdx: index("redactions_capture_session_id_idx").on(
+      table.captureSessionId,
+    ),
+    statusIdx: index("redactions_capture_status_idx").on(
+      table.captureSessionId,
+      table.status,
+    ),
+  }),
+);
+
 export const synthesisRuns = pgTable(
   "synthesis_runs",
   {
@@ -816,6 +1253,7 @@ export const agentDecisionLog = pgTable(
     latencyMs: integer("latency_ms"),
     cacheHit: boolean("cache_hit"),
     degradedQuality: boolean("degraded_quality").default(false).notNull(),
+    degradedReasons: jsonb("degraded_reasons").default(sql`'[]'::jsonb`).notNull(),
     ...timestamps,
   },
   (table) => ({

@@ -1,7 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { getDb, setOrgContext } from "@/lib/db/client";
-import { captureSessions, slotStates } from "@/lib/db/schema";
+import { captureSessions, interviewState, slotStates } from "@/lib/db/schema";
 import { requireAuth, ensureWorkspaceRole } from "@/lib/auth/session";
 import { ApiError, apiError, apiJson } from "@/lib/http/json";
 import { directorSlotDefinitions } from "@/lib/interview/director/slot-schema";
@@ -24,7 +24,7 @@ export async function GET(
     );
     await ensureWorkspaceRole(auth, query.workspace_id, ["director", "viewer"]);
 
-    const rows = await getDb().transaction(async (tx) => {
+    const { rows, focusCandidateProcessId } = await getDb().transaction(async (tx) => {
       await setOrgContext(tx, auth.orgId);
       const session = (
         await tx
@@ -42,17 +42,37 @@ export async function GET(
       if (!session) {
         throw new ApiError(404, "not_found", "Director interview not found.");
       }
-      return tx
+      const state = (
+        await tx
+          .select({ focusCandidateProcessId: interviewState.focusCandidateProcessId })
+          .from(interviewState)
+          .where(eq(interviewState.captureSessionId, captureSessionId))
+          .limit(1)
+      )[0];
+      const slotRows = await tx
         .select()
         .from(slotStates)
         .where(eq(slotStates.captureSessionId, captureSessionId));
+      return {
+        rows: slotRows,
+        focusCandidateProcessId: state?.focusCandidateProcessId ?? null,
+      };
     });
 
-    const byPath = new Map(rows.map((row) => [row.slotPath, row]));
+    const byPath = new Map(
+      rows
+        .filter(
+          (row) =>
+            row.candidateProcessId === null ||
+            row.candidateProcessId === focusCandidateProcessId,
+        )
+        .map((row) => [row.slotPath, row]),
+    );
     const slots = directorSlotDefinitions.map((definition) => {
       const row = byPath.get(definition.path);
       return {
         slot_path: definition.path,
+        ...(row?.candidateProcessId ? { candidate_process_id: row.candidateProcessId } : {}),
         label: definition.label,
         priority: definition.priority,
         status: row?.status ?? "empty",

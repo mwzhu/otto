@@ -9,6 +9,7 @@ dependencies = [
   "livekit-agents[cartesia,deepgram,turn-detector]~=1.5",
   "livekit-plugins-silero~=1.2",
   "pyyaml>=6.0",
+  "otto-realtime-core",
 ]
 
 [project.scripts]
@@ -21,6 +22,9 @@ otto-director-session-verify = "director_agent.verify:main"
 
 [tool.uv]
 package = true
+
+[tool.uv.sources]
+otto-realtime-core = { path = "../realtime_core", editable = true }
 
 [tool.pyright]
 pythonVersion = "3.11"

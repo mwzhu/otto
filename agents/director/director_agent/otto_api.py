@@ -4,24 +4,29 @@ import asyncio
 import hashlib
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 
 from director_agent.schemas import (
+    CheckedTurnResponse,
     DeliveryUpdateResponse,
     DispatchedTurnResponse,
+    ExtractionTurnResponse,
     IngestedTurnResponse,
     OpeningTurnResponse,
     PlannedTurnResponse,
     PlanningContextResponse,
+    RespondedTurnResponse,
     VerificationResponse,
 )
 
 
 INTERNAL_API_RETRY_DELAYS_SECONDS = (0.1, 0.2)
 INTERNAL_API_TRANSIENT_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
+INTERNAL_API_TIMEOUT_SECONDS = 120.0
+INTERNAL_API_CONNECT_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -41,6 +46,22 @@ class PlannedTurn:
     voice_metadata: dict[str, Any] | None
     degraded_quality: bool
     raw: dict[str, Any]
+    degraded_reasons: list[str] = field(default_factory=list)
+    local_turn_correlation_id: str | None = None
+
+
+@dataclass(frozen=True)
+class RespondedTurn:
+    plan: dict[str, Any]
+    planned_agent_utterance: str
+    decision_log_id: str
+    metadata: dict[str, Any] | None
+    voice_metadata: dict[str, Any] | None
+    steering_context: dict[str, Any] | None
+    degraded_quality: bool
+    raw: dict[str, Any]
+    degraded_reasons: list[str] = field(default_factory=list)
+    local_turn_correlation_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -64,7 +85,12 @@ class OttoApiClient:
             "authorization": f"Bearer {service_token}",
             "content-type": "application/json",
         }
-        self._client = http_client or httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0))
+        self._client = http_client or httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                INTERNAL_API_TIMEOUT_SECONDS,
+                connect=INTERNAL_API_CONNECT_TIMEOUT_SECONDS,
+            ),
+        )
         self._owns_client = http_client is None
         self._max_attempts = max(1, max_attempts)
 
@@ -116,6 +142,8 @@ class OttoApiClient:
         capture_session_id: str,
         turn: IngestedTurn,
         idempotency_key: str,
+        on_planned_agent_utterance: Any | None = None,
+        local_turn_correlation_id: str | None = None,
     ) -> PlannedTurn:
         payload = {
             "capture_session_id": capture_session_id,
@@ -124,6 +152,13 @@ class OttoApiClient:
             "evidence_ids": turn.evidence_ids,
             "turn_index": turn.turn_index,
         }
+        if on_planned_agent_utterance is not None:
+            return await self._stream_plan_turn(
+                payload=payload,
+                idempotency_key=idempotency_key,
+                on_planned_agent_utterance=on_planned_agent_utterance,
+                local_turn_correlation_id=local_turn_correlation_id,
+            )
         body = await self._post("/api/internal/director-turns/plan", payload, idempotency_key)
         parsed = PlannedTurnResponse.model_validate(body)
         return PlannedTurn(
@@ -132,7 +167,185 @@ class OttoApiClient:
             metadata=parsed.metadata,
             voice_metadata=parsed.voice_metadata,
             degraded_quality=parsed.degraded_quality,
+            degraded_reasons=parsed.degraded_reasons,
             raw=body,
+            local_turn_correlation_id=local_turn_correlation_id,
+        )
+
+    async def respond_turn(
+        self,
+        *,
+        capture_session_id: str,
+        turn: IngestedTurn,
+        idempotency_key: str,
+        on_planned_agent_utterance: Any | None = None,
+        local_turn_correlation_id: str | None = None,
+        pending_extraction_turns: list[int] | None = None,
+        pending_slot_paths: list[str] | None = None,
+        last_spoken_intent: str | None = None,
+        extraction_window_id: str | None = None,
+    ) -> RespondedTurn:
+        payload: dict[str, Any] = {
+            "capture_session_id": capture_session_id,
+            "latest_utterance": turn.latest_utterance,
+            "transcript_segment_ids": turn.transcript_segment_ids,
+            "evidence_ids": turn.evidence_ids,
+            "turn_index": turn.turn_index,
+            "pending_extraction_turns": pending_extraction_turns or [],
+            "pending_slot_paths": pending_slot_paths or [],
+        }
+        if local_turn_correlation_id:
+            payload["local_turn_correlation_id"] = local_turn_correlation_id
+        if extraction_window_id:
+            payload["extraction_window_id"] = extraction_window_id
+        if last_spoken_intent:
+            payload["last_spoken_intent"] = last_spoken_intent
+        if on_planned_agent_utterance is not None:
+            return await self._stream_respond_turn(
+                payload=payload,
+                idempotency_key=idempotency_key,
+                on_planned_agent_utterance=on_planned_agent_utterance,
+                local_turn_correlation_id=local_turn_correlation_id,
+            )
+        body = await self._post("/api/internal/director-turns/respond", payload, idempotency_key)
+        parsed = RespondedTurnResponse.model_validate(body)
+        return RespondedTurn(
+            plan=parsed.plan,
+            planned_agent_utterance=parsed.planned_agent_utterance,
+            decision_log_id=parsed.decision_log_id,
+            metadata=parsed.metadata,
+            voice_metadata=parsed.voice_metadata,
+            steering_context=parsed.steering_context,
+            degraded_quality=parsed.degraded_quality,
+            degraded_reasons=parsed.degraded_reasons,
+            raw=body,
+            local_turn_correlation_id=parsed.local_turn_correlation_id
+            or local_turn_correlation_id,
+        )
+
+    async def _stream_respond_turn(
+        self,
+        *,
+        payload: dict[str, Any],
+        idempotency_key: str,
+        on_planned_agent_utterance: Any,
+        local_turn_correlation_id: str | None,
+    ) -> RespondedTurn:
+        final_body: dict[str, Any] | None = None
+        async with self._client.stream(
+            "POST",
+            f"{self._base_url}/api/internal/director-turns/respond",
+            headers={
+                **self._headers,
+                "accept": "text/event-stream",
+                "idempotency-key": idempotency_key,
+            },
+            json=payload,
+        ) as response:
+            response.raise_for_status()
+            event_name: str | None = None
+            data_lines: list[str] = []
+            async for line in response.aiter_lines():
+                if line.startswith("event:"):
+                    event_name = line[len("event:") :].strip()
+                    continue
+                if line.startswith("data:"):
+                    data_lines.append(line[len("data:") :].strip())
+                    continue
+                if line.strip():
+                    continue
+                if not event_name:
+                    data_lines = []
+                    continue
+                data = json.loads("\n".join(data_lines) or "{}")
+                if event_name == "planned_agent_utterance":
+                    utterance = str(data.get("utterance") or "").strip()
+                    if utterance:
+                        maybe_awaitable = on_planned_agent_utterance(utterance)
+                        if asyncio.iscoroutine(maybe_awaitable):
+                            await maybe_awaitable
+                elif event_name == "final":
+                    final_body = data
+                elif event_name == "error":
+                    raise RuntimeError(str(data.get("message") or "Respond stream failed."))
+                event_name = None
+                data_lines = []
+        if final_body is None:
+            raise RuntimeError("Respond stream ended without a final response.")
+        parsed = RespondedTurnResponse.model_validate(final_body)
+        return RespondedTurn(
+            plan=parsed.plan,
+            planned_agent_utterance=parsed.planned_agent_utterance,
+            decision_log_id=parsed.decision_log_id,
+            metadata=parsed.metadata,
+            voice_metadata=parsed.voice_metadata,
+            steering_context=parsed.steering_context,
+            degraded_quality=parsed.degraded_quality,
+            degraded_reasons=parsed.degraded_reasons,
+            raw=final_body,
+            local_turn_correlation_id=parsed.local_turn_correlation_id
+            or local_turn_correlation_id,
+        )
+
+    async def _stream_plan_turn(
+        self,
+        *,
+        payload: dict[str, Any],
+        idempotency_key: str,
+        on_planned_agent_utterance: Any,
+        local_turn_correlation_id: str | None,
+    ) -> PlannedTurn:
+        final_body: dict[str, Any] | None = None
+        async with self._client.stream(
+            "POST",
+            f"{self._base_url}/api/internal/director-turns/plan",
+            headers={
+                **self._headers,
+                "accept": "text/event-stream",
+                "idempotency-key": idempotency_key,
+            },
+            json=payload,
+        ) as response:
+            response.raise_for_status()
+            event_name: str | None = None
+            data_lines: list[str] = []
+            async for line in response.aiter_lines():
+                if line.startswith("event:"):
+                    event_name = line[len("event:") :].strip()
+                    continue
+                if line.startswith("data:"):
+                    data_lines.append(line[len("data:") :].strip())
+                    continue
+                if line.strip():
+                    continue
+                if not event_name:
+                    data_lines = []
+                    continue
+                data = json.loads("\n".join(data_lines) or "{}")
+                if event_name == "planned_agent_utterance":
+                    utterance = str(data.get("utterance") or "").strip()
+                    if utterance:
+                        maybe_awaitable = on_planned_agent_utterance(utterance)
+                        if asyncio.iscoroutine(maybe_awaitable):
+                            await maybe_awaitable
+                elif event_name == "final":
+                    final_body = data
+                elif event_name == "error":
+                    raise RuntimeError(str(data.get("message") or "Planner stream failed."))
+                event_name = None
+                data_lines = []
+        if final_body is None:
+            raise RuntimeError("Planner stream ended without a final plan.")
+        parsed = PlannedTurnResponse.model_validate(final_body)
+        return PlannedTurn(
+            plan=parsed.plan,
+            planned_agent_utterance=parsed.planned_agent_utterance,
+            metadata=parsed.metadata,
+            voice_metadata=parsed.voice_metadata,
+            degraded_quality=parsed.degraded_quality,
+            degraded_reasons=parsed.degraded_reasons,
+            raw=final_body,
+            local_turn_correlation_id=local_turn_correlation_id,
         )
 
     async def planning_context(
@@ -202,6 +415,7 @@ class OttoApiClient:
         turn: IngestedTurn,
         planned: PlannedTurn,
         idempotency_key: str,
+        local_turn_correlation_id: str | None = None,
     ) -> DispatchedTurn:
         payload = {
             "capture_session_id": capture_session_id,
@@ -214,7 +428,10 @@ class OttoApiClient:
             "metadata": planned.metadata,
             "voice_metadata": planned.voice_metadata or planned.raw.get("voice_metadata"),
             "degraded_quality": planned.degraded_quality,
+            "degraded_reasons": planned.degraded_reasons,
         }
+        if local_turn_correlation_id:
+            payload["local_turn_correlation_id"] = local_turn_correlation_id
         body = await self._post("/api/internal/director-turns/dispatch", payload, idempotency_key)
         parsed = DispatchedTurnResponse.model_validate(body)
         return DispatchedTurn(
@@ -222,6 +439,71 @@ class OttoApiClient:
             decision_log_id=parsed.decision_log_id,
             raw=body,
         )
+
+    async def extract_turn(
+        self,
+        *,
+        capture_session_id: str,
+        turn: IngestedTurn,
+        spoken_agent_utterance: str,
+        idempotency_key: str,
+        local_turn_correlation_id: str | None = None,
+        extraction_window_id: str | None = None,
+        focus_candidate_process_id: str | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "capture_session_id": capture_session_id,
+            "latest_utterance": turn.latest_utterance,
+            "transcript_segment_ids": turn.transcript_segment_ids,
+            "evidence_ids": turn.evidence_ids,
+            "turn_index": turn.turn_index,
+            "spoken_agent_utterance": spoken_agent_utterance,
+        }
+        if local_turn_correlation_id:
+            payload["local_turn_correlation_id"] = local_turn_correlation_id
+        if extraction_window_id:
+            payload["extraction_window_id"] = extraction_window_id
+        if focus_candidate_process_id:
+            payload["focus_candidate_process_id"] = focus_candidate_process_id
+        window_turn_indexes = turn.raw.get("window_turn_indexes")
+        if isinstance(window_turn_indexes, list):
+            payload["window_turn_indexes"] = window_turn_indexes
+        body = await self._post(
+            "/api/internal/director-turns/extract",
+            payload,
+            idempotency_key,
+        )
+        ExtractionTurnResponse.model_validate(body)
+        return body
+
+    async def check_turn(
+        self,
+        *,
+        capture_session_id: str,
+        turn: IngestedTurn,
+        spoken_agent_utterance: str,
+        steering_context: dict[str, Any] | None,
+        idempotency_key: str,
+        local_turn_correlation_id: str | None = None,
+        extraction_window_id: str | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "capture_session_id": capture_session_id,
+            "turn_index": turn.turn_index,
+            "spoken_agent_utterance": spoken_agent_utterance,
+            "steering_context": steering_context or {},
+        }
+        if local_turn_correlation_id:
+            payload["local_turn_correlation_id"] = local_turn_correlation_id
+        if extraction_window_id:
+            payload["extraction_window_id"] = extraction_window_id
+        body = await self._post(
+            "/api/internal/director-turns/check",
+            payload,
+            idempotency_key,
+        )
+        CheckedTurnResponse.model_validate(body)
+        return body
 
     async def update_delivery(
         self,
@@ -235,6 +517,7 @@ class OttoApiClient:
         idempotency_key: str,
         latency_ms: dict[str, int] | None = None,
         audio_metadata: dict[str, Any] | None = None,
+        local_turn_correlation_id: str | None = None,
     ) -> dict[str, Any]:
         if not decision_log_id:
             raise ValueError("delivery updates require a persisted decision_log_id")
@@ -249,6 +532,8 @@ class OttoApiClient:
             payload["latency_ms"] = latency_ms
         if audio_metadata is not None:
             payload["audio_metadata"] = audio_metadata
+        if local_turn_correlation_id is not None:
+            payload["local_turn_correlation_id"] = local_turn_correlation_id
         body = await self._post(
             f"/api/internal/director-turns/{turn_index}/delivery",
             payload,

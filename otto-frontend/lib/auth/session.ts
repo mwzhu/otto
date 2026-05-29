@@ -92,8 +92,17 @@ export async function ensureWorkspaceRole(
   workspaceId: string,
   allowed: WorkspaceRole[] = ["director", "operator", "viewer"],
 ) {
+  if (await hasWorkspaceRole(auth, workspaceId, allowed)) return;
+  throw new ApiError(403, "forbidden", "Workspace access denied.");
+}
+
+export async function hasWorkspaceRole(
+  auth: AuthContext,
+  workspaceId: string,
+  allowed: WorkspaceRole[] = ["director", "operator", "viewer"],
+) {
   if (auth.orgRole === "org_admin" || auth.orgRole === "fde") {
-    return;
+    return true;
   }
   const db = getDb();
   const rows = await db.transaction(async (tx) => {
@@ -111,9 +120,7 @@ export async function ensureWorkspaceRole(
       .limit(1);
   });
   const role = rows[0]?.role;
-  if (!role || !allowed.includes(role)) {
-    throw new ApiError(403, "forbidden", "Workspace access denied.");
-  }
+  return Boolean(role && allowed.includes(role));
 }
 
 export function signSessionCookie(payload: SessionPayload) {

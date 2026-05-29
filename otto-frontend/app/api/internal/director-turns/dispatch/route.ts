@@ -44,7 +44,13 @@ const metadataSchema = z.object({
   voice_degraded: z.boolean().optional(),
   voice_timeout_ms: z.number().int().min(0).optional(),
   attempted_model: z.string().optional(),
-});
+  source: z.string().optional(),
+  utterance_source: z.string().optional(),
+  llm_call_elided: z.boolean().optional(),
+  brain_model: z.string().optional(),
+  voice_phrase_fallback: z.boolean().optional(),
+  reason: z.string().optional(),
+}).passthrough();
 
 const bodySchema = z.object({
   capture_session_id: z.string().uuid(),
@@ -57,6 +63,8 @@ const bodySchema = z.object({
   metadata: metadataSchema.optional(),
   voice_metadata: metadataSchema.optional(),
   degraded_quality: z.boolean().default(false),
+  degraded_reasons: z.array(z.string().min(1)).default([]),
+  local_turn_correlation_id: z.string().min(1).optional(),
 }).strict();
 
 export async function POST(request: Request) {
@@ -115,6 +123,8 @@ export async function POST(request: Request) {
         metadata: body.metadata as DirectorModelMetadata | undefined,
         voiceMetadata: body.voice_metadata as DirectorModelMetadata | undefined,
         degradedQuality: body.degraded_quality,
+        degradedReasons: body.degraded_reasons,
+        localTurnCorrelationId: body.local_turn_correlation_id,
         deliveryStatus: "pending",
         tx,
       });

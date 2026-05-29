@@ -70,10 +70,15 @@ export function CoverageScorecard({ coverage }: { coverage: DirectorCoverage }) 
                     ? "bg-danger"
                     : "bg-ink-muted";
             return (
-              <li key={row.slotPath}>
+              <li key={`${row.candidateProcessId ?? "global"}:${row.slotPath}`}>
                 <div className="flex items-baseline justify-between text-[12.5px]">
                   <div>
                     <span className="font-medium text-ink">{row.label}</span>
+                    {row.processName ? (
+                      <span className="ml-2 text-[11px] text-ink-muted">
+                        {row.processName}
+                      </span>
+                    ) : null}
                     {row.openFollowUps ? (
                       <span className="ml-2 text-[11px] text-ink-muted">
                         {row.openFollowUps} open

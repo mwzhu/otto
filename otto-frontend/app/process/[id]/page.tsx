@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/Button";
 import { Pill } from "@/components/ui/Pill";
 import { BRAND } from "@/lib/brand";
 import { requirePageAuth } from "@/lib/auth/session";
-import { getCurrentWorkspace } from "@/lib/workspaces/current";
+import { getWorkspaceForProcess } from "@/lib/workspaces/current";
 import { getDirectorProcessDetail, getProcessEvidence } from "@/lib/processes/queries";
 import { EvidenceLink } from "@/components/common/EvidenceLink";
 import { EvidenceDrawer } from "@/components/workspace/EvidenceDrawer";
@@ -21,20 +21,21 @@ export default async function ProcessDetailPage({
 }) {
   const { id } = await params;
   const auth = await requirePageAuth();
-  const workspace = await getCurrentWorkspace(auth);
+  const workspace = await getWorkspaceForProcess(auth, id);
   if (!workspace) notFound();
   const [process, evidence] = await Promise.all([
     getDirectorProcessDetail(auth.orgId, workspace.id, id),
     getProcessEvidence(auth.orgId, workspace.id, id),
   ]);
   if (!process) notFound();
+  const overviewHref = `/overview?workspace_id=${encodeURIComponent(workspace.id)}`;
 
   return (
     <div className="flex min-h-screen flex-col">
       <BreadcrumbHeader
-        back={{ href: "/overview", label: "High Level Overview" }}
+        back={{ href: overviewHref, label: "High Level Overview" }}
         crumbs={[
-          { label: process.function, href: "/overview" },
+          { label: process.function, href: overviewHref },
           { label: process.name },
         ]}
         right={

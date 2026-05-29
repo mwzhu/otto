@@ -140,11 +140,6 @@ def check_proof_readiness(
         warnings.append(
             "DATABASE_SERVICE_URL is not required by the worker process, but it must be configured in the Next.js app for internal director endpoints."
         )
-    if normalized_env_value(app_env.get("OTTO_DIRECTOR_PLANNER_RUNTIME")) == "next":
-        app_missing.append("OTTO_DIRECTOR_PLANNER_RUNTIME=python")
-    if normalized_env_value(worker_env.get("OTTO_DIRECTOR_PLANNER_RUNTIME")) == "next":
-        worker_missing.append("OTTO_DIRECTOR_PLANNER_RUNTIME=python")
-
     app_missing = sorted(dict.fromkeys(app_missing))
     worker_missing = sorted(dict.fromkeys(worker_missing))
     return ProofReadinessResult(

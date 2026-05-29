@@ -35,7 +35,13 @@ const edgeTypes = {
   labeled: LabeledEdge,
 };
 
-export function ProcessCanvas({ graph }: { graph: ProcessGraph }) {
+export function ProcessCanvas({
+  graph,
+  onNodeEvidenceOpen,
+}: {
+  graph: ProcessGraph;
+  onNodeEvidenceOpen?: (input: { title: string; evidenceIds: string[] }) => void;
+}) {
   const correctedNodeIds = useWorkspaceStore((s) => s.correctedNodeIds);
   const setSelected = useWorkspaceStore((s) => s.setSelectedNodeId);
   const openEvidence = useWorkspaceStore((s) => s.openEvidence);
@@ -129,6 +135,14 @@ export function ProcessCanvas({ graph }: { graph: ProcessGraph }) {
         proOptions={{ hideAttribution: true }}
         onNodeClick={(_, node) => {
           setSelected(node.id);
+          const evidenceIds = (node.data as { evidence_ids?: string[] }).evidence_ids;
+          if (evidenceIds && evidenceIds.length > 0) {
+            onNodeEvidenceOpen?.({
+              title: String((node.data as { title?: unknown }).title ?? "Workflow step"),
+              evidenceIds,
+            });
+            return;
+          }
           const claimIds = (node.data as { claim_ids?: string[] }).claim_ids;
           if (claimIds && claimIds.length > 0) {
             openEvidence(claimIds[0]);

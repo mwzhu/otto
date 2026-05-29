@@ -84,6 +84,64 @@
         { "field": "steps", "value_schema": { "type": ["array", "object"] } },
         { "field": "evidence_coverage", "value_schema": { "type": "object" } }
       ]
+    },
+    {
+      "subject_type": "process_node",
+      "fields": [
+        { "field": "title", "value_schema": { "type": "string" } },
+        { "field": "description", "value_schema": { "type": ["string", "object"] } },
+        { "field": "role", "value_schema": { "type": ["string", "object"] } },
+        { "field": "system", "value_schema": { "type": ["string", "object"] } },
+        { "field": "input", "value_schema": { "type": ["string", "object"] } },
+        { "field": "output", "value_schema": { "type": ["string", "object"] } },
+        { "field": "source_of_truth", "value_schema": { "type": ["string", "object", "boolean"] } },
+        { "field": "time_typical", "value_schema": { "type": ["number", "object"] } },
+        { "field": "evidence_coverage", "value_schema": { "type": "object" } }
+      ]
+    },
+    {
+      "subject_type": "process_edge",
+      "fields": [
+        { "field": "sequence", "value_schema": { "type": ["string", "object"] } },
+        { "field": "condition", "value_schema": { "type": ["string", "object"] } },
+        { "field": "handoff", "value_schema": { "type": ["string", "object"] } },
+        { "field": "exception_path", "value_schema": { "type": ["boolean", "object"] } }
+      ]
+    },
+    {
+      "subject_type": "exception",
+      "fields": [
+        { "field": "trigger", "value_schema": { "type": ["string", "object"] } },
+        { "field": "detection", "value_schema": { "type": ["string", "object"] } },
+        { "field": "handler", "value_schema": { "type": ["string", "object"] } },
+        { "field": "impact", "value_schema": { "type": ["string", "object", "number"] } },
+        { "field": "frequency", "value_schema": { "type": ["string", "object", "number"] } }
+      ]
+    },
+    {
+      "subject_type": "workaround",
+      "fields": [
+        { "field": "description", "value_schema": { "type": ["string", "object"] } },
+        { "field": "why_it_exists", "value_schema": { "type": ["string", "object"] } },
+        { "field": "normal_workflow", "value_schema": { "type": ["string", "object"] } }
+      ]
+    },
+    {
+      "subject_type": "variant",
+      "fields": [
+        { "field": "condition", "value_schema": { "type": ["string", "object"] } },
+        { "field": "alternate_path", "value_schema": { "type": ["string", "object", "array"] } },
+        { "field": "decision_criteria", "value_schema": { "type": ["string", "object", "array"] } }
+      ]
+    },
+    {
+      "subject_type": "narrative_paragraph",
+      "fields": [
+        { "field": "summary", "value_schema": { "type": "string" } },
+        { "field": "gap_warning", "value_schema": { "type": ["string", "object"] } },
+        { "field": "contradiction", "value_schema": { "type": ["string", "object"] } },
+        { "field": "evidence_coverage", "value_schema": { "type": "object" } }
+      ]
     }
   ]
 }

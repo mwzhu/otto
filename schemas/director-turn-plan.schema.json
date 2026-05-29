@@ -6,15 +6,15 @@
   "additionalProperties": false,
   "required": [
     "utterance_type",
+    "chosen_intent",
+    "current_phase",
+    "proposed_next_phase",
+    "phase_transition_ready",
     "slot_updates",
     "claims",
     "tool_calls",
     "contradiction_signals",
-    "current_phase",
-    "proposed_next_phase",
-    "phase_transition_ready",
-    "ranked_intents",
-    "chosen_intent"
+    "ranked_intents"
   ],
   "properties": {
     "utterance_type": {
@@ -31,6 +31,35 @@
         "off_topic"
       ]
     },
+    "chosen_intent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intent", "score", "reason"],
+      "properties": {
+        "intent": { "type": "string" },
+        "target_slot": { "type": "string" },
+        "target_process": { "type": "string" },
+        "score": { "type": "number" },
+        "info_gain": { "type": "number" },
+        "conversational_fit": { "type": "number" },
+        "priority": { "type": "number" },
+        "recency": { "type": "number" },
+        "reason": { "type": "string" },
+        "style_hint": { "type": "string" }
+      }
+    },
+    "planned_agent_utterance": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The exact next sentence or short pair of sentences Otto should say aloud. It must be concise, natural, and ask at most one question."
+    },
+    "current_phase": {
+      "enum": ["orient", "inventory", "expand", "enrich", "closeout"]
+    },
+    "proposed_next_phase": {
+      "enum": ["orient", "inventory", "expand", "enrich", "closeout"]
+    },
+    "phase_transition_ready": { "type": "boolean" },
     "slot_updates": {
       "type": "array",
       "items": { "$ref": "slot-state.schema.json" }
@@ -55,13 +84,6 @@
       "type": "array",
       "items": { "type": "string" }
     },
-    "current_phase": {
-      "enum": ["orient", "inventory", "expand", "enrich", "closeout"]
-    },
-    "proposed_next_phase": {
-      "enum": ["orient", "inventory", "expand", "enrich", "closeout"]
-    },
-    "phase_transition_ready": { "type": "boolean" },
     "ranked_intents": {
       "type": "array",
       "items": {
@@ -80,23 +102,6 @@
           "reason": { "type": "string" },
           "style_hint": { "type": "string" }
         }
-      }
-    },
-    "chosen_intent": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["intent", "score", "reason"],
-      "properties": {
-        "intent": { "type": "string" },
-        "target_slot": { "type": "string" },
-        "target_process": { "type": "string" },
-        "score": { "type": "number" },
-        "info_gain": { "type": "number" },
-        "conversational_fit": { "type": "number" },
-        "priority": { "type": "number" },
-        "recency": { "type": "number" },
-        "reason": { "type": "string" },
-        "style_hint": { "type": "string" }
       }
     },
     "focus_candidate_process_id": {

@@ -1,13 +1,23 @@
 import "server-only";
 
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
-import { getDb } from "@/lib/db/client";
-import { auditLog, captureSessions, followUpTasks, slotStates } from "@/lib/db/schema";
+import { getDb, setOrgContext } from "@/lib/db/client";
+import {
+  auditLog,
+  captureSessions,
+  directorExtractionWindows,
+  followUpTasks,
+  synthesisRuns,
+  slotStates,
+  agentDecisionLog,
+} from "@/lib/db/schema";
+import { writeAgentDecision } from "@/lib/db/write-agent-decision";
 import { ApiError } from "@/lib/http/json";
 import { directorInterviewCompletedEventName, inngest } from "@/lib/inngest/client";
 import { directorSlotDefinitions } from "@/lib/interview/director/slot-schema";
 import { createFollowUpTask } from "@/lib/interview/director/tools";
 import { lockDirectorTurnSequence } from "@/lib/interview/director/turn-transaction";
+import { runInventorySynthesis } from "@/lib/synthesis/inventory";
 
 type DirectorCompletionTx = Parameters<
   Parameters<ReturnType<typeof getDb>["transaction"]>[0]
@@ -37,6 +47,7 @@ export async function completeDirectorInterviewInTransaction(
     await recoverStalePendingDirectorVoiceDeliveries(tx, input);
   }
   await assertAllDirectorVoiceDeliveryTerminal(tx, input);
+  await assertAllDirectorExtractionTerminal(tx, input);
 
   const completedAt = new Date();
   const completedRows = await tx
@@ -99,16 +110,15 @@ export async function completeDirectorInterviewInTransaction(
     throw new ApiError(404, "not_found", "Director interview not found.");
   }
   const completionEventKey = completionEventIdempotencyKey(input.captureSessionId);
-  const alreadyQueued = await hasQueuedDirectorSynthesis(tx, {
+  const synthesisStarted = await hasStartedDirectorSynthesis(tx, {
     orgId: input.orgId,
     workspaceId: input.workspaceId,
     captureSessionId: input.captureSessionId,
-    idempotencyKey: completionEventKey,
   });
   return {
     body: { capture_session: existing },
     statusCode: 200,
-    eventData: alreadyQueued
+    eventData: synthesisStarted
       ? null
       : {
           orgId: input.orgId,
@@ -118,6 +128,67 @@ export async function completeDirectorInterviewInTransaction(
           idempotencyKey: completionEventKey,
         },
   };
+}
+
+async function assertAllDirectorExtractionTerminal(
+  tx: DirectorCompletionTx,
+  input: {
+    orgId: string;
+    workspaceId: string;
+    captureSessionId: string;
+  },
+) {
+  const result = await tx.execute<{
+    pending_extraction_turns: string | number;
+    failed_extraction_turns: string | number;
+    pending_extraction_windows: string | number;
+    failed_extraction_windows: string | number;
+  }>(sql`
+    WITH extraction_turns AS (
+      SELECT delivery_json->>'extraction_status' AS extraction_status
+      FROM agent_decision_log
+      WHERE org_id = ${input.orgId}
+        AND workspace_id = ${input.workspaceId}
+        AND capture_session_id = ${input.captureSessionId}
+        AND stage_name = 'director.turn'
+        AND delivery_json ? 'extraction_status'
+    ),
+    extraction_windows AS (
+      SELECT status
+      FROM director_extraction_windows
+      WHERE org_id = ${input.orgId}
+        AND workspace_id = ${input.workspaceId}
+        AND capture_session_id = ${input.captureSessionId}
+    )
+    SELECT
+      (SELECT count(*) FROM extraction_turns WHERE extraction_status IN ('pending', 'running'))::int
+        AS pending_extraction_turns,
+      (SELECT count(*) FROM extraction_turns WHERE extraction_status = 'failed')::int
+        AS failed_extraction_turns,
+      (SELECT count(*) FROM extraction_windows WHERE status IN ('pending', 'running'))::int
+        AS pending_extraction_windows,
+      (SELECT count(*) FROM extraction_windows WHERE status = 'failed')::int
+        AS failed_extraction_windows
+  `);
+  const row = result.rows[0];
+  const pendingExtractionTurns = Number(row?.pending_extraction_turns ?? 0);
+  const failedExtractionTurns = Number(row?.failed_extraction_turns ?? 0);
+  const pendingExtractionWindows = Number(row?.pending_extraction_windows ?? 0);
+  const failedExtractionWindows = Number(row?.failed_extraction_windows ?? 0);
+  if (pendingExtractionTurns > 0 || pendingExtractionWindows > 0) {
+    throw new ApiError(
+      409,
+      "conflict",
+      "Director interview has pending structured extraction (extraction_pending). Retry completion after notes finish updating.",
+    );
+  }
+  if (failedExtractionTurns > 0 || failedExtractionWindows > 0) {
+    throw new ApiError(
+      409,
+      "conflict",
+      "Director interview has failed structured extraction (extraction_failed). Retry extraction before opening the overview.",
+    );
+  }
 }
 
 async function recoverStalePendingDirectorVoiceDeliveries(
@@ -300,6 +371,29 @@ async function hasQueuedDirectorSynthesis(
   return Boolean(result.rows[0]);
 }
 
+async function hasStartedDirectorSynthesis(
+  tx: DirectorCompletionTx,
+  input: {
+    orgId: string;
+    workspaceId: string;
+    captureSessionId: string;
+  },
+) {
+  const rows = await tx
+    .select({ id: synthesisRuns.id })
+    .from(synthesisRuns)
+    .where(
+      and(
+        eq(synthesisRuns.orgId, input.orgId),
+        eq(synthesisRuns.workspaceId, input.workspaceId),
+        sql`${synthesisRuns.captureSessionIds} @> ARRAY[${input.captureSessionId}]::uuid[]`,
+        inArray(synthesisRuns.status, ["running", "completed"]),
+      ),
+    )
+    .limit(1);
+  return Boolean(rows[0]);
+}
+
 async function createUnresolvedPrioritySlotFollowUps(
   tx: DirectorCompletionTx,
   input: {
@@ -394,10 +488,142 @@ export async function sendDirectorCompletionEvent(
   eventData: DirectorCompletionEventData | null,
 ) {
   if (!eventData) return;
-  await inngest.send({
-    name: directorInterviewCompletedEventName,
-    data: eventData,
+  try {
+    await inngest.send({
+      name: directorInterviewCompletedEventName,
+      data: eventData,
+    });
+  } catch (error) {
+    await getDb()
+      .insert(auditLog)
+      .values({
+        orgId: eventData.orgId,
+        workspaceId: eventData.workspaceId,
+        userId: eventData.userId,
+        eventType: "capture.director_interview.completion_event_failed",
+        subjectType: "capture_session",
+        subjectId: eventData.captureSessionId,
+        metadataJson: {
+          idempotency_key: eventData.idempotencyKey,
+          event_name: directorInterviewCompletedEventName,
+          message: error instanceof Error ? error.message : "unknown_error",
+        },
+      });
+  }
+  await requestAndRunDirectorInventorySynthesis(eventData);
+}
+
+export async function requestAndRunDirectorInventorySynthesis(
+  eventData: DirectorCompletionEventData,
+) {
+  const requested = await getDb().transaction(async (tx) => {
+    await setOrgContext(tx, eventData.orgId);
+    const rows = await tx
+      .select()
+      .from(captureSessions)
+      .where(
+        and(
+          eq(captureSessions.id, eventData.captureSessionId),
+          eq(captureSessions.orgId, eventData.orgId),
+          eq(captureSessions.workspaceId, eventData.workspaceId),
+          eq(captureSessions.captureType, "director_interview"),
+        ),
+      )
+      .limit(1);
+    const captureSession = rows[0];
+    if (!captureSession) return null;
+    await tx.execute(sql`
+      SELECT pg_advisory_xact_lock(hashtext(${`synthesis.inventory.queued:${captureSession.id}:${eventData.idempotencyKey}`}))
+    `);
+    const existingQueueRows = await tx.execute<{ id: string }>(sql`
+      SELECT id
+      FROM audit_log
+      WHERE org_id = ${captureSession.orgId}
+        AND workspace_id = ${captureSession.workspaceId}
+        AND subject_type = 'capture_session'
+        AND subject_id = ${captureSession.id}
+        AND event_type = 'synthesis.inventory.queued'
+        AND metadata_json->>'idempotency_key' = ${eventData.idempotencyKey}
+      LIMIT 1
+    `);
+    if (existingQueueRows.rows[0]) {
+      const existingRunRows = await tx
+        .select({ id: synthesisRuns.id })
+        .from(synthesisRuns)
+        .where(
+          and(
+            eq(synthesisRuns.orgId, captureSession.orgId),
+            eq(synthesisRuns.workspaceId, captureSession.workspaceId),
+            sql`${synthesisRuns.captureSessionIds} @> ARRAY[${captureSession.id}]::uuid[]`,
+            inArray(synthesisRuns.status, ["running", "completed"]),
+          ),
+        )
+        .limit(1);
+      if (existingRunRows[0]) return null;
+      return {
+        orgId: captureSession.orgId,
+        workspaceId: captureSession.workspaceId,
+        captureSessionId: captureSession.id,
+      };
+    }
+    await tx.insert(auditLog).values({
+      orgId: captureSession.orgId,
+      workspaceId: captureSession.workspaceId,
+      userId: eventData.userId,
+      eventType: "synthesis.inventory.queued",
+      subjectType: "capture_session",
+      subjectId: captureSession.id,
+      metadataJson: {
+        capture_session_id: captureSession.id,
+        idempotency_key: eventData.idempotencyKey,
+        source: "director_completion",
+      },
+    });
+    return {
+      orgId: captureSession.orgId,
+      workspaceId: captureSession.workspaceId,
+      captureSessionId: captureSession.id,
+    };
   });
+  if (!requested) return;
+  try {
+    await writeAgentDecision({
+      orgId: requested.orgId,
+      workspaceId: requested.workspaceId,
+      captureSessionId: requested.captureSessionId,
+      stageName: "week3_director_turns_ready",
+      tsStart: new Date(),
+      tsEnd: new Date(),
+      promptTemplateId: "synthesis.inventory.week3-director-ready",
+      promptTemplateVersion: "1",
+      toolCalls: [],
+      degradedQuality: false,
+    });
+    await runInventorySynthesis({
+      orgId: requested.orgId,
+      workspaceId: requested.workspaceId,
+      captureSessionIds: [requested.captureSessionId],
+      runType: "director_inventory",
+      userId: eventData.userId,
+      idempotencyKey: eventData.idempotencyKey,
+    });
+  } catch (error) {
+    await getDb().transaction(async (tx) => {
+      await setOrgContext(tx, requested.orgId);
+      await tx.insert(auditLog).values({
+        orgId: requested.orgId,
+        workspaceId: requested.workspaceId,
+        userId: eventData.userId,
+        eventType: "capture.director_interview.inline_synthesis_failed",
+        subjectType: "capture_session",
+        subjectId: requested.captureSessionId,
+        metadataJson: {
+          idempotency_key: eventData.idempotencyKey,
+          message: error instanceof Error ? error.message : "unknown_error",
+        },
+      });
+    });
+  }
 }
 
 function completionEventIdempotencyKey(captureSessionId: string) {

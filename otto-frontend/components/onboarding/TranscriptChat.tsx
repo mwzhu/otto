@@ -68,15 +68,32 @@ type TurnTelemetry = {
   latency_ms?: {
     ingest_ms?: number;
     plan_ms?: number;
+    respond_ms?: number;
     dispatch_ms?: number;
     pre_tts_total_ms?: number;
+    speech_pre_tts_total_ms?: number;
+    ttfa_ms?: number;
+    speech_latency_ms?: number;
+    extraction_latency_ms?: number;
+    steering_lag_ms?: number;
+    steering_lag_turns?: number;
+    pending_extraction_count?: number;
+    checker_violation_count?: number;
+    stale_question_count?: number;
+    slot_update_latency_ms?: number;
   };
   planner_runtime?: string;
+  extraction_status?: "pending" | "complete" | "failed";
+  checker_status?: "complete" | "failed";
+  checker_violation_count?: number;
+  stale_question_count?: number;
   degraded_quality?: boolean;
+  degraded_reasons?: string[];
 };
 
 type CoverageSlot = {
   slot_path: string;
+  candidate_process_id?: string;
   label: string;
   priority: number;
   status:
@@ -95,6 +112,7 @@ type DirectorTurnResponse = {
   next_prompt: string;
   slot_updates: Array<{
     slot_path: string;
+    candidate_process_id?: string;
     status: CoverageSlot["status"];
     confidence: number;
     value?: unknown;
@@ -103,6 +121,7 @@ type DirectorTurnResponse = {
   candidate_process_ids: string[];
   coverage_slots?: CoverageSlot[];
   degraded_quality: boolean;
+  degraded_reasons?: string[];
 };
 
 type TranscriptHistoryResponse = {
@@ -213,6 +232,7 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
   const lastFinalRef = useRef("");
   const activeCaptureSessionRef = useRef<string | null>(null);
   const statusRef = useRef({ listening: false, paused: false, muted: false });
+  const completionNavigationStartedRef = useRef(false);
 
   useEffect(() => {
     statusRef.current = { listening, paused, muted };
@@ -377,8 +397,24 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
       ),
     );
   }, []);
-  const navigateToSynthesis = useCallback(() => {
+  const navigateToSynthesis = useCallback(async () => {
     if (!session) return;
+    if (completionNavigationStartedRef.current) return;
+    completionNavigationStartedRef.current = true;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await completeDirectorInterview(session);
+    } catch (err) {
+      completionNavigationStartedRef.current = false;
+      setSubmitting(false);
+      setError(
+        err instanceof Error
+          ? err.message
+          : "The interview stopped, but completion did not save. Press End again to retry.",
+      );
+      return;
+    }
     expectedLiveKitDisconnectRef.current = true;
     disconnectLiveKitRoom(liveKitRoomRef, liveKitMicTrackRef, liveKitAudioElsRef);
     liveKitConnectedSessionRef.current = null;
@@ -386,6 +422,26 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
     router.push(
       `/synthesis?next=${encodeURIComponent(nextHref)}&workspace_id=${encodeURIComponent(
         session.workspaceId,
+      )}&capture_session_id=${encodeURIComponent(
+        session.captureSessionId,
+      )}`,
+    );
+  }, [nextHref, router, session]);
+
+  const navigateToSynthesisAfterWorkerComplete = useCallback(() => {
+    if (!session) return;
+    completionNavigationStartedRef.current = true;
+    setSubmitting(true);
+    setError(null);
+    expectedLiveKitDisconnectRef.current = true;
+    disconnectLiveKitRoom(liveKitRoomRef, liveKitMicTrackRef, liveKitAudioElsRef);
+    liveKitConnectedSessionRef.current = null;
+    clearStoredDirectorSession();
+    router.push(
+      `/synthesis?next=${encodeURIComponent(nextHref)}&workspace_id=${encodeURIComponent(
+        session.workspaceId,
+      )}&capture_session_id=${encodeURIComponent(
+        session.captureSessionId,
       )}`,
     );
   }, [nextHref, router, session]);
@@ -410,9 +466,8 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
           `director-turn-${session.captureSessionId}-${Date.now()}`,
         );
         appendMessage("agent", response.next_prompt);
-        setCoverage(
-          response.coverage_slots ?? (await refreshCoverage(session, response.slot_updates)),
-        );
+        const nextCoverage = await coverageUpdateFromPayload(session, response);
+        if (nextCoverage) setCoverage(nextCoverage);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Could not save the turn.");
       } finally {
@@ -448,7 +503,7 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
         setListening,
         setMuted,
         setPaused,
-        onCompleted: navigateToSynthesis,
+        onCompleted: navigateToSynthesisAfterWorkerComplete,
         roomRef: liveKitRoomRef,
         connectingRef: liveKitConnectingRef,
         connectedSessionRef: liveKitConnectedSessionRef,
@@ -461,6 +516,10 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
         directorTurnIndexesRef: liveKitDirectorTurnIndexesRef,
         agentTurnKeysRef: liveKitAgentTurnKeysRef,
         statusRef,
+        onCompletionFailed: () => {
+          completionNavigationStartedRef.current = false;
+          setSubmitting(false);
+        },
         enableTypedFallback: () => {
           expectedLiveKitDisconnectRef.current = true;
           clearLiveKitReconnectTimer(liveKitReconnectTimerRef);
@@ -543,7 +602,7 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
     appendMessage,
     effectiveRoomMode,
     hydrateTranscript,
-    navigateToSynthesis,
+    navigateToSynthesisAfterWorkerComplete,
     session,
     submitTurn,
     updateAgentMessageForTurn,
@@ -573,6 +632,8 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
 
   async function completeInterview() {
     if (!session) return;
+    if (completionNavigationStartedRef.current) return;
+    completionNavigationStartedRef.current = true;
     setSubmitting(true);
     setError(null);
     try {
@@ -592,6 +653,8 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
           router.push(
             `/synthesis?next=${encodeURIComponent(nextHref)}&workspace_id=${encodeURIComponent(
               session.workspaceId,
+            )}&capture_session_id=${encodeURIComponent(
+              session.captureSessionId,
             )}`,
           );
           return;
@@ -601,6 +664,7 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
           .catch(() => undefined);
         setListening(false);
         statusRef.current = { ...statusRef.current, listening: false };
+        setError("Finishing notes before opening the overview...");
         return;
       } else {
         stopRecognition(false);
@@ -610,9 +674,12 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
       router.push(
         `/synthesis?next=${encodeURIComponent(nextHref)}&workspace_id=${encodeURIComponent(
           session.workspaceId,
+        )}&capture_session_id=${encodeURIComponent(
+          session.captureSessionId,
         )}`,
       );
     } catch (err) {
+      completionNavigationStartedRef.current = false;
       setError(
         err instanceof Error
           ? err.message
@@ -649,8 +716,10 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
                   ? session.roomName
                   : "Simulated transcript mode"}{" "}
                 · {formatTime(elapsed)}
-                {lastTelemetry?.latency_ms?.pre_tts_total_ms !== undefined
-                  ? ` · ${lastTelemetry.latency_ms.pre_tts_total_ms}ms pre-TTS`
+                {lastTelemetry?.latency_ms?.speech_pre_tts_total_ms !== undefined
+                  ? ` · ${lastTelemetry.latency_ms.speech_pre_tts_total_ms}ms pre-TTS`
+                  : lastTelemetry?.latency_ms?.pre_tts_total_ms !== undefined
+                    ? ` · ${lastTelemetry.latency_ms.pre_tts_total_ms}ms pre-TTS`
                   : ""}
               </p>
             </div>
@@ -662,8 +731,18 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
             <Pill tone={listening && !paused ? "success" : "neutral"}>
               {listening && !paused ? "Transcribing" : "Mic standby"}
             </Pill>
-            {lastTelemetry?.degraded_quality ? (
-              <Pill tone="warn">Review queued</Pill>
+            {lastTelemetry?.extraction_status === "pending" ? (
+              <Pill tone="neutral">Notes updating</Pill>
+            ) : null}
+            {(lastTelemetry?.stale_question_count ?? 0) > 0 ? (
+              <Pill tone="warn">Steering stale</Pill>
+            ) : null}
+            {lastTelemetry?.degraded_quality ||
+            lastTelemetry?.extraction_status === "failed" ||
+            (lastTelemetry?.checker_violation_count ?? 0) > 0 ? (
+              <span title={lastTelemetry?.degraded_reasons?.join(", ")}>
+                <Pill tone="warn">Review queued</Pill>
+              </span>
             ) : null}
             <Pill tone="neutral">Audio recording off</Pill>
             <Button
@@ -875,7 +954,7 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
             <ul className="space-y-2">
               {coverage.map((slot) => (
                 <li
-                  key={slot.slot_path}
+                  key={`${slot.candidate_process_id ?? "global"}:${slot.slot_path}`}
                   className="rounded-md border border-subtle bg-canvas px-3 py-2.5"
                 >
                   <div className="flex items-start justify-between gap-2">
@@ -1069,7 +1148,8 @@ type LiveKitConnectInput = {
   setListening: (listening: boolean) => void;
   setMuted: (muted: boolean) => void;
   setPaused: (paused: boolean) => void;
-  onCompleted: () => void;
+  onCompleted: () => void | Promise<void>;
+  onCompletionFailed: () => void;
   roomRef: MutableRefObject<LiveKitRoomLike | null>;
   connectingRef: MutableRefObject<Promise<void> | null>;
   connectedSessionRef: MutableRefObject<string | null>;
@@ -1170,7 +1250,9 @@ async function connectLiveKitOnce(input: LiveKitConnectInput) {
       const element = audioTrack.attach?.();
       if (element) {
         element.autoplay = true;
-        element.playsInline = true;
+        if (element instanceof HTMLVideoElement) {
+          element.playsInline = true;
+        }
         element.dataset.ottoLivekitAudio = "true";
         document.body.appendChild(element);
         void element.play().catch(() => {
@@ -1219,6 +1301,7 @@ async function connectLiveKitOnce(input: LiveKitConnectInput) {
           input.setPaused,
           input.setListening,
           input.onCompleted,
+          input.onCompletionFailed,
           input.statusRef,
           input.expectedDisconnectRef,
           input.enableTypedFallback,
@@ -1469,7 +1552,8 @@ async function handleLiveKitData(
   setMuted: (muted: boolean) => void,
   setPaused: (paused: boolean) => void,
   setListening: (listening: boolean) => void,
-  onCompleted: () => void,
+  onCompleted: () => void | Promise<void>,
+  onCompletionFailed: () => void,
   statusRef: MutableRefObject<{ listening: boolean; paused: boolean; muted: boolean }>,
   expectedDisconnectRef: MutableRefObject<boolean>,
   enableTypedFallback: () => void,
@@ -1493,7 +1577,15 @@ async function handleLiveKitData(
         coverage_slots?: CoverageSlot[];
         latency_ms?: TurnTelemetry["latency_ms"];
         planner_runtime?: string;
+        extraction_status?: TurnTelemetry["extraction_status"];
+        extraction_latency_ms?: number;
+        slot_update_latency_ms?: number;
+        checker_status?: TurnTelemetry["checker_status"];
+        checker_violation_count?: number;
+        stale_question_count?: number;
+        checker_violations?: Array<{ message?: string }>;
         degraded_quality?: boolean;
+        degraded_reasons?: string[];
         turn_index?: number;
         stage_name?: string;
         action?: "mute" | "unmute" | "pause" | "resume" | "end";
@@ -1526,7 +1618,45 @@ async function handleLiveKitData(
         turn_index: parsed.payload?.turn_index,
         latency_ms: parsed.payload?.latency_ms,
         planner_runtime: parsed.payload?.planner_runtime,
+        extraction_status: parsed.payload?.extraction_status,
         degraded_quality: parsed.payload?.degraded_quality,
+        degraded_reasons: parsed.payload?.degraded_reasons,
+      });
+      return;
+    }
+    if (parsed.event === "director.turn.extracted" && parsed.payload) {
+      setLastTelemetry({
+        turn_index: parsed.payload.turn_index,
+        latency_ms: {
+          extraction_latency_ms: parsed.payload.extraction_latency_ms,
+          slot_update_latency_ms: parsed.payload.slot_update_latency_ms,
+        },
+        extraction_status:
+          parsed.payload.extraction_status === "failed" ? "failed" : "complete",
+        degraded_quality: parsed.payload.degraded_quality,
+        degraded_reasons: parsed.payload.degraded_reasons,
+      });
+      const nextCoverage = await coverageUpdateFromPayload(session, parsed.payload);
+      if (nextCoverage) setCoverage(nextCoverage);
+      return;
+    }
+    if (parsed.event === "director.turn.output_checked" && parsed.payload) {
+      const checkerViolationCount = parsed.payload.checker_violation_count ?? 0;
+      const staleQuestionCount = parsed.payload.stale_question_count ?? 0;
+      setLastTelemetry({
+        turn_index: parsed.payload.turn_index,
+        checker_status:
+          parsed.payload.checker_status === "failed" ? "failed" : "complete",
+        checker_violation_count: checkerViolationCount,
+        stale_question_count: staleQuestionCount,
+        degraded_quality:
+          parsed.payload.checker_status === "failed" || checkerViolationCount > 0,
+        degraded_reasons:
+          parsed.payload.checker_status === "failed"
+            ? ["output_checker_failed"]
+            : checkerViolationCount > 0
+              ? ["output_checker_violation"]
+              : [],
       });
       return;
     }
@@ -1548,7 +1678,7 @@ async function handleLiveKitData(
     if (parsed.event === "director.session.completed") {
       setListening(false);
       statusRef.current = { ...statusRef.current, listening: false };
-      onCompleted();
+      await onCompleted();
       return;
     }
     if (parsed.event === "director.turn.delivery_updated") {
@@ -1592,6 +1722,7 @@ async function handleLiveKitData(
       const noticeType = parsed.payload?.notice_type;
       if (noticeType === "failed_completion") {
         expectedDisconnectRef.current = false;
+        onCompletionFailed();
       }
       if (noticeType === "worker_startup_failed") {
         enableTypedFallback();
@@ -1612,7 +1743,15 @@ async function handleLiveKitData(
     if (parsed.payload.degraded_quality) {
       setLastTelemetry({
         turn_index: parsed.payload.turn_index,
+        extraction_status: parsed.payload.extraction_status,
         degraded_quality: true,
+        degraded_reasons: parsed.payload.degraded_reasons,
+      });
+    } else if (parsed.payload.extraction_status) {
+      setLastTelemetry({
+        turn_index: parsed.payload?.turn_index,
+        extraction_status: parsed.payload?.extraction_status,
+        degraded_quality: false,
       });
     }
     if (parsed.payload.transcript) {
@@ -1652,13 +1791,27 @@ async function handleLiveKitData(
         );
       }
     }
-    setCoverage(
-      parsed.payload.coverage_slots ??
-        (await refreshCoverage(session, parsed.payload.slot_updates ?? [])),
-    );
+    const nextCoverage = await coverageUpdateFromPayload(session, parsed.payload);
+    if (nextCoverage) setCoverage(nextCoverage);
   } catch {
     // Ignore unrelated LiveKit data-channel messages.
   }
+}
+
+async function coverageUpdateFromPayload(
+  session: DirectorSession,
+  payload: {
+    coverage_slots?: CoverageSlot[];
+    slot_updates?: DirectorTurnResponse["slot_updates"];
+  },
+) {
+  if (payload.coverage_slots && payload.coverage_slots.length > 0) {
+    return payload.coverage_slots;
+  }
+  if ((payload.slot_updates?.length ?? 0) > 0) {
+    return refreshCoverage(session, payload.slot_updates);
+  }
+  return null;
 }
 
 function agentMessageKey(stageName: string, turnIndex: number) {
@@ -1826,7 +1979,7 @@ class ApiRequestError extends Error {
 async function completeDirectorInterview(session: DirectorSession) {
   const idempotencyKey = `director-complete-${session.captureSessionId}`;
   let lastError: unknown;
-  for (let attempt = 1; attempt <= 8; attempt += 1) {
+  for (let attempt = 1; attempt <= 60; attempt += 1) {
     try {
       return await postJson(
         `/api/director-interviews/${session.captureSessionId}/complete`,
@@ -1835,8 +1988,8 @@ async function completeDirectorInterview(session: DirectorSession) {
       );
     } catch (error) {
       lastError = error;
-      if (!isRetryableCompleteError(error) || attempt === 8) break;
-      await sleep(isDeliveryPendingCompleteError(error) ? 750 : 350 * attempt);
+      if (!isRetryableCompleteError(error) || attempt === 60) break;
+      await sleep(isCompletionSettlingError(error) ? 1000 : 350 * attempt);
     }
   }
   if (lastError instanceof Error) {
@@ -1852,8 +2005,12 @@ function isRetryableCompleteError(error: unknown) {
   return error.status === 409 || error.status === 429 || error.status >= 500;
 }
 
-function isDeliveryPendingCompleteError(error: unknown) {
-  return error instanceof ApiRequestError && error.message.includes("delivery_pending");
+function isCompletionSettlingError(error: unknown) {
+  return (
+    error instanceof ApiRequestError &&
+    (error.message.includes("delivery_pending") ||
+      error.message.includes("extraction_pending"))
+  );
 }
 
 function sleep(ms: number) {

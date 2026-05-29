@@ -2,7 +2,10 @@ import "server-only";
 
 import { sql } from "drizzle-orm";
 import { getDb, setOrgContext } from "@/lib/db/client";
-import { directorSlotDefinitions } from "@/lib/interview/director/slot-schema";
+import {
+  directorSlotDefinitions,
+  isCaptureLevelDirectorSlot,
+} from "@/lib/interview/director/slot-schema";
 import {
   type CoverageStatus,
   type DirectorCoverage,
@@ -14,12 +17,18 @@ import {
 type SlotStateRow = {
   id: string;
   slot_path: string;
+  candidate_process_id: string | null;
   status: CoverageStatus;
   confidence: string | number | null;
   evidence_count: string | number | null;
   last_asked_at: Date | null;
   value: unknown;
   open_follow_ups: string | number | null;
+};
+
+type CandidateProcessRow = {
+  id: string;
+  proposed_name: string;
 };
 
 type CaptureRow = {
@@ -76,6 +85,7 @@ export async function getDirectorCoverage(
             SELECT
               s.id,
               s.slot_path,
+              s.candidate_process_id,
               s.status::text AS status,
               s.confidence,
               cardinality(s.evidence_ids) AS evidence_count,
@@ -90,7 +100,11 @@ export async function getDirectorCoverage(
                   AND f.status IN ('open', 'in_progress')
                   AND (
                     f.target_id = s.id
-                    OR f.context_json->>'slot_path' = s.slot_path
+                    OR (
+                      f.context_json->>'slot_path' = s.slot_path
+                      AND coalesce(f.context_json->>'candidate_process_id', '') =
+                        coalesce(s.candidate_process_id::text, '')
+                    )
                   )
               ) AS open_follow_ups
             FROM slot_states s
@@ -101,11 +115,37 @@ export async function getDirectorCoverage(
         ).rows
       : [];
 
-    const byPath = new Map(slotRows.map((row) => [row.slot_path, row]));
-    const slots = directorSlotDefinitions.map((definition) => {
-      const row = byPath.get(definition.path);
-      return {
+    const candidates = resolvedCaptureSessionId
+      ? (
+          await tx.execute<CandidateProcessRow>(sql`
+            SELECT id, proposed_name
+            FROM candidate_processes
+            WHERE org_id = ${orgId}
+              AND workspace_id = ${workspaceId}
+              AND capture_session_id = ${resolvedCaptureSessionId}
+              AND status = 'pending'
+            ORDER BY created_at ASC
+          `)
+        ).rows
+      : [];
+
+    const rowByScopeAndPath = new Map(
+      slotRows.map((row) => [
+        `${row.candidate_process_id ?? "global"}:${row.slot_path}`,
+        row,
+      ]),
+    );
+    const slots: DirectorCoverageSlot[] = [];
+
+    for (const definition of directorSlotDefinitions) {
+      if (!isCaptureLevelDirectorSlot(definition.path) && candidates.length > 0) {
+        continue;
+      }
+      const row = rowByScopeAndPath.get(`global:${definition.path}`);
+      slots.push({
         slotPath: definition.path,
+        candidateProcessId: null,
+        processName: null,
         label: definition.label,
         priority: definition.priority,
         status: row?.status ?? "empty",
@@ -114,8 +154,53 @@ export async function getDirectorCoverage(
         openFollowUps: toNumber(row?.open_follow_ups),
         lastAskedAt: row?.last_asked_at ?? null,
         value: row?.value ?? null,
-      };
-    });
+      });
+    }
+
+    for (const row of slotRows.filter(
+      (slotRow) =>
+        slotRow.candidate_process_id === null &&
+        !isCaptureLevelDirectorSlot(slotRow.slot_path) &&
+        candidates.length > 0,
+    )) {
+      const definition = directorSlotDefinitions.find(
+        (candidateDefinition) => candidateDefinition.path === row.slot_path,
+      );
+      if (!definition) continue;
+      slots.push({
+        slotPath: definition.path,
+        candidateProcessId: null,
+        processName: "Unscoped",
+        label: definition.label,
+        priority: definition.priority,
+        status: row.status,
+        confidence: toNumber(row.confidence),
+        evidenceCount: toNumber(row.evidence_count),
+        openFollowUps: toNumber(row.open_follow_ups),
+        lastAskedAt: row.last_asked_at ?? null,
+        value: row.value ?? null,
+      });
+    }
+
+    for (const candidate of candidates) {
+      for (const definition of directorSlotDefinitions) {
+        if (isCaptureLevelDirectorSlot(definition.path)) continue;
+        const row = rowByScopeAndPath.get(`${candidate.id}:${definition.path}`);
+        slots.push({
+          slotPath: definition.path,
+          candidateProcessId: candidate.id,
+          processName: candidate.proposed_name,
+          label: definition.label,
+          priority: definition.priority,
+          status: row?.status ?? "empty",
+          confidence: toNumber(row?.confidence),
+          evidenceCount: toNumber(row?.evidence_count),
+          openFollowUps: toNumber(row?.open_follow_ups),
+          lastAskedAt: row?.last_asked_at ?? null,
+          value: row?.value ?? null,
+        });
+      }
+    }
 
     const summary = summarizeCoverage(slots);
     const telemetry = await getPhase1TelemetryInTransaction(

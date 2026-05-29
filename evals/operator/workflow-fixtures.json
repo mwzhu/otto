@@ -1,0 +1,124 @@
+{
+  "version": 1,
+  "description": "Hand-labeled operator workflow graph-builder fixtures for the OPERATOR_CAPTURE_PLAN.md early eval gate.",
+  "minimums": {
+    "step_recall": 0.8,
+    "edge_recall": 0.8,
+    "order_correlation": 0.8,
+    "evidence_attribution_rate": 0.8,
+    "exception_recall": 0.8,
+    "workaround_recall": 0.8
+  },
+  "cases": [
+    {
+      "id": "voice-purchase-order",
+      "expected_steps": ["Open purchase request", "Check vendor and budget", "Submit approval"],
+      "expected_edge_count": 4,
+      "expected_exception_count": 0,
+      "expected_workaround_count": 0,
+      "pack": {
+        "processName": "Purchase order approval",
+        "transcriptSegments": [],
+        "screenEvents": [],
+        "documentChunks": [],
+        "provisionalSteps": [
+          { "id": "ps-1", "tsStartMs": 0, "tsEndMs": 10000, "title": "Open purchase request", "confidence": 0.82 },
+          { "id": "ps-2", "tsStartMs": 11000, "tsEndMs": 24000, "title": "Check vendor and budget", "confidence": 0.78 },
+          { "id": "ps-3", "tsStartMs": 25000, "tsEndMs": 34000, "title": "Submit approval", "confidence": 0.81 }
+        ],
+        "evidenceByWindow": [
+          { "id": "e-1", "startMs": 0, "endMs": 10000 },
+          { "id": "e-2", "startMs": 11000, "endMs": 24000 },
+          { "id": "e-3", "startMs": 25000, "endMs": 34000 }
+        ]
+      }
+    },
+    {
+      "id": "voice-return-authorization",
+      "expected_steps": ["Review return reason", "Check order history", "Create return authorization"],
+      "expected_edge_count": 4,
+      "expected_exception_count": 0,
+      "expected_workaround_count": 0,
+      "pack": {
+        "processName": "Return authorization",
+        "transcriptSegments": [
+          {
+            "id": "ts-1",
+            "text": "First we review the return reason. Then we check order history. After that we create return authorization.",
+            "startMs": 0,
+            "endMs": 30000,
+            "evidenceIds": ["e-1"]
+          }
+        ],
+        "screenEvents": [],
+        "documentChunks": [],
+        "provisionalSteps": []
+      }
+    },
+    {
+      "id": "screenshare-spreadsheet-workaround",
+      "expected_steps": ["Copy Approved Promo Terms To Spreadsheet"],
+      "expected_edge_count": 2,
+      "expected_exception_count": 0,
+      "expected_workaround_count": 1,
+      "pack": {
+        "processName": "Promo setup",
+        "transcriptSegments": [],
+        "screenEvents": [
+          {
+            "id": "se-1",
+            "tsMs": 12000,
+            "label": "Copy approved promo terms to spreadsheet",
+            "signalTags": ["copy_paste_between_systems", "alt_tab_to_spreadsheet"],
+            "evidenceIds": ["e-1"]
+          }
+        ],
+        "documentChunks": [],
+        "provisionalSteps": []
+      }
+    },
+    {
+      "id": "screenshare-waiting-exception",
+      "expected_steps": ["Refresh Portal Waiting For Status"],
+      "expected_edge_count": 2,
+      "expected_exception_count": 1,
+      "expected_workaround_count": 0,
+      "pack": {
+        "processName": "Claim status check",
+        "transcriptSegments": [],
+        "screenEvents": [
+          {
+            "id": "se-1",
+            "tsMs": 9000,
+            "label": "Refresh portal waiting for status",
+            "signalTags": ["waiting_or_refreshing"],
+            "evidenceIds": ["e-1"]
+          }
+        ],
+        "documentChunks": [],
+        "provisionalSteps": []
+      }
+    },
+    {
+      "id": "documented-sop-only",
+      "expected_steps": ["Open The Vendor Master Request"],
+      "expected_edge_count": 2,
+      "expected_exception_count": 0,
+      "expected_workaround_count": 0,
+      "pack": {
+        "processName": "Vendor master maintenance",
+        "transcriptSegments": [],
+        "screenEvents": [],
+        "documentChunks": [
+          {
+            "id": "dc-1",
+            "ordinal": 1,
+            "text": "Open the vendor master request. Verify tax ID and banking information before routing to finance.",
+            "evidenceIds": ["e-1"]
+          }
+        ],
+        "provisionalSteps": []
+      }
+    }
+  ]
+}

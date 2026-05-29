@@ -1,22 +1,65 @@
 import { notFound } from "next/navigation";
+import Link from "next/link";
 import { Card } from "@/components/ui/Card";
 import { Pill } from "@/components/ui/Pill";
-import { requirePageAuth } from "@/lib/auth/session";
-import { getCurrentWorkspace } from "@/lib/workspaces/current";
+import { Button } from "@/components/ui/Button";
+import { hasWorkspaceRole, requirePageAuth } from "@/lib/auth/session";
+import { getWorkspaceForProcess } from "@/lib/workspaces/current";
 import { getDirectorProcessDetail } from "@/lib/processes/queries";
+import {
+  getCurrentProcessGraph,
+  getProcessGraphVersion,
+  getProcessGraphVersions,
+} from "@/lib/processes/graph-queries";
+import { getProcessFollowUps } from "@/lib/processes/follow-up-queries";
+import WorkspaceClient from "./WorkspaceClient";
+import type { WorkspaceTab } from "@/lib/store/workspace";
 
 export default async function WorkspacePage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ tab?: string }>;
+  searchParams: Promise<{ tab?: string; version?: string }>;
 }) {
   const { id } = await params;
+  const query = await searchParams;
   const auth = await requirePageAuth();
-  const workspace = await getCurrentWorkspace(auth);
+  const workspace = await getWorkspaceForProcess(auth, id);
   if (!workspace) notFound();
-  const process = await getDirectorProcessDetail(auth.orgId, workspace.id, id);
+  const canApproveDraft = await hasWorkspaceRole(auth, workspace.id, ["director"]);
+  const selectedVersionId = query.version;
+  const [process, graph, graphVersions, followUps] = await Promise.all([
+    getDirectorProcessDetail(auth.orgId, workspace.id, id),
+    selectedVersionId
+      ? getProcessGraphVersion(auth.orgId, workspace.id, id, selectedVersionId)
+      : getCurrentProcessGraph(auth.orgId, workspace.id, id),
+    getProcessGraphVersions(auth.orgId, workspace.id, id),
+    getProcessFollowUps(auth.orgId, workspace.id, id),
+  ]);
   if (!process) notFound();
+  if (graph) {
+    const counts: Partial<Record<WorkspaceTab, number>> = {
+      steps: graph.nodes.filter((node) => node.type === "task").length,
+      impact: 0,
+      insights: graph.summary ? 1 : graph.nodes.length > 0 ? 6 : 0,
+      risk:
+        graph.nodes.filter((node) => node.type === "exception").length +
+        followUps.filter(isRiskFollowUp).length,
+    };
+    return (
+      <WorkspaceClient
+        workspaceId={workspace.id}
+        processId={id}
+        graph={graph}
+        graphVersions={graphVersions}
+        followUps={followUps}
+        initialTab="summary"
+        counts={counts}
+        canApproveDraft={canApproveDraft}
+      />
+    );
+  }
 
   return (
     <main className="mx-auto grid w-full max-w-[1180px] grid-cols-[minmax(0,1fr)_360px] gap-6 px-8 py-8">
@@ -32,6 +75,35 @@ export default async function WorkspacePage({
           <p className="mt-3 text-[13px] leading-relaxed text-ink-secondary">
             {process.what_it_involves}
           </p>
+        </Card>
+        <Card className="p-5">
+          <h2 className="text-[14px] font-semibold tracking-tight text-ink">
+            Build the workflow map
+          </h2>
+          <p className="mt-2 text-[12.5px] leading-relaxed text-ink-secondary">
+            Add operator evidence to turn this process into a versioned workflow
+            diagram with steps, systems, exceptions, workarounds, and evidence.
+          </p>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <Link href={`/process/${id}/capture/voice`}>
+              <Button size="sm">Start Voice Interview</Button>
+            </Link>
+            <Link href={`/process/${id}/capture/screenshare`}>
+              <Button size="sm" variant="secondary">
+                Share Screen
+              </Button>
+            </Link>
+            <Link href={`/process/${id}/capture/upload-video`}>
+              <Button size="sm" variant="ghost">
+                Upload Video
+              </Button>
+            </Link>
+            <Link href={`/process/${id}/capture/upload-document`}>
+              <Button size="sm" variant="ghost">
+                Upload SOP
+              </Button>
+            </Link>
+          </div>
         </Card>
         <Card className="p-5">
           <h2 className="text-[14px] font-semibold tracking-tight text-ink">
@@ -83,5 +155,16 @@ export default async function WorkspacePage({
         </Card>
       </aside>
     </main>
+  );
+}
+
+function isRiskFollowUp(followUp: Awaited<ReturnType<typeof getProcessFollowUps>>[number]) {
+  const reason = followUp.context_json.reason;
+  return (
+    followUp.task_type === "redaction_failure" ||
+    followUp.task_type === "failed_stage" ||
+    followUp.task_type === "weak_merge" ||
+    (typeof reason === "string" &&
+      /contradiction|gap|low_confidence|redaction/i.test(reason))
   );
 }

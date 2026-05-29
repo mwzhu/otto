@@ -346,45 +346,6 @@ describe("LiveKit director room adapter", () => {
       ),
     ).rejects.toThrow("DEEPGRAM_API_KEY");
 
-    await expect(
-      createDirectorRoomToken(
-        {
-          captureSessionId: "bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb",
-          participantIdentity: "user-placeholder-strict",
-          language: "en",
-        },
-        {
-          env: {
-            LIVEKIT_URL: "wss://otto.livekit.cloud",
-            LIVEKIT_API_KEY: "key",
-            LIVEKIT_API_SECRET: "secret",
-            LIVEKIT_AGENT_SERVICE_TOKEN: "service-token",
-            OTTO_INTERNAL_API_BASE_URL: "https://otto.example.com",
-            DATABASE_URL: "postgres://app:app@localhost:5432/otto",
-            DATABASE_SERVICE_URL: "postgres://service:service@localhost:5432/otto",
-            OTTO_USE_LIVEKIT_INFERENCE: true,
-            OTTO_DIRECTOR_PREFLIGHT_STRICT: true,
-            OTTO_DIRECTOR_PLANNER_RUNTIME: " next ",
-            OTTO_VENDOR_PRIVACY_ACK: true,
-            OTTO_DEEPGRAM_NO_STORE_ACK: true,
-            OTTO_CARTESIA_NO_RETENTION_ACK: true,
-            OTTO_ANTHROPIC_RAW_LOGGING_OFF_ACK: true,
-            ANTHROPIC_API_KEY: "anthropic",
-          } as never,
-          roomClientFactory: () => ({
-            listRooms: vi.fn(async () => []),
-            createRoom: vi.fn(async () => ({})),
-            updateRoomMetadata: vi.fn(async () => ({})),
-          }),
-          dispatchClientFactory: () => ({
-            listDispatch: vi.fn(async () => []),
-            createDispatch: vi.fn(async () => ({ id: "dispatch-strict" })),
-          }),
-          mintToken: vi.fn(async () => "join-token"),
-        },
-      ),
-    ).rejects.toThrow("OTTO_DIRECTOR_PLANNER_RUNTIME=python");
-
     const room = await createDirectorRoomToken(
       {
         captureSessionId: "bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb",
@@ -757,7 +718,7 @@ describe("LiveKit director room adapter", () => {
                 jobs: [
                   {
                     state: {
-                      endedAt: 1779824761946936964n,
+                      endedAt: BigInt("1779824761946936964"),
                     },
                   },
                 ],

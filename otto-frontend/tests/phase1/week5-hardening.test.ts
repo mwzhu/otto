@@ -169,6 +169,32 @@ describe("Week 5 hardening contracts", () => {
     expect(parsed.text).not.toContain("Promotion Management");
   });
 
+  test("public storage text uploads parse without external document vendors", async () => {
+    const fetchMock = vi.fn(async (url: string | URL | Request) => {
+      expect(String(url)).toBe("https://files.example.test/director_test2.txt");
+      return new Response(
+        [
+          "Process: Forecast Submission",
+          "Owner: Finance Operations",
+          "Systems: Google Sheets, Salesforce",
+        ].join("\n"),
+        { status: 200, headers: { "content-type": "text/plain" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const parsed = await parseDocument({
+      filename: "director_test2.txt",
+      mimeType: "text/plain",
+      storageKey: "org/test/director_test2.txt",
+      storageUrl: "https://files.example.test/director_test2.txt",
+    });
+
+    expect(parsed.metadata.parser).toBe("local-text");
+    expect(parsed.text).toContain("Forecast Submission");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   test("document upload validation rejects unsupported and oversized documents", () => {
     expect(() =>
       validateDocumentUploadMetadata({
@@ -187,6 +213,15 @@ describe("Week 5 hardening contracts", () => {
         artifactType: "document",
       }),
     ).toThrow(/Document is too large/);
+
+    expect(
+      validateDocumentUploadMetadata({
+        filename: "walkthrough.webm",
+        mimeType: "video/webm",
+        sizeBytes: 250 * 1024 * 1024,
+        artifactType: "video",
+      }),
+    ).toEqual({ mimeType: "video/webm" });
 
     expect(() =>
       validateDocumentUploadMetadata({

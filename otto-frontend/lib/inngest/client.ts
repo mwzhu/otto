@@ -1,6 +1,9 @@
 import { Inngest } from "inngest";
 
-export const inngest = new Inngest({ id: "otto-phase-1" });
+export const inngest = new Inngest({
+  id: "otto-phase-1",
+  isDev: process.env.NODE_ENV !== "production",
+});
 
 export const artifactUploadedEventName = "artifact.uploaded.v1";
 export const directorInterviewCompletedEventName =

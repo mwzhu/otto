@@ -465,18 +465,34 @@ export function chunkDocument(
   return chunkDocumentInternal(text, targetChars, overlapChars);
 }
 
-async function extractDocumentInventory(text: string) {
+export async function extractDocumentInventory(text: string) {
   const fallback = heuristicDocumentExtraction(text);
-  const result = await structured<DocumentInventoryExtraction>({
-    prompt_template_id: "document.extract-claims",
-    prompt_template_version: "1",
-    schema_name: "document-inventory-extraction",
-    schema: documentInventoryExtractionSchema,
-    static_input: buildDocumentExtractionStaticInput(),
-    input: text,
-    mock: fallback,
-  });
-  return result.value.candidate_processes
+  try {
+    const result = await structured<DocumentInventoryExtraction>({
+      prompt_template_id: "document.extract-claims",
+      prompt_template_version: "1",
+      schema_name: "document-inventory-extraction",
+      schema: documentInventoryExtractionSchema,
+      static_input: buildDocumentExtractionStaticInput(),
+      input: text,
+      anthropic_tool: {
+        name: "emit_document_inventory",
+        description:
+          "Emit evidence-backed process inventory candidates from the provided document chunk.",
+        input_schema: documentInventoryAnthropicToolSchema,
+      },
+      mock: fallback,
+    });
+    return normalizeDocumentCandidates(result.value);
+  } catch (error) {
+    const fallbackCandidates = normalizeDocumentCandidates(fallback);
+    if (fallbackCandidates.length > 0) return fallbackCandidates;
+    throw error;
+  }
+}
+
+function normalizeDocumentCandidates(extraction: DocumentInventoryExtraction) {
+  return extraction.candidate_processes
     .map((candidate) => ({
       processName: normalizeProcessName(candidate.proposed_name),
       ownerRole: normalizeRoleName(candidate.roles[0] ?? candidate.proposed_function),
@@ -492,50 +508,75 @@ async function extractDocumentInventory(text: string) {
 export function buildDocumentExtractionStaticInput() {
   return [
     "Extract director-layer process inventory from this document chunk.",
-    "Return only evidence-backed candidates, systems, roles, pain points, and risks.",
-    "Return only valid JSON matching the document inventory extraction schema.",
+    "Return only evidence-backed business processes. Do not infer unstated systems, roles, or risks.",
+    "Prefer concise source wording. Fewer high-quality candidates are better than many guesses.",
+    "Each candidate should include any stated systems, owner roles, cadence, pain points, and risks.",
     documentExtractionStaticContract,
   ].join("\n\n");
 }
 
 const documentExtractionStaticContract = `
-Document inventory JSON schema:
-{
-  "type": "object",
-  "required": ["candidate_processes"],
-  "properties": {
-    "candidate_processes": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["proposed_name", "confidence"],
-        "properties": {
-          "proposed_name": {"type": "string", "description": "Director-layer process or workflow name."},
-          "proposed_function": {"type": "string", "description": "Business function, owner role, or department."},
-          "frequency": {"type": "string", "description": "Cadence such as daily, weekly, monthly, or volume phrase."},
-          "complexity_hint": {"type": "string", "description": "Manual handoffs, exception handling, fragmented systems, or unclear ownership."},
-          "systems": {"type": "array", "items": {"type": "string"}},
-          "roles": {"type": "array", "items": {"type": "string"}},
-          "pain_points": {"type": "array", "items": {"type": "string"}},
-          "risks": {"type": "array", "items": {"type": "string"}},
-          "confidence": {"type": "number", "minimum": 0, "maximum": 1}
-        }
-      }
-    }
-  }
-}
-Extraction rules:
-- Extract only process inventory evidence stated in the chunk.
-- A candidate process should be a business workflow, operating process, approval process, intake process, reconciliation process, reporting process, or documented SOP.
-- Systems include named SaaS tools, ERPs, CRMs, spreadsheets, shared drives, ticket queues, chat tools, data warehouses, and shadow systems.
-- Roles include accountable owners, participating teams, approval roles, handoff targets, and named job titles.
-- Pain points include manual cleanup, duplicate entry, approval delays, rework, unclear ownership, fragmented spreadsheets, missing data, and exception routing.
-- Risks include single points of failure, one-person dependencies, tribal knowledge, compliance exposure, audit gaps, source-of-truth ambiguity, and fragile workarounds.
-- If evidence is thin, return fewer candidates with lower confidence; do not fill gaps.
-- Do not infer systems or roles from generic words unless a named system or explicit team appears.
-- Preserve source wording as much as possible.
-- Return JSON only. Do not include prose, markdown, comments, or citations outside the JSON.
-`.repeat(5);
+Candidate process definition:
+- Business workflow, operating process, approval process, intake process, reconciliation process, reporting process, or documented SOP.
+- Not a department, generic responsibility, isolated system name, or vague activity.
+
+Field rules:
+- proposed_name: specific process/workflow name.
+- proposed_function: stated business function, owner team, or department.
+- frequency: stated cadence only.
+- complexity_hint: stated manual handoffs, exception handling, fragmented systems, unclear ownership, or similar.
+- systems: named SaaS tools, ERPs, CRMs, spreadsheets, shared drives, ticket queues, chat tools, data warehouses, and shadow systems.
+- roles: accountable owners, participating teams, approval roles, handoff targets, and named job titles.
+- pain_points: stated manual cleanup, duplicate entry, approval delays, rework, unclear ownership, fragmented spreadsheets, missing data, or exception routing.
+- risks: stated single points of failure, one-person dependencies, tribal knowledge, compliance exposure, audit gaps, source-of-truth ambiguity, or fragile workarounds.
+`;
+
+const documentInventoryAnthropicToolSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["candidate_processes"],
+  properties: {
+    candidate_processes: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "proposed_name",
+          "systems",
+          "roles",
+          "pain_points",
+          "risks",
+          "confidence",
+        ],
+        properties: {
+          proposed_name: {
+            type: "string",
+            description: "Director-layer business process or workflow name.",
+          },
+          proposed_function: {
+            type: "string",
+            description: "Business function, owner role, or department.",
+          },
+          frequency: {
+            type: "string",
+            description: "Stated cadence such as daily, weekly, monthly, or volume phrase.",
+          },
+          complexity_hint: {
+            type: "string",
+            description:
+              "Stated manual handoffs, exception handling, fragmented systems, or unclear ownership.",
+          },
+          systems: { type: "array", items: { type: "string" } },
+          roles: { type: "array", items: { type: "string" } },
+          pain_points: { type: "array", items: { type: "string" } },
+          risks: { type: "array", items: { type: "string" } },
+          confidence: { type: "number", minimum: 0, maximum: 1 },
+        },
+      },
+    },
+  },
+} as const;
 
 function heuristicDocumentExtraction(text: string): DocumentInventoryExtraction {
   const sections = text

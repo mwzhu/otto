@@ -1,7 +1,14 @@
 import { getServerEnv } from "@/lib/env";
 import { ApiError, apiError, apiJson } from "@/lib/http/json";
-import { readLocalUpload, writeLocalUpload } from "@/lib/adapters/local-upload";
-import { MAX_DOCUMENT_UPLOAD_BYTES } from "@/lib/documents/validation";
+import {
+  readLocalUpload,
+  writeLocalUpload,
+  writeLocalUploadStream,
+} from "@/lib/adapters/local-upload";
+import {
+  MAX_DOCUMENT_UPLOAD_BYTES,
+  MAX_SCREEN_RECORDING_UPLOAD_BYTES,
+} from "@/lib/documents/validation";
 
 export const runtime = "nodejs";
 
@@ -9,19 +16,38 @@ export async function PUT(request: Request) {
   try {
     assertDevOnly();
     const key = requiredKey(request);
+    const contentType =
+      request.headers.get("content-type") ?? "application/octet-stream";
+    const maxBytes = maxLocalUploadBytes(contentType);
     const contentLength = Number(request.headers.get("content-length") ?? 0);
-    if (contentLength > MAX_DOCUMENT_UPLOAD_BYTES) {
-      throw new ApiError(413, "bad_request", "Document is too large.");
+    if (contentLength > maxBytes) {
+      throw tooLargeError(contentType);
     }
-    const bytes = await request.arrayBuffer();
-    if (bytes.byteLength > MAX_DOCUMENT_UPLOAD_BYTES) {
-      throw new ApiError(413, "bad_request", "Document is too large.");
+    if (request.body) {
+      try {
+        await writeLocalUploadStream({
+          key,
+          stream: request.body,
+          contentType,
+          maxBytes,
+        });
+      } catch (error) {
+        if (error instanceof Error && error.message === "local_upload_size_limit_exceeded") {
+          throw tooLargeError(contentType);
+        }
+        throw error;
+      }
+    } else {
+      const bytes = await request.arrayBuffer();
+      if (bytes.byteLength > maxBytes) {
+        throw tooLargeError(contentType);
+      }
+      await writeLocalUpload({
+        key,
+        bytes,
+        contentType,
+      });
     }
-    await writeLocalUpload({
-      key,
-      bytes,
-      contentType: request.headers.get("content-type") ?? "application/octet-stream",
-    });
     return apiJson({ ok: true });
   } catch (error) {
     return apiError(error);
@@ -56,4 +82,29 @@ function assertDevOnly() {
   if (env.NODE_ENV === "production") {
     throw new ApiError(404, "not_found", "Not found.");
   }
+}
+
+function maxLocalUploadBytes(contentType: string) {
+  return contentType.toLowerCase().startsWith("video/")
+    ? MAX_SCREEN_RECORDING_UPLOAD_BYTES
+    : MAX_DOCUMENT_UPLOAD_BYTES;
+}
+
+function tooLargeError(contentType: string) {
+  if (contentType.toLowerCase().startsWith("video/")) {
+    return new ApiError(
+      413,
+      "bad_request",
+      `Screen recording is too large. Maximum supported size is ${Math.round(
+        MAX_SCREEN_RECORDING_UPLOAD_BYTES / 1024 / 1024,
+      )}MB.`,
+    );
+  }
+  return new ApiError(
+    413,
+    "bad_request",
+    `Document is too large. Maximum supported size is ${Math.round(
+      MAX_DOCUMENT_UPLOAD_BYTES / 1024 / 1024,
+    )}MB.`,
+  );
 }

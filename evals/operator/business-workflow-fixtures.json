@@ -1,0 +1,226 @@
+{
+  "version": 1,
+  "description": "Hand-labeled semantic workflow fixtures based on frontend-mockups/map1.png through map7.png. These fixtures score business topology, not capture mechanics; later maps provide supporting impact, insight, and risk vocabulary.",
+  "minimums": {
+    "business_step_recall": 0.8,
+    "decision_recall": 1,
+    "wait_recall": 1,
+    "exception_loop_recall": 1,
+    "technical_artifact_leakage_rate": 0,
+    "hallucinated_evidence_id_count": 0,
+    "unresolved_topology_target_count": 0
+  },
+  "cases": [
+    {
+      "id": "promotion-management-map1-3",
+      "map_sources": ["frontend-mockups/map1.png", "frontend-mockups/map2.png", "frontend-mockups/map3.png", "frontend-mockups/map4.png", "frontend-mockups/map5.png", "frontend-mockups/map6.png", "frontend-mockups/map7.png"],
+      "reference_signals": [
+        "Identify Promo Opportunity",
+        "Planning Alignment",
+        "Supplier Negotiation",
+        "Manual Re-Entry Data Bridge",
+        "Supplier Delay Tracking Gap",
+        "coordinator unavailability",
+        "no clear handoff owner"
+      ],
+      "expected": {
+        "key_phrases": [
+          "align promo proposal category team",
+          "negotiate supplier funding",
+          "supplier funding confirmed",
+          "wait supplier funding approval",
+          "all approvals obtained",
+          "revise promo plan feedback",
+          "manually enter promo system",
+          "data entry accurate",
+          "resolve data errors resubmit",
+          "brief marketing store ops",
+          "wait promo launch date",
+          "execute promotion stores marketing",
+          "evaluate performance document learnings"
+        ],
+        "decision_count": 3,
+        "wait_count": 2,
+        "exception_count": 2,
+        "loop_count": 3,
+        "handoff_count": 2
+      },
+      "evidenceById": {
+        "ev-promo-1": "A supplier offer or category proposal is received. I align on the promo proposal with the category manager before negotiating funding.",
+        "ev-promo-2": "Next I negotiate the supplier funding agreement. If supplier funding is not confirmed, we wait for supplier funding approval and then recheck.",
+        "ev-promo-3": "After funding is confirmed, all approvals must be obtained. If changes are requested, I revise the promo plan per feedback and route it back for approval.",
+        "ev-promo-4": "When all approvals are obtained, I manually enter the promo into the promo system and check whether the data entry is accurate.",
+        "ev-promo-5": "If errors are found, I resolve data errors and resubmit. Once correct, I brief marketing and store ops.",
+        "ev-promo-6": "We wait for the promo launch date, execute the promotion in stores and marketing, then evaluate performance and document learnings."
+      },
+      "model": {
+        "processName": "Promotion Management",
+        "steps": [
+          {
+            "id": "proposal-received",
+            "type": "task",
+            "title": "Supplier offer or category proposal received",
+            "actorRole": "Coordinator",
+            "systemNames": ["Email", "Shared documents"],
+            "citations": [{ "evidenceId": "ev-promo-1", "sourceType": "transcript", "quote": "supplier offer or category proposal is received", "grounding": "quoted" }],
+            "grounding": "quoted"
+          },
+          {
+            "id": "align-proposal",
+            "type": "task",
+            "title": "Align on promo proposal with category team",
+            "actorRole": "Coordinator / Category Manager",
+            "systemNames": ["Shared documents"],
+            "citations": [{ "evidenceId": "ev-promo-1", "sourceType": "transcript", "quote": "align on the promo proposal with the category manager", "grounding": "quoted" }],
+            "grounding": "quoted"
+          },
+          {
+            "id": "negotiate-funding",
+            "type": "task",
+            "title": "Negotiate supplier funding agreement",
+            "actorRole": "Coordinator / Supplier",
+            "systemNames": ["Email", "Shared documents"],
+            "citations": [{ "evidenceId": "ev-promo-2", "sourceType": "transcript", "quote": "negotiate the supplier funding agreement", "grounding": "quoted" }],
+            "grounding": "quoted"
+          },
+          {
+            "id": "funding-confirmed",
+            "type": "decision",
+            "title": "Supplier funding confirmed?",
+            "actorRole": "Coordinator",
+            "citations": [{ "evidenceId": "ev-promo-2", "sourceType": "transcript", "quote": "If supplier funding is not confirmed", "grounding": "quoted" }],
+            "grounding": "quoted"
+          },
+          {
+            "id": "wait-funding",
+            "type": "wait",
+            "title": "Wait for supplier funding approval",
+            "actorRole": "Supplier",
+            "citations": [{ "evidenceId": "ev-promo-2", "sourceType": "transcript", "quote": "wait for supplier funding approval", "grounding": "quoted" }],
+            "grounding": "quoted"
+          },
+          {
+            "id": "approvals-obtained",
+            "type": "decision",
+            "title": "All approvals obtained?",
+            "actorRole": "Coordinator",
+            "citations": [{ "evidenceId": "ev-promo-3", "sourceType": "transcript", "quote": "all approvals must be obtained", "grounding": "quoted" }],
+            "grounding": "quoted"
+          },
+          {
+            "id": "revise-plan",
+            "type": "exception",
+            "title": "Revise promo plan per feedback",
+            "actorRole": "Coordinator",
+            "citations": [{ "evidenceId": "ev-promo-3", "sourceType": "transcript", "quote": "revise the promo plan per feedback", "grounding": "quoted" }],
+            "grounding": "quoted"
+          },
+          {
+            "id": "enter-promo",
+            "type": "task",
+            "title": "Manually enter promo into promo system",
+            "actorRole": "Coordinator",
+            "systemNames": ["Promo system"],
+            "outputs": [{ "name": "Promotion record", "evidenceIds": ["ev-promo-4"] }],
+            "citations": [{ "evidenceId": "ev-promo-4", "sourceType": "transcript", "quote": "manually enter the promo into the promo system", "grounding": "quoted" }],
+            "grounding": "quoted"
+          },
+          {
+            "id": "data-entry-accurate",
+            "type": "decision",
+            "title": "Data entry accurate?",
+            "actorRole": "Coordinator",
+            "citations": [{ "evidenceId": "ev-promo-4", "sourceType": "transcript", "quote": "check whether the data entry is accurate", "grounding": "quoted" }],
+            "grounding": "quoted"
+          },
+          {
+            "id": "resolve-errors",
+            "type": "exception",
+            "title": "Resolve data errors and resubmit",
+            "actorRole": "Coordinator",
+            "citations": [{ "evidenceId": "ev-promo-5", "sourceType": "transcript", "quote": "resolve data errors and resubmit", "grounding": "quoted" }],
+            "grounding": "quoted"
+          },
+          {
+            "id": "brief-teams",
+            "type": "handoff",
+            "title": "Brief marketing and store ops",
+            "actorRole": "Coordinator",
+            "outputs": [{ "name": "Launch brief", "evidenceIds": ["ev-promo-5"] }],
+            "citations": [{ "evidenceId": "ev-promo-5", "sourceType": "transcript", "quote": "brief marketing and store ops", "grounding": "quoted" }],
+            "grounding": "quoted"
+          },
+          {
+            "id": "wait-launch",
+            "type": "wait",
+            "title": "Wait for promo launch date",
+            "actorRole": "Coordinator",
+            "citations": [{ "evidenceId": "ev-promo-6", "sourceType": "transcript", "quote": "wait for the promo launch date", "grounding": "quoted" }],
+            "grounding": "quoted"
+          },
+          {
+            "id": "execute-promotion",
+            "type": "handoff",
+            "title": "Execute promotion in stores and marketing",
+            "actorRole": "Marketing / Store Operations",
+            "systemNames": ["Store operations", "Marketing channels"],
+            "citations": [{ "evidenceId": "ev-promo-6", "sourceType": "transcript", "quote": "execute the promotion in stores and marketing", "grounding": "quoted" }],
+            "grounding": "quoted"
+          },
+          {
+            "id": "evaluate-performance",
+            "type": "task",
+            "title": "Evaluate performance and document learnings",
+            "actorRole": "Coordinator / Analytics Team",
+            "systemNames": ["Analytics"],
+            "citations": [{ "evidenceId": "ev-promo-6", "sourceType": "transcript", "quote": "evaluate performance and document learnings", "grounding": "quoted" }],
+            "grounding": "quoted"
+          }
+        ],
+        "edges": [
+          { "id": "e1", "sourceId": "proposal-received", "targetId": "align-proposal", "type": "sequence", "citations": [{ "evidenceId": "ev-promo-1", "sourceType": "transcript", "quote": "supplier offer or category proposal is received", "grounding": "quoted" }], "grounding": "quoted" },
+          { "id": "e2", "sourceId": "align-proposal", "targetId": "negotiate-funding", "type": "sequence", "citations": [{ "evidenceId": "ev-promo-1", "sourceType": "transcript", "quote": "before negotiating funding", "grounding": "quoted" }], "grounding": "quoted" },
+          { "id": "e3", "sourceId": "negotiate-funding", "targetId": "funding-confirmed", "type": "sequence", "citations": [{ "evidenceId": "ev-promo-2", "sourceType": "transcript", "quote": "negotiate the supplier funding agreement", "grounding": "quoted" }], "grounding": "quoted" },
+          { "id": "e4", "sourceId": "funding-confirmed", "targetId": "approvals-obtained", "type": "conditional", "label": "Yes", "condition": "Funding confirmed", "citations": [{ "evidenceId": "ev-promo-3", "sourceType": "transcript", "quote": "After funding is confirmed", "grounding": "quoted" }], "grounding": "quoted" },
+          { "id": "e5", "sourceId": "funding-confirmed", "targetId": "wait-funding", "type": "conditional", "label": "No", "condition": "Awaiting confirmation", "citations": [{ "evidenceId": "ev-promo-2", "sourceType": "transcript", "quote": "If supplier funding is not confirmed", "grounding": "quoted" }], "grounding": "quoted" },
+          { "id": "e6", "sourceId": "wait-funding", "targetId": "funding-confirmed", "type": "loop", "label": "Recheck", "citations": [{ "evidenceId": "ev-promo-2", "sourceType": "transcript", "quote": "then recheck", "grounding": "quoted" }], "grounding": "quoted" },
+          { "id": "e7", "sourceId": "approvals-obtained", "targetId": "enter-promo", "type": "conditional", "label": "All approved", "condition": "All approvals obtained", "citations": [{ "evidenceId": "ev-promo-4", "sourceType": "transcript", "quote": "When all approvals are obtained", "grounding": "quoted" }], "grounding": "quoted" },
+          { "id": "e8", "sourceId": "approvals-obtained", "targetId": "revise-plan", "type": "conditional", "label": "Changes requested", "condition": "Changes requested", "citations": [{ "evidenceId": "ev-promo-3", "sourceType": "transcript", "quote": "If changes are requested", "grounding": "quoted" }], "grounding": "quoted" },
+          { "id": "e9", "sourceId": "revise-plan", "targetId": "approvals-obtained", "type": "loop", "label": "Route back", "citations": [{ "evidenceId": "ev-promo-3", "sourceType": "transcript", "quote": "route it back for approval", "grounding": "quoted" }], "grounding": "quoted" },
+          { "id": "e10", "sourceId": "enter-promo", "targetId": "data-entry-accurate", "type": "sequence", "citations": [{ "evidenceId": "ev-promo-4", "sourceType": "transcript", "quote": "check whether the data entry is accurate", "grounding": "quoted" }], "grounding": "quoted" },
+          { "id": "e11", "sourceId": "data-entry-accurate", "targetId": "brief-teams", "type": "conditional", "label": "Correct", "condition": "Data entry correct", "citations": [{ "evidenceId": "ev-promo-5", "sourceType": "transcript", "quote": "Once correct", "grounding": "quoted" }], "grounding": "quoted" },
+          { "id": "e12", "sourceId": "data-entry-accurate", "targetId": "resolve-errors", "type": "conditional", "label": "Errors found", "condition": "Errors found", "citations": [{ "evidenceId": "ev-promo-5", "sourceType": "transcript", "quote": "If errors are found", "grounding": "quoted" }], "grounding": "quoted" },
+          { "id": "e13", "sourceId": "resolve-errors", "targetId": "data-entry-accurate", "type": "loop", "label": "Resubmit", "citations": [{ "evidenceId": "ev-promo-5", "sourceType": "transcript", "quote": "resubmit", "grounding": "quoted" }], "grounding": "quoted" },
+          { "id": "e14", "sourceId": "brief-teams", "targetId": "wait-launch", "type": "sequence", "citations": [{ "evidenceId": "ev-promo-6", "sourceType": "transcript", "quote": "wait for the promo launch date", "grounding": "quoted" }], "grounding": "quoted" },
+          { "id": "e15", "sourceId": "wait-launch", "targetId": "execute-promotion", "type": "sequence", "citations": [{ "evidenceId": "ev-promo-6", "sourceType": "transcript", "quote": "execute the promotion in stores and marketing", "grounding": "quoted" }], "grounding": "quoted" },
+          { "id": "e16", "sourceId": "execute-promotion", "targetId": "evaluate-performance", "type": "handoff", "label": "Performance review", "citations": [{ "evidenceId": "ev-promo-6", "sourceType": "transcript", "quote": "then evaluate performance", "grounding": "quoted" }], "grounding": "quoted" }
+        ],
+        "unresolvedQuestions": [],
+        "diagnostics": []
+      }
+    },
+    {
+      "id": "technical-artifact-negative",
+      "map_sources": [],
+      "expected_issue_codes": ["technical_capture_artifact", "decision_missing_branch"],
+      "evidenceById": {
+        "ev-tech-1": "Keyframe candidate 1 from operator-capture.webm. OCR pending."
+      },
+      "model": {
+        "processName": "Promotion Management",
+        "steps": [
+          {
+            "id": "technical-step",
+            "type": "decision",
+            "title": "Keyframe candidate 1 from operator-capture.webm",
+            "citations": [{ "evidenceId": "ev-tech-1", "sourceType": "visual_observation", "quote": "Keyframe candidate 1 from operator-capture.webm", "grounding": "quoted" }],
+            "grounding": "quoted"
+          }
+        ],
+        "edges": [],
+        "unresolvedQuestions": [],
+        "diagnostics": []
+      }
+    }
+  ]
+}

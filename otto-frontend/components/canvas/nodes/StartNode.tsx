@@ -21,6 +21,7 @@ export function StartNode({ data }: NodeProps<{ title: string }>) {
         </span>
       </div>
       <Handle type="source" position={Position.Bottom} className="!opacity-0" />
+      <Handle type="source" position={Position.Right} id="right" className="!opacity-0" />
     </div>
   );
 }

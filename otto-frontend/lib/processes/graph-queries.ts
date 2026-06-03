@@ -29,6 +29,20 @@ export type ProcessGraphVersionSummary = {
   created_at: string;
 };
 
+export type WorkflowSemanticModelStatus = {
+  id: string;
+  cache_status: string;
+  semantic_model_hash: string;
+  evidence_pack_hash: string;
+  model: string;
+  diagnostics: Array<{
+    code: string;
+    message: string;
+    relatedEvidenceIds?: string[];
+  }>;
+  created_at: string;
+};
+
 type NodeRow = {
   id: string;
   parent_node_id: string | null;
@@ -77,6 +91,7 @@ type EdgeRow = {
   condition: string | null;
   is_exception_path: boolean;
   evidence_ids: string[];
+  metadata_json: unknown;
 };
 
 export async function getCurrentProcessGraph(
@@ -149,6 +164,51 @@ export async function getProcessGraphVersions(
     `);
   });
   return result.rows;
+}
+
+export async function getLatestWorkflowSemanticModelStatus(
+  orgId: string,
+  workspaceId: string,
+  processId: string,
+): Promise<WorkflowSemanticModelStatus | null> {
+  const result = await getDb().transaction(async (tx) => {
+    await setOrgContext(tx, orgId);
+    return tx.execute<{
+      id: string;
+      cache_status: string;
+      semantic_model_hash: string;
+      evidence_pack_hash: string;
+      model: string;
+      diagnostics_json: unknown;
+      created_at: string;
+    }>(sql`
+      SELECT
+        id,
+        cache_status,
+        semantic_model_hash,
+        evidence_pack_hash,
+        model,
+        diagnostics_json,
+        created_at::text
+      FROM workflow_semantic_models
+      WHERE org_id = ${orgId}
+        AND workspace_id = ${workspaceId}
+        AND process_id = ${processId}
+      ORDER BY created_at DESC
+      LIMIT 1
+    `);
+  });
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    id: row.id,
+    cache_status: row.cache_status,
+    semantic_model_hash: row.semantic_model_hash,
+    evidence_pack_hash: row.evidence_pack_hash,
+    model: row.model,
+    diagnostics: validSemanticDiagnostics(row.diagnostics_json),
+    created_at: row.created_at,
+  };
 }
 
 async function graphFromVersion(
@@ -354,6 +414,9 @@ async function loadGraphNodes(
       workarounds: validWorkaroundRows(row.workaround_rows),
       variants: validVariantRows(row.variant_rows),
       source_provisional_step_ids: sourceProvisionalStepIds(row.metadata_json),
+      semantic_step_id: stringMetadata(row.metadata_json, "semantic_step_id"),
+      semantic_grounding: groundingMetadata(row.metadata_json),
+      follow_up_question: stringMetadata(row.metadata_json, "follow_up_question"),
     },
   }));
 }
@@ -374,7 +437,8 @@ async function loadGraphEdges(
         label,
         condition,
         is_exception_path,
-        top_evidence_ids AS evidence_ids
+        top_evidence_ids AS evidence_ids,
+        metadata_json
       FROM process_edges
       WHERE org_id = ${orgId}
         AND workspace_id = ${workspaceId}
@@ -392,6 +456,8 @@ async function loadGraphEdges(
     condition: row.condition ?? undefined,
     is_exception_path: row.is_exception_path,
     evidence_ids: row.evidence_ids ?? [],
+    semantic_edge_id: stringMetadata(row.metadata_json, "semantic_edge_id"),
+    semantic_grounding: groundingMetadata(row.metadata_json),
   }));
 }
 
@@ -434,6 +500,29 @@ function validWarnings(value: unknown): NonNullable<ProcessGraph["warnings"]> {
     }));
 }
 
+function validSemanticDiagnostics(
+  value: unknown,
+): WorkflowSemanticModelStatus["diagnostics"] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item) => item && typeof item === "object")
+    .map((item) => item as {
+      code?: unknown;
+      message?: unknown;
+      relatedEvidenceIds?: unknown;
+    })
+    .filter((item) => typeof item.code === "string" && typeof item.message === "string")
+    .map((item) => ({
+      code: item.code as string,
+      message: item.message as string,
+      relatedEvidenceIds: Array.isArray(item.relatedEvidenceIds)
+        ? item.relatedEvidenceIds.filter(
+            (id): id is string => typeof id === "string",
+          )
+        : [],
+    }));
+}
+
 function positionFromJson(value: unknown, index: number) {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const position = value as { x?: unknown; y?: unknown };
@@ -441,7 +530,7 @@ function positionFromJson(value: unknown, index: number) {
       return { x: position.x, y: position.y };
     }
   }
-  return { x: 80 + (index % 4) * 280, y: 80 + Math.floor(index / 4) * 180 };
+  return { x: 300, y: 320 + index * 260 };
 }
 
 function validIoRows(
@@ -515,4 +604,22 @@ function sourceProvisionalStepIds(value: unknown) {
   return Array.isArray(ids)
     ? ids.filter((id): id is string => typeof id === "string")
     : [];
+}
+
+function stringMetadata(value: unknown, key: string) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const metadataValue = (value as Record<string, unknown>)[key];
+  return typeof metadataValue === "string" && metadataValue.trim()
+    ? metadataValue
+    : undefined;
+}
+
+function groundingMetadata(value: unknown) {
+  const grounding = stringMetadata(value, "semantic_grounding");
+  return grounding === "quoted" ||
+    grounding === "observed" ||
+    grounding === "documented" ||
+    grounding === "inferred"
+    ? grounding
+    : undefined;
 }

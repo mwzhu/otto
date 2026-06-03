@@ -42,6 +42,8 @@ export type Generation = {
   stop_reason?: string;
 };
 
+const PROMPT_CACHE_MIN_STATIC_CHARS = 4096;
+
 export class StructuredOutputError extends Error {
   constructor(
     message: string,
@@ -238,13 +240,7 @@ async function generateAnthropic(
   const env = getServerEnv();
   const model = anthropicModelForPrompt(env, opts.prompt_template_id);
   const content = [
-    opts.static_input
-      ? {
-          type: "text",
-          text: opts.static_input,
-          cache_control: { type: "ephemeral" },
-        }
-      : undefined,
+    staticTextBlock(opts.static_input),
     opts.dynamic_input ? { type: "text", text: opts.dynamic_input } : undefined,
     opts.input ? { type: "text", text: opts.input } : undefined,
   ].filter(Boolean);
@@ -347,13 +343,7 @@ async function generateAnthropicToolStream(
   const env = getServerEnv();
   const model = anthropicModelForPrompt(env, opts.prompt_template_id);
   const content = [
-    opts.static_input
-      ? {
-          type: "text",
-          text: opts.static_input,
-          cache_control: { type: "ephemeral" },
-        }
-      : undefined,
+    staticTextBlock(opts.static_input),
     opts.dynamic_input ? { type: "text", text: opts.dynamic_input } : undefined,
     opts.input ? { type: "text", text: opts.input } : undefined,
   ].filter(Boolean);
@@ -453,6 +443,17 @@ function safeParseJson(text: string):
       message: error instanceof Error ? error.message : "Invalid JSON response.",
     };
   }
+}
+
+function staticTextBlock(text?: string) {
+  if (!text) return undefined;
+  return text.length >= PROMPT_CACHE_MIN_STATIC_CHARS
+    ? {
+        type: "text",
+        text,
+        cache_control: { type: "ephemeral" },
+      }
+    : { type: "text", text };
 }
 
 function estimateAnthropicCostCents(input: {

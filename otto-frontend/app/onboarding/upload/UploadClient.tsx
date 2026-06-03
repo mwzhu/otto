@@ -189,35 +189,47 @@ export function UploadClient() {
 }
 
 async function uploadFile(file: File, rowId: string) {
-  const workspaceId = await ensureWorkspace();
+  const workspaceId = await withUploadStep("Workspace setup", () =>
+    ensureWorkspace(),
+  );
   updateUploadRow(rowId, "extracting", 20);
-  const presign = await postJson<{
-    artifact: { id: string };
-    upload_url: string;
-  }>(
-    `/api/workspaces/${workspaceId}/artifacts/presign`,
-    {
-      filename: file.name,
-      mime_type: file.type || "application/octet-stream",
-      size_bytes: file.size,
-      artifact_type: file.type.startsWith("image/") ? "image" : "document",
-    },
-    `artifact-presign-${rowId}`,
+  const presign = await withUploadStep(
+    "Preparing upload",
+    () =>
+      postJson<{
+        artifact: { id: string };
+        upload_url: string;
+      }>(
+        `/api/workspaces/${workspaceId}/artifacts/presign`,
+        {
+          filename: file.name,
+          mime_type: file.type || "application/octet-stream",
+          size_bytes: file.size,
+          artifact_type: file.type.startsWith("image/") ? "image" : "document",
+        },
+        `artifact-presign-${rowId}`,
+      ),
   );
   updateUploadRow(rowId, "extracting", 45);
-  const upload = await fetch(presign.upload_url, {
-    method: "PUT",
-    headers: { "content-type": file.type || "application/octet-stream" },
-    body: file,
+  await withUploadStep("Uploading file", async () => {
+    const upload = await fetch(presign.upload_url, {
+      method: "PUT",
+      headers: { "content-type": file.type || "application/octet-stream" },
+      body: file,
+    });
+    if (!upload.ok) {
+      throw new Error(`storage upload failed (${upload.status})`);
+    }
   });
-  if (!upload.ok) {
-    throw new Error(`R2 upload failed (${upload.status})`);
-  }
   updateUploadRow(rowId, "ontology", 75);
-  await postJson(
-    `/api/artifacts/${presign.artifact.id}/complete`,
-    { workspace_id: workspaceId },
-    `artifact-complete-${rowId}`,
+  await withUploadStep(
+    "Completing upload",
+    () =>
+      postJson(
+        `/api/artifacts/${presign.artifact.id}/complete`,
+        { workspace_id: workspaceId },
+        `artifact-complete-${rowId}`,
+      ),
   );
   updateUploadRow(rowId, "done", 100);
 }
@@ -260,6 +272,18 @@ async function postJson<T>(url: string, body: unknown, idempotencyKey: string) {
     throw new Error(payload?.error?.message ?? `Request failed (${response.status})`);
   }
   return payload as T;
+}
+
+async function withUploadStep<T>(
+  step: string,
+  action: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Upload failed.";
+    throw new Error(`${step}: ${message}`);
+  }
 }
 
 function formatSize(b: number) {

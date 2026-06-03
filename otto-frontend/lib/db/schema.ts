@@ -45,6 +45,7 @@ export const claimStatusEnum = pgEnum("claim_status", [
 ]);
 export const evidenceLabelEnum = pgEnum("evidence_label", [
   "observed",
+  "preview",
   "stated_operator",
   "stated_director",
   "documented",
@@ -536,6 +537,11 @@ export const captureSessions = pgTable(
     captureMode: captureModeEnum("capture_mode"),
     frameEgressDir: text("frame_egress_dir"),
     recordingUrl: text("recording_url"),
+    recordingArtifactId: uuid("recording_artifact_id"),
+    recordingStatus: text("recording_status"),
+    recordingStartedAt: timestamp("recording_started_at", { withTimezone: true }),
+    recordingCompletedAt: timestamp("recording_completed_at", { withTimezone: true }),
+    recordingProvider: text("recording_provider"),
     metadataJson: jsonb("metadata_json").default(sql`'{}'::jsonb`).notNull(),
     startedAt: timestamp("started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
@@ -903,6 +909,60 @@ export const screenEvents = pgTable(
   }),
 );
 
+export const visualObservations = pgTable(
+  "visual_observations",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id").references(() => organizations.id).notNull(),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id).notNull(),
+    captureSessionId: uuid("capture_session_id")
+      .references(() => captureSessions.id)
+      .notNull(),
+    screenEventId: uuid("screen_event_id").references(() => screenEvents.id),
+    artifactId: uuid("artifact_id").references(() => artifacts.id),
+    tsMs: integer("ts_ms").notNull(),
+    provider: text("provider").notNull(),
+    ocrText: text("ocr_text"),
+    uiSummary: text("ui_summary"),
+    structuredJson: jsonb("structured_json").default(sql`'{}'::jsonb`).notNull(),
+    confidence: numeric("confidence", { precision: 4, scale: 3 })
+      .default("0")
+      .notNull(),
+    degradedReasons: text("degraded_reasons")
+      .array()
+      .default(sql`ARRAY[]::text[]`)
+      .notNull(),
+    model: text("model").notNull(),
+    promptTemplateId: text("prompt_template_id"),
+    promptTemplateVersion: text("prompt_template_version"),
+    idempotencyKey: text("idempotency_key").notNull(),
+    emitsEvidence: boolean("emits_evidence").default(true).notNull(),
+    evidenceId: uuid("evidence_id").references(() => evidence.id),
+    redactedAt: timestamp("redacted_at", { withTimezone: true }),
+    tombstonedAt: timestamp("tombstoned_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => ({
+    captureTsIdx: index("visual_observations_capture_ts_idx").on(
+      table.captureSessionId,
+      table.tsMs,
+    ),
+    screenEventIdx: index("visual_observations_screen_event_id_idx").on(
+      table.screenEventId,
+    ),
+    artifactIdx: index("visual_observations_artifact_id_idx").on(table.artifactId),
+    retryGuardIdx: uniqueIndex("visual_observations_retry_guard_idx").on(
+      table.orgId,
+      table.screenEventId,
+      table.provider,
+      table.idempotencyKey,
+    ),
+    evidenceUniqueIdx: uniqueIndex("visual_observations_evidence_id_idx")
+      .on(table.evidenceId)
+      .where(sql`evidence_id IS NOT NULL`),
+  }),
+);
+
 export const provisionalSteps = pgTable(
   "provisional_steps",
   {
@@ -1216,6 +1276,56 @@ export const synthesisStageOutputs = pgTable(
     runStageIdx: index("synthesis_stage_outputs_run_stage_idx").on(
       table.synthesisRunId,
       table.stageName,
+    ),
+  }),
+);
+
+export const workflowSemanticModels = pgTable(
+  "workflow_semantic_models",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id").references(() => organizations.id).notNull(),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id).notNull(),
+    processId: uuid("process_id").references(() => processes.id).notNull(),
+    versionId: uuid("version_id").references(() => processVersions.id),
+    synthesisRunId: uuid("synthesis_run_id").references(() => synthesisRuns.id),
+    captureSessionIds: uuid("capture_session_ids")
+      .array()
+      .default(sql`'{}'::uuid[]`)
+      .notNull(),
+    evidencePackHash: text("evidence_pack_hash").notNull(),
+    semanticModelHash: text("semantic_model_hash").notNull(),
+    promptTemplateId: text("prompt_template_id").notNull(),
+    promptTemplateVersion: text("prompt_template_version").notNull(),
+    model: text("model").notNull(),
+    llmRequestHash: text("llm_request_hash"),
+    llmResponseHash: text("llm_response_hash"),
+    sourceProcessVersionId: uuid("source_process_version_id").references(
+      () => processVersions.id,
+    ),
+    cacheStatus: text("cache_status").notNull(),
+    rawModelJson: jsonb("raw_model_json").default(sql`'{}'::jsonb`).notNull(),
+    verifiedModelJson: jsonb("verified_model_json")
+      .default(sql`'{}'::jsonb`)
+      .notNull(),
+    diagnosticsJson: jsonb("diagnostics_json")
+      .default(sql`'[]'::jsonb`)
+      .notNull(),
+    groundingJson: jsonb("grounding_json").default(sql`'{}'::jsonb`).notNull(),
+    verifierConfidenceJson: jsonb("verifier_confidence_json")
+      .default(sql`'{}'::jsonb`)
+      .notNull(),
+    ...timestamps,
+  },
+  (table) => ({
+    orgProcessHashIdx: uniqueIndex(
+      "workflow_semantic_models_org_process_pack_hash_idx",
+    ).on(table.orgId, table.workspaceId, table.processId, table.evidencePackHash),
+    processIdx: index("workflow_semantic_models_process_id_idx").on(
+      table.processId,
+    ),
+    synthesisRunIdx: index("workflow_semantic_models_synthesis_run_id_idx").on(
+      table.synthesisRunId,
     ),
   }),
 );

@@ -45,7 +45,11 @@ export async function POST(
         requestHash: hash,
       });
       if (cached.hit) {
-        return { body: cached.responseJson, statusCode: cached.statusCode };
+        return {
+          body: cached.responseJson,
+          statusCode: cached.statusCode,
+          shouldSendEvent: false,
+        };
       }
       const rows = await tx
         .update(artifacts)
@@ -71,7 +75,14 @@ export async function POST(
               orgId: auth.orgId,
               workspaceId: artifact.workspaceId,
               captureType: "document_upload",
+              captureMode: "process_document_upload",
+              metadataJson: {
+                upload_kind: "document",
+                source_artifact_ids: [artifact.id],
+                participant_user_id: auth.userId,
+              },
               startedAt: new Date(),
+              completedAt: new Date(),
             })
             .returning()
         )[0];
@@ -102,17 +113,6 @@ export async function POST(
         subjectId: artifact.id,
         metadataJson: { idempotency_key: idempotencyKey },
       });
-      await inngest.send({
-        name: documentArtifactUploadedEventName,
-        data: {
-          artifactId: artifact.id,
-          captureSessionId,
-          workspaceId: artifact.workspaceId,
-          orgId: auth.orgId,
-          userId: auth.userId,
-          idempotencyKey,
-        },
-      });
       const response = {
         artifact: { ...artifact, captureSessionId },
         capture_session_id: captureSessionId,
@@ -125,8 +125,34 @@ export async function POST(
         responseJson: response,
         statusCode: 200,
       });
-      return { body: response, statusCode: 200 };
+      return { body: response, statusCode: 200, shouldSendEvent: true };
     });
+
+    const responseBody = result.body as {
+      artifact?: { id?: string };
+      capture_session_id?: string;
+    };
+    if (
+      result.shouldSendEvent &&
+      responseBody.artifact?.id &&
+      responseBody.capture_session_id
+    ) {
+      try {
+        await inngest.send({
+          name: documentArtifactUploadedEventName,
+          data: {
+            artifactId: responseBody.artifact.id,
+            captureSessionId: responseBody.capture_session_id,
+            workspaceId: body.workspace_id,
+            orgId: auth.orgId,
+            userId: auth.userId,
+            idempotencyKey,
+          },
+        });
+      } catch (eventError) {
+        console.error("Failed to queue document artifact processing.", eventError);
+      }
+    }
 
     return apiJson(result.body, { status: result.statusCode });
   } catch (error) {

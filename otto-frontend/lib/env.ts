@@ -51,6 +51,22 @@ export const serverEnvSchema = z.object({
   OTTO_DIRECTOR_PLANNER_RUNTIME: directorPlannerRuntimeEnv,
   OTTO_DIRECTOR_VOICE_RUNTIME: directorVoiceRuntimeEnv,
   OTTO_OPERATOR_USE_SEPARATE_VOICE_LLM: boolEnv,
+  OTTO_OPERATOR_FRAME_EXTRACTION_ENABLED: boolEnv,
+  OTTO_OPERATOR_OCR_PROVIDER: z
+    .enum([
+      "deterministic",
+      "tesseract-local",
+      "hosted-ocr",
+      "multimodal-vision",
+    ])
+    .default("tesseract-local"),
+  OTTO_OPERATOR_VISION_PROVIDER: z
+    .enum(["deterministic-screen-vision", "anthropic-vision"])
+    .default("deterministic-screen-vision"),
+  OTTO_OPERATOR_VISION_MAX_FRAMES: z.coerce.number().int().min(0).default(40),
+  OTTO_OPERATOR_ALLOW_DETERMINISTIC_WORKFLOW_FALLBACK: boolEnv,
+  OTTO_OPERATOR_EGRESS_ENABLED: boolEnv,
+  LIVEKIT_WEBHOOK_SECRET: z.string().optional(),
   OTTO_VENDOR_PRIVACY_ACK: boolEnv,
   OTTO_DEEPGRAM_NO_STORE_ACK: boolEnv,
   OTTO_CARTESIA_NO_RETENTION_ACK: boolEnv,
@@ -64,6 +80,7 @@ export const serverEnvSchema = z.object({
   DIRECTOR_BRAIN_MODEL: z.string().optional(),
   DIRECTOR_VOICE_MODEL: z.string().optional(),
   OPERATOR_BRAIN_MODEL: z.string().optional(),
+  OPERATOR_WORKFLOW_MODEL: z.string().optional(),
   SYNTHESIS_PLANNER_MODEL: z.string().optional(),
   LLAMAPARSE_API_KEY: z.string().optional(),
   LLAMAPARSE_API_URL: z.string().url().optional(),

@@ -1,7 +1,7 @@
 import "server-only";
 
 import { createHash } from "node:crypto";
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 type LocalUploadMetadata = {
@@ -39,6 +39,60 @@ export async function writeLocalUpload(input: {
         key: input.key,
         contentType: input.contentType,
         sizeBytes: data.byteLength,
+        storedAt: new Date().toISOString(),
+      } satisfies LocalUploadMetadata,
+      null,
+      2,
+    ),
+  );
+}
+
+export async function writeLocalUploadStream(input: {
+  key: string;
+  stream: ReadableStream<Uint8Array>;
+  contentType: string;
+  maxBytes: number;
+}) {
+  await mkdir(uploadDir, { recursive: true });
+  const dataPath = localUploadDataPath(input.key);
+  const handle = await open(dataPath, "w");
+  let sizeBytes = 0;
+  try {
+    const writer = handle.createWriteStream();
+    const reader = input.stream.getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        sizeBytes += value.byteLength;
+        if (sizeBytes > input.maxBytes) {
+          throw new Error("local_upload_size_limit_exceeded");
+        }
+        if (!writer.write(value)) {
+          await new Promise<void>((resolve) => writer.once("drain", resolve));
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    await new Promise<void>((resolve, reject) => {
+      writer.end((error: Error | null | undefined) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    await unlinkIfExists(dataPath);
+    throw error;
+  }
+  await writeFile(
+    localUploadMetadataPath(input.key),
+    JSON.stringify(
+      {
+        key: input.key,
+        contentType: input.contentType,
+        sizeBytes,
         storedAt: new Date().toISOString(),
       } satisfies LocalUploadMetadata,
       null,

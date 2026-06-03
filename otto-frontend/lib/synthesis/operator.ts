@@ -220,6 +220,9 @@ async function insertNode(
         systems: data.systems ?? [],
         claim_ids: data.claim_ids ?? [],
         source_provisional_step_ids: data.source_provisional_step_ids ?? [],
+        semantic_step_id: data.semantic_step_id,
+        semantic_grounding: data.semantic_grounding,
+        follow_up_question: data.follow_up_question,
       })}::jsonb
     )
   `);
@@ -485,6 +488,8 @@ async function insertEdge(
         waypoints: input.edge.waypoints ?? [],
         sourceSide: input.edge.sourceSide,
         targetSide: input.edge.targetSide,
+        semantic_edge_id: input.edge.semantic_edge_id,
+        semantic_grounding: input.edge.semantic_grounding,
       })}::jsonb
     )
   `);

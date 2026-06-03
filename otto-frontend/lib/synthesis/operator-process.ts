@@ -4,6 +4,8 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { getDb, setOrgContext } from "@/lib/db/client";
 import { uuidArraySql } from "@/lib/db/sql-arrays";
+import { getServerEnv } from "@/lib/env";
+import { anthropicModelForPrompt } from "@/lib/ai/models";
 import {
   auditLog,
   claimEvidence,
@@ -13,6 +15,7 @@ import {
   slotStates,
   synthesisRuns,
   synthesisStageOutputs,
+  workflowSemanticModels,
 } from "@/lib/db/schema";
 import { computeComplexityScore } from "@/lib/synthesis/complexity";
 import {
@@ -25,6 +28,18 @@ import {
 } from "@/lib/synthesis/operator";
 import { validateOperatorGraph } from "@/lib/synthesis/operator-graph-validation";
 import type { GraphEdge, GraphNode, ProcessGraph } from "@/lib/types/graph";
+import { extractWorkflowSemanticModel } from "@/lib/workflow/semantic-llm-extractor";
+import {
+  DEFAULT_SEMANTIC_PROMPT_CONTEXT_LIMITS,
+  buildSemanticPromptContext,
+} from "@/lib/workflow/semantic-context";
+import { workflowSemanticModelToGraph } from "@/lib/workflow/semantic-to-graph";
+import type {
+  WorkflowSemanticDiagnostic,
+  WorkflowFollowUpQuestion,
+  WorkflowSemanticModel,
+} from "@/lib/workflow/semantic-model";
+import { computeSemanticEvidencePackHash } from "@/lib/workflow/semantic-model";
 
 export type OperatorProcessSynthesisInput = {
   orgId: string;
@@ -55,6 +70,7 @@ export type OperatorEvidencePack = {
     value: unknown;
     confidence: number;
     evidenceIds: string[];
+    evidenceTexts?: Array<{ id: string; text: string | null }>;
   }>;
   redactionWindows?: Array<{
     id: string;
@@ -80,6 +96,17 @@ export type OperatorEvidencePack = {
     ocrText: string | null;
     signalTags: string[];
     evidenceIds: string[];
+  }>;
+  visualObservations?: Array<{
+    id: string;
+    tsMs: number;
+    provider: string;
+    uiSummary: string | null;
+    ocrText: string | null;
+    structuredJson: Record<string, unknown>;
+    confidence: number;
+    evidenceIds: string[];
+    degradedReasons: string[];
   }>;
   documentChunks: Array<{
     id: string;
@@ -111,6 +138,7 @@ export type OperatorEvidenceChunk = {
   endMs: number | null;
   transcriptSegments: OperatorEvidencePack["transcriptSegments"];
   screenEvents: OperatorEvidencePack["screenEvents"];
+  visualObservations: NonNullable<OperatorEvidencePack["visualObservations"]>;
   provisionalSteps: OperatorEvidencePack["provisionalSteps"];
   documentChunks: OperatorEvidencePack["documentChunks"];
 };
@@ -118,7 +146,10 @@ export type OperatorEvidenceChunk = {
 const operatorProcessStageVersions = {
   "stage-0-capture-ingest": 1,
   "stage-1-evidence-pack": 1,
+  "stage-2a-semantic-extraction": 1,
+  "stage-2b-semantic-merge": 1,
   "stage-2-provisional-step-dedupe": 1,
+  "stage-3a-semantic-enrichment-and-validation": 1,
   "stage-3-gap-and-contradiction-detection": 1,
   "stage-4-graph-build": 1,
   "stage-5-gap-and-contradiction-followups": 1,
@@ -251,7 +282,23 @@ export async function runOperatorProcessSynthesis(
 
   try {
     const evidencePack = await loadOperatorEvidencePack(input);
-    const graph = buildDeterministicOperatorGraph(evidencePack);
+    const graphBuild = await buildOperatorWorkflowGraph(evidencePack);
+    await persistWorkflowSemanticModel({
+      orgId: input.orgId,
+      workspaceId: input.workspaceId,
+      processId: input.processId,
+      synthesisRunId: runResult.synthesisRunId,
+      evidencePack,
+      graphBuild,
+    });
+    await recordSemanticGraphBuildAudit({
+      orgId: input.orgId,
+      workspaceId: input.workspaceId,
+      userId: input.userId ?? null,
+      synthesisRunId: runResult.synthesisRunId,
+      graphBuild,
+    });
+    const graph = graphBuild.graph;
     const graphValidation = validateOperatorGraph(graph);
     const contradictionGaps = detectOperatorContradictionGaps(evidencePack);
     const draftWarnings = operatorDraftWarnings(contradictionGaps);
@@ -273,6 +320,29 @@ export async function runOperatorProcessSynthesis(
       })),
       outputRowRefs: evidencePackRefs(evidencePack),
       status: "completed",
+    });
+    await recordOperatorStage({
+      orgId: input.orgId,
+      workspaceId: input.workspaceId,
+      synthesisRunId: runResult.synthesisRunId,
+      stageName: "stage-2a-semantic-extraction",
+      inputRowRefs: evidencePackRefs(evidencePack),
+      outputRowRefs: semanticStageRefs(graphBuild),
+      status:
+        graphBuild.mode === "semantic"
+          ? "completed"
+          : graphBuild.mode === "semantic_failed"
+            ? "failed"
+            : "skipped",
+    });
+    await recordOperatorStage({
+      orgId: input.orgId,
+      workspaceId: input.workspaceId,
+      synthesisRunId: runResult.synthesisRunId,
+      stageName: "stage-2b-semantic-merge",
+      inputRowRefs: semanticStageRefs(graphBuild),
+      outputRowRefs: semanticStageRefs(graphBuild),
+      status: graphBuild.mode === "semantic" ? "completed" : "skipped",
     });
     await recordOperatorStage({
       orgId: input.orgId,
@@ -300,6 +370,75 @@ export async function runOperatorProcessSynthesis(
       })),
       status: "completed",
     });
+    await recordOperatorStage({
+      orgId: input.orgId,
+      workspaceId: input.workspaceId,
+      synthesisRunId: runResult.synthesisRunId,
+      stageName: "stage-3a-semantic-enrichment-and-validation",
+      inputRowRefs: semanticStageRefs(graphBuild),
+      outputRowRefs: graphBuild.semanticDiagnostics.map(
+        (diagnostic, index) => ({
+          table: "workflow_semantic_diagnostic",
+          id: `${diagnostic.code}:${index}`,
+        }),
+      ),
+      status:
+        graphBuild.mode === "semantic"
+          ? "completed"
+          : graphBuild.mode === "semantic_failed"
+            ? "failed"
+            : "skipped",
+    });
+
+    if (!shouldPublishOperatorWorkflowGraph(graphBuild)) {
+      const followUpRefs = await createSemanticDiagnosticFollowUpTasks({
+        orgId: input.orgId,
+        workspaceId: input.workspaceId,
+        processId: input.processId,
+        captureSessionIds: input.captureSessionIds,
+        synthesisRunId: runResult.synthesisRunId,
+        graphBuild,
+        userId: input.userId ?? null,
+      });
+      await recordOperatorStage({
+        orgId: input.orgId,
+        workspaceId: input.workspaceId,
+        synthesisRunId: runResult.synthesisRunId,
+        stageName: "stage-4-graph-build",
+        inputRowRefs: semanticStageRefs(graphBuild),
+        outputRowRefs: graphBuild.semanticDiagnostics.map(
+          (diagnostic, index) => ({
+            table: "workflow_semantic_diagnostic",
+            id: `${diagnostic.code}:${index}`,
+          }),
+        ),
+        status: "failed",
+      });
+      await recordOperatorStage({
+        orgId: input.orgId,
+        workspaceId: input.workspaceId,
+        synthesisRunId: runResult.synthesisRunId,
+        stageName: "stage-5-gap-and-contradiction-followups",
+        inputRowRefs: semanticStageRefs(graphBuild),
+        outputRowRefs: followUpRefs,
+        status: followUpRefs.length > 0 ? "completed" : "skipped",
+      });
+      await failOperatorSynthesisRun({
+        orgId: input.orgId,
+        workspaceId: input.workspaceId,
+        synthesisRunId: runResult.synthesisRunId,
+        stage: "stage-3a-semantic-enrichment-and-validation",
+        reason: "semantic_workflow_not_publishable",
+        issues: graphBuild.semanticDiagnostics,
+        userId: input.userId ?? null,
+      });
+      return {
+        ...runResult,
+        ok: false as const,
+        reason: "semantic_workflow_not_publishable",
+        issues: graphBuild.semanticDiagnostics,
+      };
+    }
 
     if (!graphValidation.ok) {
       await recordOperatorStage({
@@ -338,6 +477,13 @@ export async function runOperatorProcessSynthesis(
       graph,
       summary: narrative.summary,
       warnings: draftWarnings,
+    });
+    await linkWorkflowSemanticModelToVersion({
+      orgId: input.orgId,
+      workspaceId: input.workspaceId,
+      synthesisRunId: runResult.synthesisRunId,
+      versionId: draft.versionId,
+      graphBuild,
     });
     await linkProvisionalStepsToGraphNodes({
       orgId: input.orgId,
@@ -451,6 +597,15 @@ export async function runOperatorProcessSynthesis(
       graph: draft.graph,
       userId: input.userId ?? null,
     });
+    await createSemanticFollowUpTasks({
+      orgId: input.orgId,
+      workspaceId: input.workspaceId,
+      processId: input.processId,
+      captureSessionIds: input.captureSessionIds,
+      versionId: draft.versionId,
+      graphBuild,
+      userId: input.userId ?? null,
+    });
     await completeOperatorSynthesisRun({
       orgId: input.orgId,
       workspaceId: input.workspaceId,
@@ -514,6 +669,9 @@ async function materializeProcessVersionClaims(input: {
   const allEvidenceIds = uniqueStrings([
     ...input.evidencePack.transcriptSegments.flatMap((row) => row.evidenceIds),
     ...input.evidencePack.screenEvents.flatMap((row) => row.evidenceIds),
+    ...(input.evidencePack.visualObservations ?? []).flatMap(
+      (row) => row.evidenceIds,
+    ),
     ...input.evidencePack.documentChunks.flatMap((row) => row.evidenceIds),
     ...input.graph.nodes.flatMap((node) => node.data.evidence_ids ?? []),
     ...input.graph.edges.flatMap((edge) => edge.evidence_ids ?? []),
@@ -724,6 +882,126 @@ async function createGraphFollowUpTasks(input: {
   });
 }
 
+async function createSemanticFollowUpTasks(input: {
+  orgId: string;
+  workspaceId: string;
+  processId: string;
+  captureSessionIds: string[];
+  versionId: string;
+  graphBuild: OperatorWorkflowGraphBuildResult;
+  userId?: string | null;
+}) {
+  if (input.graphBuild.semanticFollowUpQuestions.length === 0) return;
+  await getDb().transaction(async (tx) => {
+    await setOrgContext(tx, input.orgId);
+    await tx.insert(followUpTasks).values(
+      input.graphBuild.semanticFollowUpQuestions.map((question) => ({
+        orgId: input.orgId,
+        workspaceId: input.workspaceId,
+        processId: input.processId,
+        captureSessionId: input.captureSessionIds[0],
+        taskType: "open_question" as const,
+        title: question.question,
+        description:
+          "Semantic workflow extraction marked this item as inferred or unresolved and needs operator confirmation.",
+        targetType: "process_version",
+        targetId: input.versionId,
+        priority: "0.8",
+        status: "open" as const,
+        assignedToUserId: input.userId ?? undefined,
+        contextJson: {
+          version_id: input.versionId,
+          process_id: input.processId,
+          capture_session_ids: input.captureSessionIds,
+          evidence_ids: question.relatedEvidenceIds ?? [],
+          reason: question.reason,
+          semantic_question_id: question.id,
+          semantic_model_hash: input.graphBuild.semanticModelHash ?? null,
+        },
+      })),
+    );
+  });
+}
+
+async function createSemanticDiagnosticFollowUpTasks(input: {
+  orgId: string;
+  workspaceId: string;
+  processId: string;
+  captureSessionIds: string[];
+  synthesisRunId: string;
+  graphBuild: OperatorWorkflowGraphBuildResult;
+  userId?: string | null;
+}): Promise<Array<{ table: string; id: string }>> {
+  const diagnosticTasks = input.graphBuild.semanticDiagnostics.map(
+    (diagnostic) => ({
+      orgId: input.orgId,
+      workspaceId: input.workspaceId,
+      processId: input.processId,
+      captureSessionId: input.captureSessionIds[0],
+      taskType: "open_question" as const,
+      title:
+        diagnostic.code === "semantic_extraction_skipped"
+          ? "Add narration or OCR-backed business evidence before publishing workflow map"
+          : `Resolve workflow extraction issue: ${diagnostic.code.replaceAll("_", " ")}`,
+      description:
+        diagnostic.message +
+        " The workflow map was not published because only semantic business workflow extraction can create runtime maps.",
+      targetType: "synthesis_run",
+      targetId: input.synthesisRunId,
+      priority: "0.9",
+      status: "open" as const,
+      assignedToUserId: input.userId ?? undefined,
+      contextJson: {
+        process_id: input.processId,
+        capture_session_ids: input.captureSessionIds,
+        reason: "semantic_workflow_not_publishable",
+        mode: input.graphBuild.mode,
+        diagnostic,
+        semantic_model_hash: input.graphBuild.semanticModelHash ?? null,
+        evidence_pack_hash: input.graphBuild.evidencePackHash ?? null,
+      },
+    }),
+  );
+  const semanticQuestionTasks = input.graphBuild.semanticFollowUpQuestions.map(
+    (question) => ({
+      orgId: input.orgId,
+      workspaceId: input.workspaceId,
+      processId: input.processId,
+      captureSessionId: input.captureSessionIds[0],
+      taskType: "open_question" as const,
+      title: question.question,
+      description:
+        "Semantic workflow extraction could not publish the workflow map until this inferred or unresolved item is confirmed.",
+      targetType: "synthesis_run",
+      targetId: input.synthesisRunId,
+      priority: "0.85",
+      status: "open" as const,
+      assignedToUserId: input.userId ?? undefined,
+      contextJson: {
+        process_id: input.processId,
+        capture_session_ids: input.captureSessionIds,
+        reason: "semantic_workflow_not_publishable",
+        semantic_question_reason: question.reason,
+        semantic_question_id: question.id,
+        evidence_ids: question.relatedEvidenceIds ?? [],
+        semantic_model_hash: input.graphBuild.semanticModelHash ?? null,
+        evidence_pack_hash: input.graphBuild.evidencePackHash ?? null,
+      },
+    }),
+  );
+  const rows = [...diagnosticTasks, ...semanticQuestionTasks];
+  if (rows.length === 0) return [];
+
+  const inserted = await getDb().transaction(async (tx) => {
+    await setOrgContext(tx, input.orgId);
+    return tx
+      .insert(followUpTasks)
+      .values(rows)
+      .returning({ id: followUpTasks.id });
+  });
+  return inserted.map((row) => ({ table: "follow_up_tasks", id: row.id }));
+}
+
 async function linkOperatorCapturesToProcess(input: {
   orgId: string;
   workspaceId: string;
@@ -798,7 +1076,9 @@ type OperatorContradictionGap = {
   kind:
     | "sop_observed_spreadsheet_gap"
     | "prior_process_observed_spreadsheet_gap"
-    | "document_only_workflow_gap";
+    | "document_only_workflow_gap"
+    | "visual_without_narration_gap"
+    | "decision_without_rule_gap";
   title: string;
   description: string;
   evidenceIds: string[];
@@ -818,6 +1098,53 @@ export function detectOperatorContradictionGaps(
     .map((chunk) => chunk.text)
     .join("\n");
   const gaps: OperatorContradictionGap[] = [];
+  const narratedWindows = pack.transcriptSegments;
+  const unnarratedVisuals = (pack.visualObservations ?? []).filter(
+    (observation) =>
+      !narratedWindows.some(
+        (segment) =>
+          segment.startMs <= observation.tsMs + 8_000 &&
+          segment.endMs >= observation.tsMs - 8_000,
+      ),
+  );
+  if (unnarratedVisuals.length > 0) {
+    gaps.push({
+      kind: "visual_without_narration_gap",
+      title: "Ask what happened in visually observed silent steps",
+      description:
+        "Screen evidence shows workflow activity that was not narrated nearby. Ask the operator to explain the intent, source of truth, and downstream result for those visual steps.",
+      evidenceIds: uniqueStrings(
+        unnarratedVisuals.flatMap((observation) => observation.evidenceIds),
+      ),
+    });
+  }
+  const decisionVisuals = (pack.visualObservations ?? []).filter(
+    (observation) => {
+      const structured = recordValue(observation.structuredJson);
+      return (
+        stringArrayValue(structured.decisions_or_approvals).length > 0 ||
+        /approve|reject|decision|override/i.test(
+          [observation.uiSummary, observation.ocrText]
+            .filter(Boolean)
+            .join(" "),
+        )
+      );
+    },
+  );
+  const narrationMentionsRule = pack.transcriptSegments.some((segment) =>
+    /\b(rule|policy|criteria|because|if|when|threshold)\b/i.test(segment.text),
+  );
+  if (decisionVisuals.length > 0 && !narrationMentionsRule) {
+    gaps.push({
+      kind: "decision_without_rule_gap",
+      title: "Capture the rule behind an observed decision",
+      description:
+        "Visual evidence shows a decision, approval, rejection, or override, but narration did not explain the rule or threshold used.",
+      evidenceIds: uniqueStrings(
+        decisionVisuals.flatMap((observation) => observation.evidenceIds),
+      ),
+    });
+  }
   if (
     hasDocumentedEvidence &&
     observedSpreadsheetEvents.length > 0 &&
@@ -836,8 +1163,8 @@ export function detectOperatorContradictionGaps(
   }
   const priorProcessKnowledgeText = [
     pack.priorVersion?.summary,
-    ...(pack.processClaims ?? []).map((claim) =>
-      `${claim.field}: ${JSON.stringify(claim.value)}`,
+    ...(pack.processClaims ?? []).map(
+      (claim) => `${claim.field}: ${JSON.stringify(claim.value)}`,
     ),
   ]
     .filter(Boolean)
@@ -968,6 +1295,9 @@ function computeOperatorGraphComplexity(
       ...taskNodes.flatMap((node) => node.data.evidence_ids ?? []),
       ...pack.transcriptSegments.flatMap((segment) => segment.evidenceIds),
       ...pack.screenEvents.flatMap((event) => event.evidenceIds),
+      ...(pack.visualObservations ?? []).flatMap(
+        (observation) => observation.evidenceIds,
+      ),
       ...pack.documentChunks.flatMap((chunk) => chunk.evidenceIds),
     ]),
   });
@@ -991,6 +1321,9 @@ function buildOperatorDraftNarrative(input: {
   const evidenceCount = uniqueStrings([
     ...input.evidencePack.transcriptSegments.flatMap((row) => row.evidenceIds),
     ...input.evidencePack.screenEvents.flatMap((row) => row.evidenceIds),
+    ...(input.evidencePack.visualObservations ?? []).flatMap(
+      (row) => row.evidenceIds,
+    ),
     ...input.evidencePack.documentChunks.flatMap((row) => row.evidenceIds),
   ]).length;
   const summary =
@@ -1014,6 +1347,8 @@ function buildOperatorDraftNarrative(input: {
       redaction_window_count: input.evidencePack.redactionWindows?.length ?? 0,
       transcript_segment_count: input.evidencePack.transcriptSegments.length,
       screen_event_count: input.evidencePack.screenEvents.length,
+      visual_observation_count:
+        input.evidencePack.visualObservations?.length ?? 0,
       document_chunk_count: input.evidencePack.documentChunks.length,
     },
   };
@@ -1044,7 +1379,7 @@ export async function loadOperatorEvidencePack(
     const targetPriorVersionId =
       process.current_draft_version_id ?? process.current_approved_version_id;
     const priorVersion = targetPriorVersionId
-      ? (
+      ? ((
           await tx.execute<{
             id: string;
             version_number: number;
@@ -1059,7 +1394,7 @@ export async function loadOperatorEvidencePack(
               AND process_id = ${input.processId}
             LIMIT 1
           `)
-        ).rows[0] ?? null
+        ).rows[0] ?? null)
       : null;
 
     const transcriptRows = await tx.execute<{
@@ -1131,6 +1466,26 @@ export async function loadOperatorEvidencePack(
         AND se.capture_session_id = ANY(${uuidArraySql(input.captureSessionIds)})
         AND se.deleted_at IS NULL
         AND se.redacted_at IS NULL
+        AND NOT (
+          (
+            se.metadata_json->>'source' = 'live_preview'
+            OR EXISTS (
+              SELECT 1
+              FROM evidence preview_e
+              WHERE preview_e.org_id = se.org_id
+                AND preview_e.workspace_id = se.workspace_id
+                AND preview_e.source_type = 'screen_event'
+                AND preview_e.source_id = se.id
+                AND preview_e.evidence_label = 'preview'
+            )
+          )
+          AND EXISTS (
+            SELECT 1
+            FROM capture_sessions cs
+            WHERE cs.id = se.capture_session_id
+              AND cs.recording_artifact_id IS NOT NULL
+          )
+        )
         AND NOT EXISTS (
           SELECT 1
           FROM redactions r
@@ -1142,6 +1497,69 @@ export async function loadOperatorEvidencePack(
         )
       GROUP BY se.id
       ORDER BY se.ts_ms ASC, se.created_at ASC
+    `);
+
+    const visualRows = await tx.execute<{
+      id: string;
+      ts_ms: number;
+      provider: string;
+      ui_summary: string | null;
+      ocr_text: string | null;
+      structured_json: Record<string, unknown>;
+      confidence: string | null;
+      evidence_id: string | null;
+      degraded_reasons: string[];
+    }>(sql`
+      SELECT
+        vo.id,
+        vo.ts_ms,
+        vo.provider,
+        vo.ui_summary,
+        vo.ocr_text,
+        vo.structured_json,
+        vo.confidence::text,
+        vo.evidence_id,
+        vo.degraded_reasons
+      FROM visual_observations vo
+      WHERE vo.org_id = ${input.orgId}
+        AND vo.workspace_id = ${input.workspaceId}
+        AND vo.capture_session_id = ANY(${uuidArraySql(input.captureSessionIds)})
+        AND vo.redacted_at IS NULL
+        AND vo.tombstoned_at IS NULL
+        AND (
+          vo.evidence_id IS NULL
+          OR EXISTS (
+            SELECT 1
+            FROM evidence e
+            WHERE e.id = vo.evidence_id
+              AND e.org_id = vo.org_id
+              AND e.workspace_id = vo.workspace_id
+              AND e.redacted_at IS NULL
+              AND e.tombstoned_at IS NULL
+          )
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM screen_events se
+          WHERE se.id = vo.screen_event_id
+            AND se.metadata_json->>'source' = 'live_preview'
+            AND EXISTS (
+              SELECT 1
+              FROM capture_sessions cs
+              WHERE cs.id = se.capture_session_id
+                AND cs.recording_artifact_id IS NOT NULL
+            )
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM redactions r
+          WHERE r.org_id = vo.org_id
+            AND r.workspace_id = vo.workspace_id
+            AND r.capture_session_id = vo.capture_session_id
+            AND r.status <> 'failed'
+            AND vo.ts_ms BETWEEN r.start_ms AND r.end_ms
+        )
+      ORDER BY vo.ts_ms ASC, vo.created_at ASC
     `);
 
     const documentRows = await tx.execute<{
@@ -1190,6 +1608,15 @@ export async function loadOperatorEvidencePack(
         AND workspace_id = ${input.workspaceId}
         AND process_id = ${input.processId}
         AND capture_session_id = ANY(${uuidArraySql(input.captureSessionIds)})
+        AND NOT (
+          source IN ('live_screen_segmenter', 'screen_vision_segmenter')
+          AND EXISTS (
+            SELECT 1
+            FROM capture_sessions cs
+            WHERE cs.id = provisional_steps.capture_session_id
+              AND cs.recording_artifact_id IS NOT NULL
+          )
+        )
         AND NOT EXISTS (
           SELECT 1
           FROM redactions r
@@ -1244,6 +1671,7 @@ export async function loadOperatorEvidencePack(
       value: unknown;
       confidence: string | null;
       evidence_ids: string[];
+      evidence_texts: Array<{ id: string; text: string | null }>;
     }>(sql`
       SELECT
         c.id,
@@ -1253,7 +1681,16 @@ export async function loadOperatorEvidencePack(
         c.value,
         c.confidence::text,
         COALESCE(array_agg(e.id)
-          FILTER (WHERE e.id IS NOT NULL), '{}') AS evidence_ids
+          FILTER (WHERE e.id IS NOT NULL), '{}') AS evidence_ids,
+        COALESCE(
+          jsonb_agg(
+            DISTINCT jsonb_build_object(
+              'id', e.id,
+              'text', NULLIF(CONCAT_WS(E'\n', e.quote, e.summary), '')
+            )
+          ) FILTER (WHERE e.id IS NOT NULL),
+          '[]'::jsonb
+        ) AS evidence_texts
       FROM claims c
       LEFT JOIN claim_evidence ce
         ON ce.claim_id = c.id
@@ -1321,6 +1758,7 @@ export async function loadOperatorEvidencePack(
         value: row.value,
         confidence: Number(row.confidence ?? 0),
         evidenceIds: row.evidence_ids ?? [],
+        evidenceTexts: row.evidence_texts ?? [],
       })),
       redactionWindows: redactionRows.rows.map((row) => ({
         id: row.id,
@@ -1346,6 +1784,17 @@ export async function loadOperatorEvidencePack(
         ocrText: row.ocr_text,
         signalTags: row.signal_tags ?? [],
         evidenceIds: row.evidence_ids ?? [],
+      })),
+      visualObservations: visualRows.rows.map((row) => ({
+        id: row.id,
+        tsMs: row.ts_ms,
+        provider: row.provider,
+        uiSummary: row.ui_summary,
+        ocrText: row.ocr_text,
+        structuredJson: row.structured_json ?? {},
+        confidence: row.confidence !== null ? Number(row.confidence) : 0,
+        evidenceIds: row.evidence_id ? [row.evidence_id] : [],
+        degradedReasons: row.degraded_reasons ?? [],
       })),
       documentChunks: documentRows.rows.map((row) => ({
         id: row.id,
@@ -1434,12 +1883,445 @@ export function buildDeterministicOperatorGraph(
       edge_type: "seq",
       evidence_ids: target.data.evidence_ids ?? source.data.evidence_ids ?? [],
       waypoints: operatorEdgeWaypoints(source.position, target.position),
-      sourceSide: "right",
-      targetSide: "left",
+      sourceSide: "bottom",
+      targetSide: "top",
     });
   }
 
   return { nodes, edges, warnings: [] };
+}
+
+export type OperatorWorkflowGraphBuildMode =
+  | "semantic"
+  | "deterministic_fallback"
+  | "semantic_failed";
+
+export type OperatorWorkflowGraphBuildResult = {
+  mode: OperatorWorkflowGraphBuildMode;
+  graph: Omit<ProcessGraph, "process_id" | "version_number" | "status">;
+  semanticModelHash?: string;
+  evidencePackHash?: string;
+  promptTemplateId?: string;
+  promptTemplateVersion?: string;
+  model?: string;
+  llmRequestHash?: string;
+  llmResponseHash?: string;
+  rawSemanticModel?: WorkflowSemanticModel;
+  verifiedSemanticModel?: WorkflowSemanticModel;
+  cacheStatus?: "hit" | "miss";
+  semanticDiagnostics: WorkflowSemanticDiagnostic[];
+  semanticFollowUpQuestions: WorkflowFollowUpQuestion[];
+};
+
+export function shouldPublishOperatorWorkflowGraph(
+  build: Pick<OperatorWorkflowGraphBuildResult, "mode">,
+  env: Pick<
+    ReturnType<typeof getServerEnv>,
+    "NODE_ENV" | "OTTO_OPERATOR_ALLOW_DETERMINISTIC_WORKFLOW_FALLBACK"
+  > = getServerEnv(),
+) {
+  return (
+    build.mode === "semantic" ||
+    (env.NODE_ENV !== "production" &&
+      env.OTTO_OPERATOR_ALLOW_DETERMINISTIC_WORKFLOW_FALLBACK === true)
+  );
+}
+
+export async function buildOperatorWorkflowGraph(
+  pack: OperatorEvidencePack,
+  options: {
+    forceSemantic?: boolean;
+    semanticMock?: WorkflowSemanticModel;
+  } = {},
+): Promise<OperatorWorkflowGraphBuildResult> {
+  const env = getServerEnv();
+  const readiness = semanticExtractionReadiness(pack);
+  const shouldRunSemantic =
+    options.forceSemantic === true ||
+    Boolean(env.ANTHROPIC_API_KEY && readiness.ready);
+
+  if (shouldRunSemantic) {
+    try {
+      if (!options.semanticMock) {
+        const cached = await loadCachedWorkflowSemanticModel(pack);
+        if (cached) {
+          return cached;
+        }
+      }
+      const semantic = await extractWorkflowSemanticModel({
+        pack,
+        mock: options.semanticMock,
+      });
+      if (semantic.validationIssues.length === 0) {
+        return {
+          mode: "semantic",
+          graph: workflowSemanticModelToGraph(semantic.model),
+          semanticModelHash: semantic.semanticModelHash,
+          evidencePackHash: semantic.evidencePackHash,
+          promptTemplateId: semantic.promptTemplateId,
+          promptTemplateVersion: semantic.promptTemplateVersion,
+          model: semantic.modelId,
+          llmRequestHash: semantic.llmRequestHash,
+          llmResponseHash: semantic.llmResponseHash,
+          rawSemanticModel: semantic.rawModel,
+          verifiedSemanticModel: semantic.model,
+          cacheStatus: "miss",
+          semanticDiagnostics: semantic.diagnostics,
+          semanticFollowUpQuestions: semanticFollowUpsForModel(
+            semantic.model,
+            semantic.followUpQuestions,
+          ),
+        };
+      }
+      return {
+        mode: "semantic_failed",
+        graph: graphWithSemanticDiagnostics(
+          buildDeterministicOperatorGraph(pack),
+          semantic.diagnostics,
+        ),
+        semanticModelHash: semantic.semanticModelHash,
+        evidencePackHash: semantic.evidencePackHash,
+        promptTemplateId: semantic.promptTemplateId,
+        promptTemplateVersion: semantic.promptTemplateVersion,
+        model: semantic.modelId,
+        llmRequestHash: semantic.llmRequestHash,
+        llmResponseHash: semantic.llmResponseHash,
+        rawSemanticModel: semantic.rawModel,
+        verifiedSemanticModel: semantic.model,
+        cacheStatus: "miss",
+        semanticDiagnostics: semantic.diagnostics,
+        semanticFollowUpQuestions: semanticFollowUpsForModel(
+          semantic.model,
+          semantic.followUpQuestions,
+        ),
+      };
+    } catch (error) {
+      return {
+        mode: "semantic_failed",
+        graph: graphWithSemanticDiagnostics(
+          buildDeterministicOperatorGraph(pack),
+          [
+            {
+              code: "semantic_extraction_failed",
+              message:
+                error instanceof Error
+                  ? error.message
+                  : "Semantic workflow extraction failed.",
+              relatedEvidenceIds: [],
+            },
+          ],
+        ),
+        semanticDiagnostics: [
+          {
+            code: "semantic_extraction_failed",
+            message:
+              error instanceof Error
+                ? error.message
+                : "Semantic workflow extraction failed.",
+            relatedEvidenceIds: [],
+          },
+        ],
+        semanticFollowUpQuestions: [],
+      };
+    }
+  }
+
+  const skippedMessage = env.ANTHROPIC_API_KEY
+    ? readiness.message
+    : "Semantic workflow extraction requires configured LLM credentials.";
+  return {
+    mode: "deterministic_fallback",
+    graph: graphWithSemanticDiagnostics(buildDeterministicOperatorGraph(pack), [
+      {
+        code: "semantic_extraction_skipped",
+        message: skippedMessage,
+        relatedEvidenceIds: [],
+      },
+    ]),
+    semanticDiagnostics: [
+      {
+        code: "semantic_extraction_skipped",
+        message: skippedMessage,
+        relatedEvidenceIds: [],
+      },
+    ],
+    semanticFollowUpQuestions: [],
+  };
+}
+
+function hasBusinessEvidenceForSemanticExtraction(pack: OperatorEvidencePack) {
+  return semanticExtractionReadiness(pack).ready;
+}
+
+function semanticExtractionReadiness(pack: OperatorEvidencePack): {
+  ready: boolean;
+  message: string;
+} {
+  const hasTranscript = pack.transcriptSegments.some(
+    (segment) => segment.text.trim().length > 0,
+  );
+  const hasOcr = pack.screenEvents.some((event) =>
+    Boolean(event.ocrText?.trim()),
+  );
+  const hasDocument = pack.documentChunks.some(
+    (chunk) => chunk.text.trim().length > 0,
+  );
+  const hasVisualObservation = (pack.visualObservations ?? []).some(
+    (observation) =>
+      Boolean(observation.ocrText?.trim()) ||
+      Boolean(observation.uiSummary?.trim()) ||
+      Object.keys(observation.structuredJson ?? {}).length > 0,
+  );
+  const hasSlots = pack.slotStates.length > 0;
+  const ready =
+    hasTranscript ||
+    pack.screenEvents.some((event) => hasBusinessOcrText(event.ocrText)) ||
+    (pack.visualObservations ?? []).some((observation) =>
+      hasBusinessVisualObservation(observation),
+    ) ||
+    hasDocument ||
+    hasSlots;
+  if (ready) {
+    return {
+      ready: true,
+      message: "Semantic workflow extraction has usable business evidence.",
+    };
+  }
+  if (hasOcr || hasVisualObservation) {
+    return {
+      ready: false,
+      message:
+        "Semantic workflow extraction skipped because this capture only produced low-signal OCR or technical screen observations. Add spoken narration or visible business workflow details before publishing the workflow map.",
+    };
+  }
+  return {
+    ready: false,
+    message:
+      "Semantic workflow extraction skipped because this capture did not produce usable business workflow evidence: no narration transcript, OCR-backed business text, document text, or business visual observations were available.",
+  };
+}
+
+function hasBusinessVisualObservation(
+  observation: NonNullable<OperatorEvidencePack["visualObservations"]>[number],
+) {
+  const text = [
+    observation.ocrText,
+    observation.uiSummary,
+    JSON.stringify(observation.structuredJson ?? {}),
+  ].join(" ");
+  if (isTechnicalCaptureText(text)) return false;
+  return (
+    hasBusinessOcrText(observation.ocrText) ||
+    Boolean(observation.uiSummary?.trim()) ||
+    Object.keys(observation.structuredJson ?? {}).some(
+      (key) =>
+        ![
+          "confidence",
+          "ocr_text",
+          "ui_state_label",
+          "actions_observed",
+          "errors_or_warnings",
+          "decisions_or_approvals",
+          "visible_fields",
+          "copied_values_or_artifacts",
+          "systems",
+        ].includes(key),
+    ) ||
+    ((observation.structuredJson?.systems as unknown[]) ?? []).length > 0 ||
+    ((observation.structuredJson?.visible_fields as unknown[]) ?? []).length >
+      0 ||
+    ((observation.structuredJson?.decisions_or_approvals as unknown[]) ?? [])
+      .length > 0
+  );
+}
+
+function hasBusinessOcrText(text: string | null | undefined) {
+  const normalized = normalizeKey(text ?? "");
+  if (!normalized || isTechnicalCaptureText(normalized)) return false;
+  const tokens = normalized.match(/[a-z][a-z0-9]{2,}/g) ?? [];
+  const contentTokens = tokens.filter(
+    (token) =>
+      ![
+        "http",
+        "https",
+        "www",
+        "com",
+        "google",
+        "spreadsheets",
+        "spreadsheet",
+        "sheet",
+        "sheets",
+        "gid",
+        "chrome",
+      ].includes(token),
+  );
+  if (contentTokens.length < 3) return false;
+  return [
+    /\bapprove|approval|approved|reject|rejected|review|submit|submitted\b/,
+    /\bforecast|budget|invoice|revenue|booking|books|close|closing\b/,
+    /\bvendor|supplier|customer|account|contract|order|deal|promotion|promo\b/,
+    /\bcopy|paste|enter|entered|update|updated|upload|download|send|sent\b/,
+    /\bmanager|finance|ops|sales|marketing|legal|category|team\b/,
+  ].some((pattern) => pattern.test(normalized));
+}
+
+function isTechnicalCaptureText(text: string) {
+  const normalized = normalizeKey(text);
+  if (!normalized) return true;
+  return [
+    /\bkeyframe candidate\b/,
+    /\bscreen recording upload\b/,
+    /\bvideo keyframe candidate\b/,
+    /\boperator capture\b/,
+    /\bocr pending\b/,
+    /\blive preview\b/,
+    /\blivekit\b/,
+    /\bwebm\b/,
+  ].some((pattern) => pattern.test(normalized));
+}
+
+function graphWithSemanticDiagnostics(
+  graph: Omit<ProcessGraph, "process_id" | "version_number" | "status">,
+  diagnostics: WorkflowSemanticDiagnostic[],
+): Omit<ProcessGraph, "process_id" | "version_number" | "status"> {
+  if (diagnostics.length === 0) return graph;
+  return {
+    ...graph,
+    warnings: [
+      ...(graph.warnings ?? []),
+      ...diagnostics.map((diagnostic) => ({
+        code: diagnostic.code,
+        message: diagnostic.message,
+        evidence_ids: diagnostic.relatedEvidenceIds ?? [],
+      })),
+    ],
+  };
+}
+
+function semanticFollowUpsForModel(
+  model: WorkflowSemanticModel,
+  explicitQuestions: WorkflowFollowUpQuestion[],
+): WorkflowFollowUpQuestion[] {
+  const questions = [...explicitQuestions];
+  for (const step of model.steps) {
+    if (!step.needsFollowUp || !step.followUpQuestion?.trim()) continue;
+    questions.push({
+      id: `semantic-step:${step.id}`,
+      question: step.followUpQuestion,
+      reason: "semantic_step_inferred",
+      relatedEvidenceIds:
+        step.citations?.map((citation) => citation.evidenceId) ?? [],
+    });
+  }
+  for (const edge of model.edges) {
+    if (!edge.needsFollowUp || !edge.followUpQuestion?.trim()) continue;
+    questions.push({
+      id: `semantic-edge:${edge.id}`,
+      question: edge.followUpQuestion,
+      reason: "semantic_edge_inferred",
+      relatedEvidenceIds:
+        edge.citations?.map((citation) => citation.evidenceId) ?? [],
+    });
+  }
+  const seen = new Set<string>();
+  return questions.filter((question) => {
+    const key = `${question.id}:${question.question}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function loadCachedWorkflowSemanticModel(
+  pack: OperatorEvidencePack,
+): Promise<OperatorWorkflowGraphBuildResult | null> {
+  const env = getServerEnv();
+  const promptTemplateId = "operator.workflow_semantic_extraction";
+  const promptTemplateVersion = "1";
+  const modelId = anthropicModelForPrompt(env, promptTemplateId);
+  const promptContext = buildSemanticPromptContext(
+    pack,
+    DEFAULT_SEMANTIC_PROMPT_CONTEXT_LIMITS,
+  );
+  const evidencePackHash = computeSemanticEvidencePackHash({
+    orgId: pack.orgId,
+    workspaceId: pack.workspaceId,
+    processId: pack.processId,
+    processName: pack.processName,
+    captureSessionIds: pack.captureSessionIds,
+    priorProcessVersionId: pack.priorVersion?.id ?? null,
+    promptTemplateId,
+    promptTemplateVersion,
+    modelId,
+    extractionConfig: DEFAULT_SEMANTIC_PROMPT_CONTEXT_LIMITS,
+    redactionVersion: semanticRedactionVersion(pack),
+    evidence: promptContext.context,
+  });
+
+  return getDb().transaction(async (tx) => {
+    await setOrgContext(tx, pack.orgId);
+    const rows = await tx.execute<{
+      semantic_model_hash: string;
+      prompt_template_id: string;
+      prompt_template_version: string;
+      model: string;
+      llm_request_hash: string | null;
+      llm_response_hash: string | null;
+      raw_model_json: WorkflowSemanticModel;
+      verified_model_json: WorkflowSemanticModel;
+      diagnostics_json: WorkflowSemanticDiagnostic[];
+    }>(sql`
+      SELECT
+        semantic_model_hash,
+        prompt_template_id,
+        prompt_template_version,
+        model,
+        llm_request_hash,
+        llm_response_hash,
+        raw_model_json,
+        verified_model_json,
+        diagnostics_json
+      FROM workflow_semantic_models
+      WHERE org_id = ${pack.orgId}
+        AND workspace_id = ${pack.workspaceId}
+        AND process_id = ${pack.processId}
+        AND evidence_pack_hash = ${evidencePackHash}
+      LIMIT 1
+    `);
+    const row = rows.rows[0];
+    if (!row) return null;
+    return {
+      mode: "semantic",
+      graph: workflowSemanticModelToGraph(row.verified_model_json),
+      semanticModelHash: row.semantic_model_hash,
+      evidencePackHash,
+      promptTemplateId: row.prompt_template_id,
+      promptTemplateVersion: row.prompt_template_version,
+      model: row.model,
+      llmRequestHash: row.llm_request_hash ?? undefined,
+      llmResponseHash: row.llm_response_hash ?? undefined,
+      rawSemanticModel: row.raw_model_json,
+      verifiedSemanticModel: row.verified_model_json,
+      cacheStatus: "hit",
+      semanticDiagnostics: row.diagnostics_json ?? [],
+      semanticFollowUpQuestions: semanticFollowUpsForModel(
+        row.verified_model_json,
+        [],
+      ),
+    };
+  });
+}
+
+function semanticRedactionVersion(pack: OperatorEvidencePack) {
+  const windows = pack.redactionWindows ?? [];
+  if (windows.length === 0) return null;
+  return windows
+    .map(
+      (window) =>
+        `${window.id}:${window.status}:${window.startMs}:${window.endMs}`,
+    )
+    .sort()
+    .join("|");
 }
 
 type OperatorTaskSeed = {
@@ -1493,8 +2375,7 @@ function taskSeedsFromPack(pack: OperatorEvidencePack) {
   );
 
   const transcriptSeeds: OperatorTaskSeed[] = timelineChunks.flatMap((chunk) =>
-    chunk.transcriptSegments.flatMap(
-    (segment) =>
+    chunk.transcriptSegments.flatMap((segment) =>
       splitActionSentences(segment.text).map((text, index) => ({
         id: randomUUID(),
         title: titleCase(trimText(text, 64)),
@@ -1509,26 +2390,80 @@ function taskSeedsFromPack(pack: OperatorEvidencePack) {
 
   const screenSeeds: OperatorTaskSeed[] = timelineChunks.flatMap((chunk) =>
     chunk.screenEvents.map((event) => {
-    const signalDetails = screenSignalDetails(
-      event.signalTags,
-      event.evidenceIds,
-    );
-    const ioDetails = screenIoDetails(event);
-    return {
-      id: randomUUID(),
-      title: titleCase(trimText(event.label, 64)),
-      description: event.signalTags.length
-        ? `Observed screen signal tags: ${event.signalTags.join(", ")}.`
-        : "Observed screen event.",
-      confidence: event.evidenceIds.length ? 0.68 : 0.42,
-      sortKey: event.tsMs,
-      evidenceIds: event.evidenceIds,
-      provisionalStepIds: [],
-      systems: systemNamesFromScreenEvent(event),
-      inputs: ioDetails.inputs,
-      outputs: ioDetails.outputs,
-      ...signalDetails,
-    };
+      const signalDetails = screenSignalDetails(
+        event.signalTags,
+        event.evidenceIds,
+      );
+      const ioDetails = screenIoDetails(event);
+      return {
+        id: randomUUID(),
+        title: titleCase(trimText(event.label, 64)),
+        description: event.signalTags.length
+          ? `Observed screen signal tags: ${event.signalTags.join(", ")}.`
+          : "Observed screen event.",
+        confidence: event.evidenceIds.length ? 0.68 : 0.42,
+        sortKey: event.tsMs,
+        evidenceIds: event.evidenceIds,
+        provisionalStepIds: [],
+        systems: systemNamesFromScreenEvent(event),
+        inputs: ioDetails.inputs,
+        outputs: ioDetails.outputs,
+        ...signalDetails,
+      };
+    }),
+  );
+
+  const visualSeeds: OperatorTaskSeed[] = timelineChunks.flatMap((chunk) =>
+    chunk.visualObservations.map((observation) => {
+      const structured = recordValue(observation.structuredJson);
+      const title =
+        stringValue(structured.ui_state_label) ??
+        observation.uiSummary ??
+        "Observed visual workflow state";
+      const ocrText =
+        stringValue(structured.ocr_text) ?? observation.ocrText ?? "";
+      return {
+        id: randomUUID(),
+        title: titleCase(trimText(title, 64)),
+        description: trimText(
+          [
+            observation.uiSummary,
+            ocrText,
+            stringArrayValue(structured.actions_observed).join("; "),
+            stringArrayValue(structured.errors_or_warnings).join("; "),
+          ]
+            .filter(Boolean)
+            .join(" "),
+          220,
+        ),
+        confidence: observation.evidenceIds.length
+          ? Math.max(0.5, observation.confidence)
+          : Math.max(0.35, observation.confidence),
+        sortKey: observation.tsMs + 0.25,
+        evidenceIds: observation.evidenceIds,
+        provisionalStepIds: [],
+        systems: stringArrayValue(structured.systems),
+        inputs: stringArrayValue(structured.visible_fields).map((field) => ({
+          name: field,
+          description: "Field visible in captured screen evidence.",
+          evidence_ids: observation.evidenceIds,
+        })),
+        outputs: stringArrayValue(structured.copied_values_or_artifacts).map(
+          (artifactName) => ({
+            name: artifactName,
+            description:
+              "Value or artifact visible in captured screen evidence.",
+            evidence_ids: observation.evidenceIds,
+          }),
+        ),
+        exceptions: stringArrayValue(structured.errors_or_warnings).map(
+          (message) => ({
+            label: trimText(message, 72),
+            detection: message,
+            evidence_ids: observation.evidenceIds,
+          }),
+        ),
+      };
     }),
   );
 
@@ -1549,8 +2484,9 @@ function taskSeedsFromPack(pack: OperatorEvidencePack) {
     ...provisionalSeeds,
     ...transcriptSeeds,
     ...screenSeeds,
+    ...visualSeeds,
     ...documentSeeds,
-  ]);
+  ]).filter((seed) => !isTechnicalCaptureSeed(seed));
   if (seeds.length) return seeds;
 
   return [
@@ -1574,6 +2510,7 @@ export function segmentOperatorEvidencePack(
   const starts = [
     ...pack.transcriptSegments.map((segment) => segment.startMs),
     ...pack.screenEvents.map((event) => event.tsMs),
+    ...(pack.visualObservations ?? []).map((observation) => observation.tsMs),
     ...pack.provisionalSteps.map((step) => step.tsStartMs),
   ].filter((value) => Number.isFinite(value));
   const firstStart = starts.length ? Math.min(...starts) : null;
@@ -1586,13 +2523,15 @@ export function segmentOperatorEvidencePack(
         : Math.max(0, Math.floor((tsMs - firstStart) / chunkSizeMs));
     const existing = chunksByIndex.get(index);
     if (existing) return existing;
-    const startMs = firstStart === null ? null : firstStart + index * chunkSizeMs;
+    const startMs =
+      firstStart === null ? null : firstStart + index * chunkSizeMs;
     const chunk: OperatorEvidenceChunk = {
       index,
       startMs,
       endMs: startMs === null ? null : startMs + chunkSizeMs - 1,
       transcriptSegments: [],
       screenEvents: [],
+      visualObservations: [],
       provisionalSteps: [],
       documentChunks: [],
     };
@@ -1605,6 +2544,9 @@ export function segmentOperatorEvidencePack(
   }
   for (const event of pack.screenEvents) {
     chunkForTime(event.tsMs).screenEvents.push(event);
+  }
+  for (const observation of pack.visualObservations ?? []) {
+    chunkForTime(observation.tsMs).visualObservations.push(observation);
   }
   for (const step of pack.provisionalSteps) {
     chunkForTime(step.tsStartMs).provisionalSteps.push(step);
@@ -1620,6 +2562,7 @@ export function segmentOperatorEvidencePack(
       endMs: null,
       transcriptSegments: [],
       screenEvents: [],
+      visualObservations: [],
       provisionalSteps: [],
       documentChunks: pack.documentChunks,
     });
@@ -1632,6 +2575,7 @@ export function segmentOperatorEvidencePack(
       endMs: null,
       transcriptSegments: [],
       screenEvents: [],
+      visualObservations: [],
       provisionalSteps: [],
       documentChunks: [],
     },
@@ -1911,6 +2855,15 @@ function stringValue(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+function stringArrayValue(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter(
+        (item): item is string =>
+          typeof item === "string" && item.trim().length > 0,
+      )
+    : [];
+}
+
 function nearbyEvidenceIds(
   pack: OperatorEvidencePack,
   startMs: number,
@@ -1925,7 +2878,13 @@ function nearbyEvidenceIds(
   const screenIds = pack.screenEvents
     .filter((event) => event.tsMs >= startMs && event.tsMs <= windowEnd)
     .flatMap((event) => event.evidenceIds);
-  return [...new Set([...transcriptIds, ...screenIds])];
+  const visualIds = (pack.visualObservations ?? [])
+    .filter(
+      (observation) =>
+        observation.tsMs >= startMs && observation.tsMs <= windowEnd,
+    )
+    .flatMap((observation) => observation.evidenceIds);
+  return [...new Set([...transcriptIds, ...screenIds, ...visualIds])];
 }
 
 function mergeTaskSeeds(seeds: OperatorTaskSeed[]) {
@@ -1942,7 +2901,10 @@ function mergeTaskSeeds(seeds: OperatorTaskSeed[]) {
       ...existing,
       confidence: Math.max(existing.confidence, seed.confidence),
       sortKey: Math.min(existing.sortKey, seed.sortKey),
-      evidenceIds: uniqueStrings([...existing.evidenceIds, ...seed.evidenceIds]),
+      evidenceIds: uniqueStrings([
+        ...existing.evidenceIds,
+        ...seed.evidenceIds,
+      ]),
       provisionalStepIds: uniqueStrings([
         ...existing.provisionalStepIds,
         ...seed.provisionalStepIds,
@@ -1962,6 +2924,45 @@ function mergeTaskSeeds(seeds: OperatorTaskSeed[]) {
     (left, right) =>
       left.sortKey - right.sortKey || left.title.localeCompare(right.title),
   );
+}
+
+function isTechnicalCaptureSeed(seed: OperatorTaskSeed) {
+  const text = normalizeKey(
+    [
+      seed.title,
+      seed.description,
+      ...(seed.systems ?? []),
+      ...(seed.inputs ?? []).map((input) => input.name),
+      ...(seed.outputs ?? []).map((output) => output.name),
+    ].join(" "),
+  );
+  if (!text) return true;
+  const technicalPatterns = [
+    /\bkeyframe candidate\b/,
+    /\bscreen share started\b/,
+    /\bscreenshare keyframe\b/,
+    /\bscreen frame keyframe\b/,
+    /\bscreen recording upload\b/,
+    /\bvideo keyframe candidate\b/,
+    /\boperator capture\b/,
+    /\bocr pending\b/,
+    /\blive preview\b/,
+    /\blivekit\b/,
+    /\bwebm\b/,
+  ];
+  const hasBusinessSignal = [
+    seed.evidenceIds.length > 0 && seed.confidence >= 0.7,
+    (seed.systems ?? []).some(
+      (system) => !/livekit|browser|screen/i.test(system),
+    ),
+    (seed.inputs?.length ?? 0) > 0,
+    (seed.outputs?.length ?? 0) > 0,
+    (seed.exceptions?.length ?? 0) > 0,
+    (seed.workarounds?.length ?? 0) > 0,
+    (seed.variants?.length ?? 0) > 0,
+  ].some(Boolean);
+  if (hasBusinessSignal) return false;
+  return technicalPatterns.some((pattern) => pattern.test(text));
 }
 
 function mergeGraphItems<T extends { evidence_ids?: string[] }>(
@@ -2054,6 +3055,10 @@ function evidencePackRefs(pack: OperatorEvidencePack) {
       id: row.id,
     })),
     ...pack.screenEvents.map((row) => ({ table: "screen_events", id: row.id })),
+    ...(pack.visualObservations ?? []).map((row) => ({
+      table: "visual_observations",
+      id: row.id,
+    })),
     ...pack.documentChunks.map((row) => ({
       table: "document_chunks",
       id: row.id,
@@ -2071,6 +3076,207 @@ function evidencePackRefs(pack: OperatorEvidencePack) {
       id: row.id,
     })),
   ];
+}
+
+function semanticStageRefs(build: OperatorWorkflowGraphBuildResult) {
+  const refs: Array<{ table: string; id: string }> = [];
+  if (build.evidencePackHash) {
+    refs.push({
+      table: "workflow_semantic_evidence_pack",
+      id: build.evidencePackHash,
+    });
+  }
+  if (build.semanticModelHash) {
+    refs.push({
+      table: "workflow_semantic_models",
+      id: build.semanticModelHash,
+    });
+  }
+  refs.push(
+    ...build.semanticDiagnostics.map((diagnostic, index) => ({
+      table: "workflow_semantic_diagnostic",
+      id: `${diagnostic.code}:${index}`,
+    })),
+  );
+  return refs;
+}
+
+async function persistWorkflowSemanticModel(input: {
+  orgId: string;
+  workspaceId: string;
+  processId: string;
+  synthesisRunId: string;
+  evidencePack: OperatorEvidencePack;
+  graphBuild: OperatorWorkflowGraphBuildResult;
+}) {
+  const build = input.graphBuild;
+  if (
+    !build.evidencePackHash ||
+    !build.semanticModelHash ||
+    !build.promptTemplateId ||
+    !build.promptTemplateVersion ||
+    !build.model ||
+    !build.rawSemanticModel ||
+    !build.verifiedSemanticModel
+  ) {
+    return;
+  }
+  const rawSemanticModel = build.rawSemanticModel;
+  const verifiedSemanticModel = build.verifiedSemanticModel;
+  const semanticModelInsert: typeof workflowSemanticModels.$inferInsert = {
+    orgId: input.orgId,
+    workspaceId: input.workspaceId,
+    processId: input.processId,
+    synthesisRunId: input.synthesisRunId,
+    captureSessionIds: input.evidencePack.captureSessionIds,
+    evidencePackHash: build.evidencePackHash,
+    semanticModelHash: build.semanticModelHash,
+    promptTemplateId: build.promptTemplateId,
+    promptTemplateVersion: build.promptTemplateVersion,
+    model: build.model,
+    llmRequestHash: build.llmRequestHash ?? null,
+    llmResponseHash: build.llmResponseHash ?? null,
+    sourceProcessVersionId: input.evidencePack.priorVersion?.id ?? null,
+    cacheStatus: build.cacheStatus ?? "miss",
+    rawModelJson: rawSemanticModel,
+    verifiedModelJson: verifiedSemanticModel,
+    diagnosticsJson: build.semanticDiagnostics,
+    groundingJson: semanticGroundingSummary(verifiedSemanticModel),
+    verifierConfidenceJson: semanticConfidenceSummary(verifiedSemanticModel),
+    updatedAt: new Date(),
+  };
+
+  await getDb().transaction(async (tx) => {
+    await setOrgContext(tx, input.orgId);
+    await tx
+      .insert(workflowSemanticModels)
+      .values(semanticModelInsert)
+      .onConflictDoUpdate({
+        target: [
+          workflowSemanticModels.orgId,
+          workflowSemanticModels.workspaceId,
+          workflowSemanticModels.processId,
+          workflowSemanticModels.evidencePackHash,
+        ],
+        set: {
+          synthesisRunId: input.synthesisRunId,
+          semanticModelHash: build.semanticModelHash,
+          promptTemplateId: build.promptTemplateId,
+          promptTemplateVersion: build.promptTemplateVersion,
+          model: build.model,
+          llmRequestHash: build.llmRequestHash ?? null,
+          llmResponseHash: build.llmResponseHash ?? null,
+          sourceProcessVersionId: input.evidencePack.priorVersion?.id ?? null,
+          cacheStatus: build.cacheStatus ?? "miss",
+          rawModelJson: rawSemanticModel,
+          verifiedModelJson: verifiedSemanticModel,
+          diagnosticsJson: build.semanticDiagnostics,
+          groundingJson: semanticGroundingSummary(verifiedSemanticModel),
+          verifierConfidenceJson: semanticConfidenceSummary(
+            verifiedSemanticModel,
+          ),
+          updatedAt: new Date(),
+        },
+      });
+  });
+}
+
+async function linkWorkflowSemanticModelToVersion(input: {
+  orgId: string;
+  workspaceId: string;
+  synthesisRunId: string;
+  versionId: string;
+  graphBuild: OperatorWorkflowGraphBuildResult;
+}) {
+  if (!input.graphBuild.semanticModelHash) return;
+  await getDb().transaction(async (tx) => {
+    await setOrgContext(tx, input.orgId);
+    await tx.update(workflowSemanticModels).set({
+      versionId: input.versionId,
+      updatedAt: new Date(),
+    }).where(sql`
+        org_id = ${input.orgId}
+        AND workspace_id = ${input.workspaceId}
+        AND synthesis_run_id = ${input.synthesisRunId}
+        AND semantic_model_hash = ${input.graphBuild.semanticModelHash}
+      `);
+  });
+}
+
+function semanticGroundingSummary(model: WorkflowSemanticModel) {
+  return {
+    steps: model.steps.map((step) => ({
+      id: step.id,
+      grounding: step.grounding ?? "inferred",
+    })),
+    edges: model.edges.map((edge) => ({
+      id: edge.id,
+      grounding: edge.grounding ?? "inferred",
+    })),
+  };
+}
+
+function semanticConfidenceSummary(model: WorkflowSemanticModel) {
+  return {
+    steps: model.steps.map((step) => ({
+      id: step.id,
+      confidence: step.confidence ?? null,
+      modelConfidence: step.modelConfidence ?? null,
+    })),
+    edges: model.edges.map((edge) => ({
+      id: edge.id,
+      confidence: edge.confidence ?? null,
+      modelConfidence: edge.modelConfidence ?? null,
+    })),
+  };
+}
+
+async function recordSemanticGraphBuildAudit(input: {
+  orgId: string;
+  workspaceId: string;
+  userId?: string | null;
+  synthesisRunId: string;
+  graphBuild: OperatorWorkflowGraphBuildResult;
+}) {
+  const events: string[] = [];
+  if (input.graphBuild.mode === "semantic") {
+    events.push(
+      input.graphBuild.cacheStatus === "hit"
+        ? "workflow.semantic_extraction.cache_hit"
+        : "workflow.semantic_extraction.cache_miss",
+      "workflow.semantic_extraction.completed",
+    );
+  } else if (input.graphBuild.mode === "semantic_failed") {
+    events.push("workflow.semantic_extraction.degraded");
+  }
+  if (events.length === 0) return;
+
+  await getDb().transaction(async (tx) => {
+    await setOrgContext(tx, input.orgId);
+    await tx.insert(auditLog).values(
+      events.map((eventType) => ({
+        orgId: input.orgId,
+        workspaceId: input.workspaceId,
+        userId: input.userId ?? null,
+        eventType,
+        subjectType: "synthesis_run",
+        subjectId: input.synthesisRunId,
+        metadataJson: {
+          mode: input.graphBuild.mode,
+          cache_status: input.graphBuild.cacheStatus ?? null,
+          evidence_pack_hash: input.graphBuild.evidencePackHash ?? null,
+          semantic_model_hash: input.graphBuild.semanticModelHash ?? null,
+          diagnostics: input.graphBuild.semanticDiagnostics.map(
+            (diagnostic) => ({
+              code: diagnostic.code,
+              message: diagnostic.message,
+              relatedEvidenceIds: diagnostic.relatedEvidenceIds ?? [],
+            }),
+          ),
+        },
+      })),
+    );
+  });
 }
 
 async function recordOperatorStage(input: {

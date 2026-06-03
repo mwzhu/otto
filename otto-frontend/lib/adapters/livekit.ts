@@ -3,11 +3,16 @@ import "server-only";
 import {
   AccessToken,
   AgentDispatchClient,
+  EgressClient,
+  EncodedFileOutput,
   JobRestartPolicy,
   RoomServiceClient,
+  S3Upload,
   TrackSource,
+  WebhookReceiver,
 } from "livekit-server-sdk";
 import { getServerEnv } from "@/lib/env";
+import { artifactStorageKey, r2S3UploadConfig } from "@/lib/adapters/storage";
 
 const DEFAULT_DIRECTOR_AGENT_NAME = "otto-director";
 const DEFAULT_OPERATOR_AGENT_NAME = "otto-operator";
@@ -64,6 +69,21 @@ type LiveKitRoomDeps = {
   mintToken?: typeof mintLiveKitJwt;
 };
 
+type LiveKitEgressDeps = {
+  env?: LiveKitEnv;
+  egressClientFactory?: (input: LiveKitClientInput) => EgressClientLike;
+};
+
+type EgressClientLike = {
+  startTrackCompositeEgress: (
+    roomName: string,
+    output: unknown,
+    opts: { audioTrackId?: string; videoTrackId?: string },
+  ) => Promise<{ egressId?: string; status?: unknown; fileResults?: unknown[] }>;
+  stopEgress: (egressId: string) => Promise<unknown>;
+  listEgress: (options?: { roomName?: string; egressId?: string; active?: boolean }) => Promise<unknown[]>;
+};
+
 type LiveKitClientInput = {
   liveKitUrl: string;
   apiKey: string;
@@ -84,6 +104,15 @@ export type DirectorRoomToken = {
 
 export type OperatorRoomToken = DirectorRoomToken & {
   captureMode: "operator_voice" | "operator_screenshare";
+};
+
+export type OperatorTrackEgressResult = {
+  mode: "disabled" | "started";
+  roomName: string;
+  egressId: string | null;
+  storageKey: string | null;
+  provider: "livekit-track-composite";
+  reason?: string;
 };
 
 export type DirectorVoiceReadiness = {
@@ -361,6 +390,153 @@ export async function createOperatorRoomToken(input: {
   };
 }
 
+export function operatorEgressReadiness(env: LiveKitEnv = getServerEnv()) {
+  const missing = requiredOperatorEgressEnv(env);
+  if (env.OTTO_OPERATOR_EGRESS_ENABLED !== true) {
+    return {
+      mode: "disabled" as const,
+      missing,
+      reason: "Operator Egress is disabled.",
+    };
+  }
+  if (missing.length > 0) {
+    return {
+      mode: "unconfigured" as const,
+      missing,
+      reason: `Operator Egress is not fully configured (${missing.join(", ")} missing).`,
+    };
+  }
+  return { mode: "livekit" as const, missing: [], reason: null };
+}
+
+export async function startOperatorTrackEgress(input: {
+  roomName: string;
+  screenTrackSid: string;
+  audioTrackSid?: string | null;
+  captureSessionId: string;
+  orgId: string;
+  workspaceId: string;
+  filename?: string;
+}, deps: LiveKitEgressDeps = {}): Promise<OperatorTrackEgressResult> {
+  const env = deps.env ?? getServerEnv();
+  const readiness = operatorEgressReadiness(env);
+  if (readiness.mode !== "livekit") {
+    return {
+      mode: "disabled",
+      roomName: input.roomName,
+      egressId: null,
+      storageKey: null,
+      provider: "livekit-track-composite",
+      reason: readiness.reason ?? undefined,
+    };
+  }
+  const artifactId = input.captureSessionId;
+  const filename = input.filename ?? `operator-capture-${input.captureSessionId}.mp4`;
+  const storageKey = artifactStorageKey({
+    orgId: input.orgId,
+    workspaceId: input.workspaceId,
+    artifactId,
+    filename,
+  });
+  const s3 = r2S3UploadConfig();
+  if (!s3) {
+    return {
+      mode: "disabled",
+      roomName: input.roomName,
+      egressId: null,
+      storageKey: null,
+      provider: "livekit-track-composite",
+      reason: "R2 storage is required for LiveKit Egress output.",
+    };
+  }
+  const output = new EncodedFileOutput({
+    filepath: storageKey,
+    output: {
+      case: "s3",
+      value: new S3Upload(s3),
+    },
+  });
+  const client =
+    deps.egressClientFactory?.({
+      liveKitUrl: env.LIVEKIT_URL!,
+      apiKey: env.LIVEKIT_API_KEY!,
+      apiSecret: env.LIVEKIT_API_SECRET!,
+    }) ??
+    new EgressClient(
+      liveKitApiHost(env.LIVEKIT_URL!),
+      env.LIVEKIT_API_KEY!,
+      env.LIVEKIT_API_SECRET!,
+      { requestTimeout: 5000 },
+    );
+  const egress = await client.startTrackCompositeEgress(input.roomName, output, {
+    videoTrackId: input.screenTrackSid,
+    audioTrackId: input.audioTrackSid ?? undefined,
+  });
+  return {
+    mode: "started",
+    roomName: input.roomName,
+    egressId: egress.egressId ?? null,
+    storageKey,
+    provider: "livekit-track-composite",
+  };
+}
+
+export async function stopOperatorTrackEgress(
+  egressId: string,
+  deps: LiveKitEgressDeps = {},
+) {
+  const env = deps.env ?? getServerEnv();
+  const client =
+    deps.egressClientFactory?.({
+      liveKitUrl: env.LIVEKIT_URL!,
+      apiKey: env.LIVEKIT_API_KEY!,
+      apiSecret: env.LIVEKIT_API_SECRET!,
+    }) ??
+    new EgressClient(
+      liveKitApiHost(env.LIVEKIT_URL!),
+      env.LIVEKIT_API_KEY!,
+      env.LIVEKIT_API_SECRET!,
+      { requestTimeout: 5000 },
+    );
+  return client.stopEgress(egressId);
+}
+
+export async function getOperatorTrackEgressStatus(
+  egressId: string,
+  deps: LiveKitEgressDeps = {},
+) {
+  const env = deps.env ?? getServerEnv();
+  const client =
+    deps.egressClientFactory?.({
+      liveKitUrl: env.LIVEKIT_URL!,
+      apiKey: env.LIVEKIT_API_KEY!,
+      apiSecret: env.LIVEKIT_API_SECRET!,
+    }) ??
+    new EgressClient(
+      liveKitApiHost(env.LIVEKIT_URL!),
+      env.LIVEKIT_API_KEY!,
+      env.LIVEKIT_API_SECRET!,
+      { requestTimeout: 5000 },
+    );
+  const rows = await client.listEgress({ egressId });
+  return rows[0] ?? null;
+}
+
+export async function receiveLiveKitWebhook(request: Request) {
+  const env = getServerEnv();
+  if (!env.LIVEKIT_API_KEY || !env.LIVEKIT_API_SECRET) {
+    throw new Error("LiveKit webhook verification requires LiveKit API credentials.");
+  }
+  const body = await request.text();
+  const receiver = new WebhookReceiver(env.LIVEKIT_API_KEY, env.LIVEKIT_API_SECRET);
+  return receiver.receive(
+    body,
+    request.headers.get("Authorization") ??
+      request.headers.get("authorization") ??
+      undefined,
+  );
+}
+
 export function directorAgentParticipantIdentity(captureSessionId: string) {
   return `otto-director-agent-${captureSessionId}`;
 }
@@ -400,6 +576,23 @@ function requiredLiveKitVoiceEnv(
     ] as const) {
       if (!configuredEnvValue(value)) missing.push(key);
     }
+  }
+  return missing;
+}
+
+function requiredOperatorEgressEnv(env: ReturnType<typeof getServerEnv>) {
+  const missing: string[] = [];
+  for (const [key, value] of [
+    ["LIVEKIT_URL", env.LIVEKIT_URL],
+    ["LIVEKIT_API_KEY", env.LIVEKIT_API_KEY],
+    ["LIVEKIT_API_SECRET", env.LIVEKIT_API_SECRET],
+    ["R2_ACCOUNT_ID", env.R2_ACCOUNT_ID],
+    ["R2_ACCESS_KEY_ID", env.R2_ACCESS_KEY_ID],
+    ["R2_SECRET_ACCESS_KEY", env.R2_SECRET_ACCESS_KEY],
+    ["R2_BUCKET", env.R2_BUCKET],
+    ["R2_PUBLIC_BASE_URL", env.R2_PUBLIC_BASE_URL],
+  ] as const) {
+    if (!configuredEnvValue(value)) missing.push(key);
   }
   return missing;
 }

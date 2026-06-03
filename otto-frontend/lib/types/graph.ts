@@ -53,6 +53,9 @@ export type GraphNode = {
       alt_node_id?: string;
       evidence_ids?: string[];
     }>;
+    semantic_step_id?: string;
+    semantic_grounding?: "quoted" | "observed" | "documented" | "inferred";
+    follow_up_question?: string;
     terminal?: boolean;
     source_provisional_step_ids?: string[];
   };
@@ -73,6 +76,8 @@ export type GraphEdge = {
   waypoints?: EdgeWaypoint[]; // authored orthogonal routing
   sourceSide?: "top" | "bottom" | "left" | "right";
   targetSide?: "top" | "bottom" | "left" | "right";
+  semantic_edge_id?: string;
+  semantic_grounding?: "quoted" | "observed" | "documented" | "inferred";
 };
 
 export type ProcessGraph = {

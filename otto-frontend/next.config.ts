@@ -9,7 +9,7 @@ if (process.env.NODE_ENV === "production" && truthyEnv(process.env.OTTO_DEV_AUTH
 }
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  allowedDevOrigins: ["otto-dev.flowlabshq.com"],
 };
 
 export default nextConfig;

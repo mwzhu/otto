@@ -11,7 +11,9 @@ const root = process.cwd();
 describe("Phase 2 operator capture contract", () => {
   test("capture evidence migration adds mode provenance and step-scoped slots", () => {
     const migration = read("migrations/0006_capture_evidence.sql");
-    const sourceMigration = read("migrations/0009_provisional_step_sources.sql");
+    const sourceMigration = read(
+      "migrations/0009_provisional_step_sources.sql",
+    );
 
     expect(migration).toContain("CREATE TYPE capture_mode AS ENUM");
     expect(migration).toContain("'operator_voice'");
@@ -22,7 +24,9 @@ describe("Phase 2 operator capture contract", () => {
     expect(migration).toContain("CREATE TABLE IF NOT EXISTS screen_events");
     expect(migration).toContain("CREATE TABLE IF NOT EXISTS provisional_steps");
     expect(migration).toContain("ADD COLUMN IF NOT EXISTS provisional_step_id");
-    expect(migration).toContain("slot_states_capture_provisional_step_slot_idx");
+    expect(migration).toContain(
+      "slot_states_capture_provisional_step_slot_idx",
+    );
     expect(migration).not.toContain(
       "UNIQUE (capture_session_id, ordinal_hint)",
     );
@@ -40,8 +44,13 @@ describe("Phase 2 operator capture contract", () => {
 
   test("operator graph migration keeps graph rows canonical and RLS-protected", () => {
     const migration = read("migrations/0005_operator_graph.sql");
-    const claimSubjects = JSON.parse(read("../schemas/claim-subject-fields.json")) as {
-      allowed: Array<{ subject_type: string; fields: Array<{ field: string }> }>;
+    const claimSubjects = JSON.parse(
+      read("../schemas/claim-subject-fields.json"),
+    ) as {
+      allowed: Array<{
+        subject_type: string;
+        fields: Array<{ field: string }>;
+      }>;
     };
 
     for (const table of [
@@ -54,11 +63,19 @@ describe("Phase 2 operator capture contract", () => {
       "variants",
     ]) {
       expect(migration).toContain(`CREATE TABLE IF NOT EXISTS ${table}`);
-      expect(migration).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
-      expect(migration).toContain(`ALTER TABLE ${table} FORCE ROW LEVEL SECURITY`);
+      expect(migration).toContain(
+        `ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`,
+      );
+      expect(migration).toContain(
+        `ALTER TABLE ${table} FORCE ROW LEVEL SECURITY`,
+      );
     }
-    expect(migration).toContain("version_id uuid NOT NULL REFERENCES process_versions(id)");
-    expect(migration).toContain("ALTER TYPE synthesis_run_type ADD VALUE IF NOT EXISTS 'process_graph'");
+    expect(migration).toContain(
+      "version_id uuid NOT NULL REFERENCES process_versions(id)",
+    );
+    expect(migration).toContain(
+      "ALTER TYPE synthesis_run_type ADD VALUE IF NOT EXISTS 'process_graph'",
+    );
     for (const subject of [
       "process_node",
       "process_edge",
@@ -67,23 +84,27 @@ describe("Phase 2 operator capture contract", () => {
       "variant",
       "narrative_paragraph",
     ]) {
-      expect(claimSubjects.allowed.some((entry) => entry.subject_type === subject)).toBe(true);
+      expect(
+        claimSubjects.allowed.some((entry) => entry.subject_type === subject),
+      ).toBe(true);
     }
     expect(
-      claimSubjects.allowed.find((entry) => entry.subject_type === "process_node")?.fields.map(
-        (field) => field.field,
-      ),
+      claimSubjects.allowed
+        .find((entry) => entry.subject_type === "process_node")
+        ?.fields.map((field) => field.field),
     ).toEqual(expect.arrayContaining(["input", "output", "evidence_coverage"]));
     expect(
-      claimSubjects.allowed.find((entry) => entry.subject_type === "workaround")?.fields.map(
-        (field) => field.field,
-      ),
+      claimSubjects.allowed
+        .find((entry) => entry.subject_type === "workaround")
+        ?.fields.map((field) => field.field),
     ).toEqual(expect.arrayContaining(["description", "why_it_exists"]));
   });
 
   test("four capture modes have process-scoped front doors", () => {
     const entry = read("app/process/[id]/capture/page.tsx");
-    const voice = read("app/process/[id]/capture/voice/OperatorVoicePreStartClient.tsx");
+    const voice = read(
+      "app/process/[id]/capture/voice/OperatorVoicePreStartClient.tsx",
+    );
     const voiceLive = read(
       "app/process/[id]/capture/voice/live/OperatorVoiceLiveClient.tsx",
     );
@@ -92,24 +113,46 @@ describe("Phase 2 operator capture contract", () => {
     );
     const controls = read("components/capture/CaptureControls.tsx");
     const conversation = read("components/capture/ConversationPanel.tsx");
-    const conversationEvents = read("components/capture/operatorConversationEvents.ts");
-    const captureUnavailable = read("components/capture/CaptureUnavailable.tsx");
+    const conversationEvents = read(
+      "components/capture/operatorConversationEvents.ts",
+    );
+    const captureUnavailable = read(
+      "components/capture/CaptureUnavailable.tsx",
+    );
     const upload = read("components/capture/ProcessCaptureUploadClient.tsx");
     const voicePage = read("app/process/[id]/capture/voice/page.tsx");
-    const screensharePage = read("app/process/[id]/capture/screenshare/page.tsx");
-    const uploadVideoPage = read("app/process/[id]/capture/upload-video/page.tsx");
-    const uploadDocumentPage = read("app/process/[id]/capture/upload-document/page.tsx");
+    const screensharePage = read(
+      "app/process/[id]/capture/screenshare/page.tsx",
+    );
+    const uploadVideoPage = read(
+      "app/process/[id]/capture/upload-video/page.tsx",
+    );
+    const uploadDocumentPage = read(
+      "app/process/[id]/capture/upload-document/page.tsx",
+    );
 
     expect(entry).toContain("/capture/voice");
     expect(entry).toContain("/capture/screenshare");
     expect(entry).toContain("/capture/upload-video");
     expect(entry).toContain("/capture/upload-document");
-    expect(entry).toContain("isOperatorCaptureEligibleStatus(process.process_status)");
-    expect(captureUnavailable).toContain("Promote {processName} before operator capture");
-    expect(voicePage).toContain("isOperatorCaptureEligibleStatus(process.process_status)");
-    expect(screensharePage).toContain("isOperatorCaptureEligibleStatus(process.process_status)");
-    expect(uploadVideoPage).toContain("isOperatorCaptureEligibleStatus(process.process_status)");
-    expect(uploadDocumentPage).toContain("isOperatorCaptureEligibleStatus(process.process_status)");
+    expect(entry).toContain(
+      "isOperatorCaptureEligibleStatus(process.process_status)",
+    );
+    expect(captureUnavailable).toContain(
+      "Promote {processName} before operator capture",
+    );
+    expect(voicePage).toContain(
+      "isOperatorCaptureEligibleStatus(process.process_status)",
+    );
+    expect(screensharePage).toContain(
+      "isOperatorCaptureEligibleStatus(process.process_status)",
+    );
+    expect(uploadVideoPage).toContain(
+      "isOperatorCaptureEligibleStatus(process.process_status)",
+    );
+    expect(uploadDocumentPage).toContain(
+      "isOperatorCaptureEligibleStatus(process.process_status)",
+    );
     expect(voice).toContain("/operator-captures");
     expect(voice).toContain("/api/livekit/operator-room");
     expect(voice).toContain('mode: "voice"');
@@ -120,10 +163,22 @@ describe("Phase 2 operator capture contract", () => {
     expect(screenshare).toContain("operator_screenshare_v1");
     expect(screenshare).toContain('await import("livekit-client")');
     expect(screenshare).toContain("publishTrack");
+    expect(screenshare).toContain("screen_share");
+    expect(screenshare).toContain("ParticipantConnected");
+    expect(screenshare).toContain("LocalTrackPublished");
     expect(screenshare).toContain("getDisplayMedia");
     expect(screenshare).toContain("startScreenFrameSampler");
+    expect(screenshare).toContain("screenStream");
+    expect(screenshare).toContain("micStreamRef");
+    expect(screenshare).toContain("new MediaStream([");
+    expect(screenshare).toContain("onScreenStreamChange");
+    expect(screenshare).toContain("setScreenshareCapturePaused");
+    expect(screenshare).toContain("pauseMediaRecorder");
+    expect(screenshare).toContain("stopScreenFrameSampler");
+    expect(screenshare).toContain("stopAndUploadMediaRecorderFallback");
     expect(screenshare).toContain("SCREEN_FRAME_SAMPLE_INTERVAL_MS = 500");
     expect(screenshare).toContain("uploadInFlight");
+    expect(screenshare).toContain("warnIfStalled");
     expect(screenshare).toContain("SCREEN_FRAME_DUPLICATE_DIFF_THRESHOLD");
     expect(screenshare).toContain("screen_frame");
     expect(screenshare).toContain("/screen-frames");
@@ -147,7 +202,9 @@ describe("Phase 2 operator capture contract", () => {
     expect(conversationEvents).toContain("operator.turn.dispatched");
     expect(conversationEvents).toContain("operator.turn.delivery_updated");
     expect(voiceLive).toContain("/complete");
-    expect(voiceLive).toContain("/api/operator-captures/${session.captureSessionId}/turns");
+    expect(voiceLive).toContain(
+      "/api/operator-captures/${session.captureSessionId}/turns",
+    );
     expect(voiceLive).toContain("Typed fallback is ready");
     expect(voiceLive).toContain("postOperatorTurn");
     expect(voiceLive).toContain('await import("livekit-client")');
@@ -159,18 +216,27 @@ describe("Phase 2 operator capture contract", () => {
     expect(voiceLive).toContain("otto.operator.control");
     expect(voiceLive).toContain('event: "operator.control"');
     expect(controls).toContain("onMuteChange");
+    expect(controls).toContain("Could not update pause state");
     expect(controls).toContain("await onComplete?.()");
     expect(upload).toContain("/captures/uploads");
-    expect(upload).toContain('type UploadKind = "screen_recording" | "document"');
+    expect(upload).toContain(
+      'type UploadKind = "screen_recording" | "document"',
+    );
     expect(upload).toContain('uploadKind === "screen_recording"');
-    expect(upload).toContain('artifactType = uploadKind === "screen_recording" ? "video" : "document"');
+    expect(upload).toContain(
+      'artifactType = uploadKind === "screen_recording" ? "video" : "document"',
+    );
   });
 
   test("operator capture visual spec covers required route states", () => {
     const visualSpec = read("tests/visual/operator-process.spec.ts");
 
-    expect(visualSpec).toContain("renders four capture modes and each capture shell");
-    expect(visualSpec).toContain("renders empty and populated operator workflow graph states");
+    expect(visualSpec).toContain(
+      "renders four capture modes and each capture shell",
+    );
+    expect(visualSpec).toContain(
+      "renders empty and populated operator workflow graph states",
+    );
     expect(visualSpec).toContain("/capture");
     expect(visualSpec).toContain("/capture/voice");
     expect(visualSpec).toContain("/capture/voice/live");
@@ -181,15 +247,24 @@ describe("Phase 2 operator capture contract", () => {
     expect(visualSpec).toContain("Approve Draft");
     expect(visualSpec).toContain("View evidence");
     expect(visualSpec).toContain("Captured screen evidence");
-    expect(visualSpec).toContain("DATABASE_SERVICE_URL ?? process.env.DATABASE_URL");
+    expect(visualSpec).toContain(
+      "DATABASE_SERVICE_URL ?? process.env.DATABASE_URL",
+    );
   });
 
   test("operator capture APIs preserve process linkage and idempotency", () => {
-    const operatorRoute = read("app/api/processes/[processId]/operator-captures/route.ts");
+    const operatorRoute = read(
+      "app/api/processes/[processId]/operator-captures/route.ts",
+    );
     const operatorRoomRoute = read("app/api/livekit/operator-room/route.ts");
-    const uploadsRoute = read("app/api/processes/[processId]/captures/uploads/route.ts");
+    const uploadsRoute = read(
+      "app/api/processes/[processId]/captures/uploads/route.ts",
+    );
     const completeRoute = read(
       "app/api/processes/[processId]/operator-captures/[captureSessionId]/complete/route.ts",
+    );
+    const recordingRoute = read(
+      "app/api/processes/[processId]/operator-captures/[captureSessionId]/recording/route.ts",
     );
     const internalCompleteRoute = read(
       "app/api/internal/operator-captures/complete/route.ts",
@@ -202,9 +277,15 @@ describe("Phase 2 operator capture contract", () => {
     expect(operatorRoute).toContain("pg_advisory_xact_lock");
     expect(operatorRoute).toContain("operator.capture.start");
     expect(operatorRoute).toContain("getIdempotentResponse");
-    expect(operatorRoute).toContain("ensureWorkspaceRole(auth, body.workspace_id, [\"director\", \"operator\"])");
-    expect(operatorRoute).toContain("isOperatorCaptureEligibleStatus(process.status)");
-    expect(operatorRoute).toContain("Operator capture requires a draft or approved process");
+    expect(operatorRoute).toContain(
+      'ensureWorkspaceRole(auth, body.workspace_id, ["director", "operator"])',
+    );
+    expect(operatorRoute).toContain(
+      "isOperatorCaptureEligibleStatus(process.status)",
+    );
+    expect(operatorRoute).toContain(
+      "Operator capture requires a draft or approved process",
+    );
     expect(operatorRoute).toContain('captureType: "operator_interview"');
     expect(operatorRoute).toContain('"operator_screenshare"');
     expect(operatorRoute).toContain('"operator_voice"');
@@ -213,7 +294,9 @@ describe("Phase 2 operator capture contract", () => {
     expect(operatorRoomRoute).toContain("createOperatorRoomToken");
     expect(operatorRoomRoute).toContain("requireIdempotencyKey");
     expect(operatorRoomRoute).toContain("reserveIdempotentRequest");
-    expect(operatorRoomRoute).toContain('eq(captureSessions.captureType, "operator_interview")');
+    expect(operatorRoomRoute).toContain(
+      'eq(captureSessions.captureType, "operator_interview")',
+    );
     expect(operatorRoomRoute).toContain('"operator_screenshare"');
     expect(operatorRoomRoute).toContain("capture.operator_voice.vendor_export");
 
@@ -226,26 +309,60 @@ describe("Phase 2 operator capture contract", () => {
     expect(uploadsRoute).toContain("processDocumentUploadedEventName");
     expect(uploadsRoute).toContain("shouldSendEvent: false");
     expect(uploadsRoute).toContain("shouldSendEvent: true");
-    expect(uploadsRoute).toContain("isOperatorCaptureEligibleStatus(process.status)");
-    expect(uploadsRoute).toContain("Operator capture uploads require a draft or approved process");
+    expect(uploadsRoute).toContain(
+      "isOperatorCaptureEligibleStatus(process.status)",
+    );
+    expect(uploadsRoute).toContain(
+      "Operator capture uploads require a draft or approved process",
+    );
     expect(uploadsRoute).toContain("validateUploadKind");
 
     expect(completeRoute).toContain("requireIdempotencyKey");
     expect(completeRoute).toContain("pg_advisory_xact_lock");
     expect(completeRoute).toContain("operator.capture.complete");
     expect(completeRoute).toContain("operatorCaptureCompletedEventName");
+    expect(completeRoute).toContain("operatorScreenRecordingUploadedEventName");
     expect(completeRoute).toContain("shouldSendEvent: false");
-    expect(completeRoute).toContain("shouldSendEvent: existing.completedAt === null");
-    expect(completeRoute).toContain('eq(captureSessions.captureType, "operator_interview")');
+    expect(completeRoute).toContain(
+      "shouldSendEvent: existing.completedAt === null",
+    );
+    expect(completeRoute).toContain("shouldSendRecordingEvent");
+    expect(completeRoute).toContain("background_recording_event");
+    expect(completeRoute).toContain("recordingRouteOwnsProcessing");
+    expect(completeRoute).toContain(
+      'recordingProvider === "mediarecorder-final-blob"',
+    );
+    expect(completeRoute).toContain("captureHasRecordingProcessing");
+    expect(completeRoute).toContain("tool_calls->>'artifact_id'");
+    expect(completeRoute).toContain("artifact_id = ${input.artifactId}");
+    expect(completeRoute).toContain("metadata_json->>'artifact_id'");
+    expect(completeRoute).toContain(
+      'eq(captureSessions.captureType, "operator_interview")',
+    );
     expect(completeRoute).toContain("isNull(captureSessions.completedAt)");
     expect(completeRoute).toContain("capture.operator.completed");
+    expect(recordingRoute).toContain(
+      "operatorScreenRecordingUploadedEventName",
+    );
+    expect(recordingRoute).toContain("background_event");
+    expect(recordingRoute).toContain("captureHasRecordingProcessing");
+    expect(recordingRoute).toContain("tool_calls->>'artifact_id'");
+    expect(recordingRoute).toContain("artifact_id = ${input.artifactId}");
+    expect(recordingRoute).toContain("metadata_json->>'artifact_id'");
+    expect(recordingRoute).toContain(
+      "Failed to enqueue operator recording processing event",
+    );
     expect(internalCompleteRoute).toContain("requireLiveKitAgentService");
     expect(internalCompleteRoute).toContain("resolveOperatorSessionContext");
-    expect(internalCompleteRoute).toContain("operatorCaptureCompletedEventName");
+    expect(internalCompleteRoute).toContain(
+      "operatorCaptureCompletedEventName",
+    );
     expect(internalCompleteRoute).toContain('source: "livekit_agent"');
     expect(internalCompleteRoute).toContain("clearPendingIdempotentRequest");
     expect(internalCompleteRoute).toContain("previousCompletionForThisKey");
-    expect(internalCompleteRoute).toContain("Boolean(previousCompletionForThisKey)");
+    expect(internalCompleteRoute).toContain(
+      "Boolean(previousCompletionForThisKey)",
+    );
 
     expect(redactionsRoute).toContain("requireIdempotencyKey");
     expect(redactionsRoute).toContain("pg_advisory_xact_lock");
@@ -271,10 +388,19 @@ describe("Phase 2 operator capture contract", () => {
     const graphWriter = read("lib/synthesis/operator.ts");
     const graphValidation = read("lib/synthesis/operator-graph-validation.ts");
     const graphTypes = read("lib/types/graph.ts");
+    const graphQueries = read("lib/processes/graph-queries.ts");
     const workflowEval = read("tests/phase2/operator-workflow-eval.test.ts");
     const workflowFixtures = read("../evals/operator/workflow-fixtures.json");
+    const semanticWorkflowEval = read(
+      "tests/phase2/operator-semantic-workflow-eval.test.ts",
+    );
+    const semanticWorkflowFixtures = read(
+      "../evals/operator/business-workflow-fixtures.json",
+    );
     const processCanvas = read("components/canvas/ProcessCanvas.tsx");
-    const workspaceClient = read("app/process/[id]/workspace/WorkspaceClient.tsx");
+    const workspaceClient = read(
+      "app/process/[id]/workspace/WorkspaceClient.tsx",
+    );
     const stepsTab = read("components/workspace/tabs/StepsTab.tsx");
     const processDocument = read("lib/documents/process-document.ts");
     const screenRecording = read("lib/video/process-screen-recording.ts");
@@ -321,7 +447,9 @@ describe("Phase 2 operator capture contract", () => {
     expect(operatorSynthesis).toContain("loadOperatorEvidencePack");
     expect(operatorSynthesis).toContain("priorVersion");
     expect(operatorSynthesis).toContain("processClaims");
-    expect(operatorSynthesis).toContain("current_draft_version_id ?? process.current_approved_version_id");
+    expect(operatorSynthesis).toContain(
+      "current_draft_version_id ?? process.current_approved_version_id",
+    );
     expect(operatorSynthesis).toContain("subject_type = 'process_version'");
     expect(operatorSynthesis).toContain("process_claim_count");
     expect(operatorSynthesis).toContain("redactionWindows");
@@ -333,9 +461,30 @@ describe("Phase 2 operator capture contract", () => {
     expect(operatorSynthesis).toContain("r.status <> 'failed'");
     expect(operatorSynthesis).toContain("ts.start_ms <= r.end_ms");
     expect(operatorSynthesis).toContain("ts.end_ms >= r.start_ms");
-    expect(operatorSynthesis).toContain("se.ts_ms BETWEEN r.start_ms AND r.end_ms");
-    expect(operatorSynthesis).toContain("provisional_steps.ts_start_ms <= r.end_ms");
+    expect(operatorSynthesis).toContain(
+      "se.ts_ms BETWEEN r.start_ms AND r.end_ms",
+    );
+    expect(operatorSynthesis).toContain(
+      "provisional_steps.ts_start_ms <= r.end_ms",
+    );
+    expect(operatorSynthesis).toContain(
+      "source IN ('live_screen_segmenter', 'screen_vision_segmenter')",
+    );
     expect(operatorSynthesis).toContain("buildDeterministicOperatorGraph");
+    expect(operatorSynthesis).toContain("buildOperatorWorkflowGraph");
+    expect(operatorSynthesis).toContain("workflowSemanticModels");
+    expect(operatorSynthesis).toContain("stage-2a-semantic-extraction");
+    expect(operatorSynthesis).toContain(
+      "stage-3a-semantic-enrichment-and-validation",
+    );
+    expect(operatorSynthesis).toContain("linkWorkflowSemanticModelToVersion");
+    expect(operatorSynthesis).toContain("createSemanticFollowUpTasks");
+    expect(operatorSynthesis).toContain(
+      "createSemanticDiagnosticFollowUpTasks",
+    );
+    expect(operatorSynthesis).toContain("shouldPublishOperatorWorkflowGraph");
+    expect(operatorSynthesis).toContain("semantic_workflow_not_publishable");
+    expect(operatorSynthesis).toContain("semanticFollowUpsForModel");
     expect(operatorSynthesis).toContain("mergeTaskSeeds");
     expect(operatorSynthesis).toContain("screenSignalDetails");
     expect(operatorSynthesis).toContain("slotDetailsForProvisionalStep");
@@ -351,12 +500,16 @@ describe("Phase 2 operator capture contract", () => {
     expect(operatorSynthesis).toContain('field: "steps"');
     expect(operatorSynthesis).toContain('field: "evidence_coverage"');
     expect(operatorSynthesis).toContain("claimEvidence");
-    expect(operatorSynthesis).toContain("synthesis.operator.version_claims_materialized");
+    expect(operatorSynthesis).toContain(
+      "synthesis.operator.version_claims_materialized",
+    );
     expect(operatorSynthesis).toContain("publishOperatorGraphDraft");
     expect(operatorSynthesis).toContain("stage-0-capture-ingest");
     expect(operatorSynthesis).toContain("stage-1-evidence-pack");
     expect(operatorSynthesis).toContain("stage-4-graph-build");
-    expect(operatorSynthesis).toContain("stage-5-gap-and-contradiction-followups");
+    expect(operatorSynthesis).toContain(
+      "stage-5-gap-and-contradiction-followups",
+    );
     expect(operatorSynthesis).toContain("stage-6-complexity-and-coverage");
     expect(operatorSynthesis).toContain("stage-7-narrative");
     expect(operatorSynthesis).toContain("validateOperatorGraph");
@@ -367,9 +520,13 @@ describe("Phase 2 operator capture contract", () => {
     expect(operatorSynthesis).toContain("linkOperatorCapturesToProcess");
     expect(operatorSynthesis).toContain("captureProcessLinks");
     expect(operatorSynthesis).toContain('linkType: "enriched"');
-    expect(operatorSynthesis).toContain("synthesis.operator.capture_links_materialized");
+    expect(operatorSynthesis).toContain(
+      "synthesis.operator.capture_links_materialized",
+    );
     expect(operatorSynthesis).toContain("detectOperatorContradictionGaps");
-    expect(operatorSynthesis).toContain("export function detectOperatorContradictionGaps");
+    expect(operatorSynthesis).toContain(
+      "export function detectOperatorContradictionGaps",
+    );
     expect(operatorSynthesis).toContain("operatorDraftWarnings");
     expect(operatorSynthesis).toContain("computeOperatorGraphComplexity");
     expect(operatorSynthesis).toContain("buildOperatorDraftNarrative");
@@ -377,11 +534,25 @@ describe("Phase 2 operator capture contract", () => {
     expect(operatorSynthesis).toContain("low_confidence_inferred_graph_node");
     expect(operatorSynthesis).toContain("stage-8-publish-draft");
     expect(operatorSynthesis).toContain("synthesis.operator_process.started");
-    expect(operatorSynthesis).toContain("JOIN synthesis_runs sr ON sr.id = al.subject_id");
+    expect(operatorSynthesis).toContain(
+      "JOIN synthesis_runs sr ON sr.id = al.subject_id",
+    );
     expect(operatorSynthesis).toContain("sr.status <> 'failed'");
     expect(operatorSynthesis).toContain("operator_synthesis_unhandled_error");
-    expect(operatorSynthesis).toContain("Preserve the original synthesis error");
+    expect(operatorSynthesis).toContain(
+      "Preserve the original synthesis error",
+    );
     expect(operatorSynthesis).toContain("synthesis.operator.completed");
+    expect(graphWriter).toContain("semantic_step_id");
+    expect(graphWriter).toContain("semantic_edge_id");
+    expect(graphQueries).toContain("semantic_step_id");
+    expect(graphQueries).toContain("semantic_edge_id");
+    expect(semanticWorkflowEval).toContain("business_step_recall");
+    expect(semanticWorkflowEval).toContain("technical_artifact_leakage_rate");
+    expect(semanticWorkflowFixtures).toContain("promotion-management-map1-3");
+    expect(semanticWorkflowFixtures).toContain("Supplier funding confirmed?");
+    expect(semanticWorkflowFixtures).toContain("frontend-mockups/map7.png");
+    expect(semanticWorkflowFixtures).toContain("Manual Re-Entry Data Bridge");
     expect(graphWriter).toContain("evidence_count");
     expect(graphWriter).toContain("top_evidence_ids");
     expect(graphWriter).toContain("assertValidOperatorGraph");
@@ -440,7 +611,9 @@ describe("Phase 2 operator capture contract", () => {
     expect(screenRecording).toContain("analyzeScreenFrame");
     expect(screenRecording).toContain('eventType: "screen_recording_upload"');
     expect(screenRecording).toContain('eventType: "screen_recording_keyframe"');
-    expect(screenRecording).toContain("screen_recording_keyframe_vision_processed");
+    expect(screenRecording).toContain(
+      "screen_recording_keyframe_vision_processed",
+    );
     expect(screenRecording).toContain("vision_provider");
     expect(screenRecording).toContain("transcriptSegments");
     expect(screenRecording).toContain("provisionalSteps");
@@ -451,19 +624,38 @@ describe("Phase 2 operator capture contract", () => {
     expect(screenRecording).toContain("screen_recording_upload_pipeline");
     expect(screenRecording).toContain("Review failed screen recording upload");
     expect(screenRecording).toContain("screen_recording_upload_failed");
-    expect(screenRecording).toContain("silent_screen_recording_requires_voice_follow_up");
+    expect(screenRecording).toContain(
+      "silent_screen_recording_requires_voice_follow_up",
+    );
     expect(screenRecording).toContain("Schedule follow-up voice pass");
+    expect(screenRecording).toContain("cleanupUploadedFrameObjects");
+    expect(screenRecording).toContain("deleteArtifactObject");
+    expect(screenRecording).toContain("frameObjectsPersisted");
     expect(screenRecordingAnalyzer).toContain("deepgram-prerecorded");
-    expect(screenRecordingAnalyzer).toContain("deepgram-prerecorded-local-audio");
+    expect(screenRecordingAnalyzer).toContain(
+      "deepgram-prerecorded-local-audio",
+    );
     expect(screenRecordingAnalyzer).toContain("demuxLocalUploadAudio");
     expect(screenRecordingAnalyzer).toContain('spawn("ffmpeg"');
     expect(screenRecordingAnalyzer).toContain("readLocalUpload");
-    expect(screenRecordingAnalyzer).toContain("transcribeWithDeepgramAudioBytes");
+    expect(screenRecordingAnalyzer).toContain("fetch(input.storageUrl)");
+    expect(screenRecordingAnalyzer).toContain("extractFrameWithHash");
+    expect(screenRecordingAnalyzer).toContain("frame extraction");
+    expect(screenRecordingAnalyzer).toContain("frame hash extraction");
+    expect(screenRecordingAnalyzer).toContain(
+      "transcribeWithDeepgramAudioBytes",
+    );
     expect(screenRecordingAnalyzer).toContain("deterministic-video-sampler");
     expect(screenRecordingAnalyzer).toContain("audio_demux_failed");
-    expect(screenRecordingAnalyzer).toContain("video_transcription_unavailable");
-    expect(screenRecordingAnalyzer).toContain("keyframe_ocr_provider_not_configured");
-    expect(screenRecordingAnalyzer).toContain("weakStepCandidatesFromKeyframes");
+    expect(screenRecordingAnalyzer).toContain(
+      "video_transcription_unavailable",
+    );
+    expect(screenRecordingAnalyzer).toContain(
+      "keyframe_ocr_provider_not_configured",
+    );
+    expect(screenRecordingAnalyzer).toContain(
+      "weakStepCandidatesFromKeyframes",
+    );
     expect(screenRecordingAnalyzer).toContain("confidence: 0.32");
     expect(operatorRedaction).toContain("runOperatorRedaction");
     expect(operatorRedaction).toContain("deleteArtifactObject");
@@ -490,7 +682,9 @@ describe("Phase 2 operator capture contract", () => {
     expect(screenFrameVision).toContain("screen_frame_not_found_or_redacted");
     expect(screenFrameVision).toContain("screen_vision_segmenter");
     expect(screenFrameVision).toContain("screen_keyframe_vision_processed");
-    expect(screenFrameVision).toContain("capture.operator.screen_frame_vision_processed");
+    expect(screenFrameVision).toContain(
+      "capture.operator.screen_frame_vision_processed",
+    );
     expect(visionAdapter).toContain("analyzeScreenFrame");
     expect(visionAdapter).toContain("deriveScreenSignalTags");
     expect(visionAdapter).toContain("deterministic-screen-vision");
@@ -500,7 +694,9 @@ describe("Phase 2 operator capture contract", () => {
 
   test("operator graph drafts render in workspace and can be approved", () => {
     const workspacePage = read("app/process/[id]/workspace/page.tsx");
-    const workspaceClient = read("app/process/[id]/workspace/WorkspaceClient.tsx");
+    const workspaceClient = read(
+      "app/process/[id]/workspace/WorkspaceClient.tsx",
+    );
     const stepsTab = read("components/workspace/tabs/StepsTab.tsx");
     const summaryTab = read("components/workspace/tabs/SummaryTab.tsx");
     const insightsTab = read("components/workspace/tabs/InsightsTab.tsx");
@@ -510,7 +706,9 @@ describe("Phase 2 operator capture contract", () => {
     const processQueries = read("lib/processes/queries.ts");
     const followUpQueries = read("lib/processes/follow-up-queries.ts");
     const evidenceQueries = read("lib/processes/evidence-queries.ts");
-    const evidenceRoute = read("app/api/processes/[processId]/evidence/route.ts");
+    const evidenceRoute = read(
+      "app/api/processes/[processId]/evidence/route.ts",
+    );
     const approveRoute = read(
       "app/api/processes/[processId]/versions/[versionId]/approve/route.ts",
     );
@@ -519,7 +717,10 @@ describe("Phase 2 operator capture contract", () => {
     expect(workspacePage).toContain("getProcessGraphVersion");
     expect(workspacePage).toContain("getProcessGraphVersions");
     expect(workspacePage).toContain("getProcessFollowUps");
-    expect(workspacePage).toContain("hasWorkspaceRole(auth, workspace.id, [\"director\"])");
+    expect(workspacePage).toContain("hasWorkspaceRole(auth, workspace.id");
+    expect(workspacePage).toContain("getLatestWorkflowSemanticModelStatus");
+    expect(workspacePage).toContain("Workflow map blocked");
+    expect(workspacePage).toContain("semantic_workflow_not_publishable");
     expect(workspacePage).toContain("query.version");
     expect(workspacePage).toContain("followUps.filter(isRiskFollowUp)");
     expect(workspacePage).toContain("<WorkspaceClient");
@@ -536,7 +737,9 @@ describe("Phase 2 operator capture contract", () => {
     expect(workspaceClient).toContain("Version");
     expect(workspaceClient).toContain("?version=${versionId}");
     expect(workspaceClient).toContain("Approve Draft");
-    expect(workspaceClient).toContain("canApproveDraft && graph.status === \"draft\"");
+    expect(workspaceClient).toContain(
+      'canApproveDraft && graph.status === "draft"',
+    );
     expect(workspaceClient).toContain("/versions/${versionId}/approve");
     expect(stepsTab).toContain("View evidence");
     expect(stepsTab).toContain("NodeEvidenceDrawer");
@@ -564,9 +767,13 @@ describe("Phase 2 operator capture contract", () => {
     expect(riskTab).toContain("contradiction|gap|low_confidence|redaction");
     expect(graphTypes).toContain("summary?: string | null");
     expect(graphQueries).toContain("version_id: version.version_id");
-    expect(graphQueries).toContain("status: version.status === \"approved\" ? \"approved\" : \"draft\"");
+    expect(graphQueries).toContain(
+      'status: version.status === "approved" ? "approved" : "draft"',
+    );
     expect(graphQueries).toContain("version_number: version.version_number");
-    expect(graphQueries).toContain("summary: cached.summary ?? version.summary");
+    expect(graphQueries).toContain(
+      "summary: cached.summary ?? version.summary",
+    );
     expect(graphQueries).toContain("n.top_evidence_ids AS evidence_ids");
     expect(graphQueries).toContain("top_evidence_ids AS evidence_ids");
     expect(graphQueries).toContain("evidence_ids: row.evidence_ids ?? []");
@@ -592,20 +799,28 @@ describe("Phase 2 operator capture contract", () => {
     expect(evidenceQueries).toContain("a.artifact_type = 'screen_frame'");
     expect(evidenceQueries).toContain("screenshot_artifact_expired");
     expect(evidenceQueries).toContain("e.redacted_at IS NULL");
-    expect(evidenceRoute).toContain("ensureWorkspaceRole(auth, query.workspace_id");
+    expect(evidenceRoute).toContain(
+      "ensureWorkspaceRole(auth, query.workspace_id",
+    );
     expect(evidenceRoute).toContain('"viewer"');
     expect(evidenceRoute).toContain("versionId: query.version_id");
     expect(evidenceRoute).toContain("evidence_ids");
     expect(evidenceRoute).toContain("getProcessEvidenceRows");
     expect(approveRoute).toContain("process.version.approved");
-    expect(approveRoute.indexOf("process.version.approve:${processId}:${versionId}")).toBeLessThan(
+    expect(
+      approveRoute.indexOf("process.version.approve:${processId}:${versionId}"),
+    ).toBeLessThan(
       approveRoute.indexOf("const cached = await getIdempotentResponse"),
     );
     expect(approveRoute).toContain("currentApprovedVersionId");
     expect(approveRoute).toContain("currentDraftVersionId: null");
-    expect(approveRoute).toContain("Only published draft process versions can be approved");
+    expect(approveRoute).toContain(
+      "Only published draft process versions can be approved",
+    );
     expect(approveRoute).toContain("synthesis.operator.draft_published");
-    expect(approveRoute).toContain("ensureWorkspaceRole(auth, body.workspace_id, [\"director\"])");
+    expect(approveRoute).toContain(
+      'ensureWorkspaceRole(auth, body.workspace_id, ["director"])',
+    );
   });
 
   test("synthesis handoff waits for completed operator graph runs", () => {
@@ -614,9 +829,15 @@ describe("Phase 2 operator capture contract", () => {
     expect(statusRoute).toContain('latestRun?.status === "completed"');
     expect(statusRoute).toContain('latestRun?.status === "failed"');
     expect(statusRoute).toContain('latestRun?.status === "completed" &&');
-    expect(statusRoute).toContain("captureInventoryCount === null ? metrics.processCount > 0 : captureInventoryCount > 0");
-    expect(statusRoute).not.toContain('latestRun?.status === "partial_synthesis" ||');
-    expect(statusRoute).not.toContain('latestRun?.status === "partial_synthesis");');
+    expect(statusRoute).toContain(
+      "captureInventoryCount === null ? metrics.processCount > 0 : captureInventoryCount > 0",
+    );
+    expect(statusRoute).not.toContain(
+      'latestRun?.status === "partial_synthesis" ||',
+    );
+    expect(statusRoute).not.toContain(
+      'latestRun?.status === "partial_synthesis");',
+    );
   });
 
   test("voice-only operator turns have split routes and write step evidence", () => {
@@ -637,18 +858,28 @@ describe("Phase 2 operator capture contract", () => {
     const env = read("lib/env.ts");
     const frontendEnvExample = read(".env.example");
     const operatorEnvExample = read("../agents/operator/.env.example");
-    const publicTurns = read("app/api/operator-captures/[captureSessionId]/turns/route.ts");
-    const coverage = read("app/api/operator-captures/[captureSessionId]/coverage/route.ts");
+    const publicTurns = read(
+      "app/api/operator-captures/[captureSessionId]/turns/route.ts",
+    );
+    const coverage = read(
+      "app/api/operator-captures/[captureSessionId]/coverage/route.ts",
+    );
     const ingest = read("app/api/internal/operator-turns/ingest/route.ts");
     const plan = read("app/api/internal/operator-turns/plan/route.ts");
     const dispatch = read("app/api/internal/operator-turns/dispatch/route.ts");
     const notice = read("app/api/internal/operator-turns/notice/route.ts");
-    const delivery = read("app/api/internal/operator-turns/[turnIndex]/delivery/route.ts");
-    const screenEvents = read("app/api/internal/operator-screen-events/route.ts");
+    const delivery = read(
+      "app/api/internal/operator-turns/[turnIndex]/delivery/route.ts",
+    );
+    const screenEvents = read(
+      "app/api/internal/operator-screen-events/route.ts",
+    );
     const screenFrames = read(
       "app/api/processes/[processId]/operator-captures/[captureSessionId]/screen-frames/route.ts",
     );
-    const internalRedactions = read("app/api/internal/operator-redactions/route.ts");
+    const internalRedactions = read(
+      "app/api/internal/operator-redactions/route.ts",
+    );
 
     expect(schema).toContain("operatorTurnPlanSchema");
     expect(schema).toContain("planned_agent_utterance");
@@ -663,14 +894,18 @@ describe("Phase 2 operator capture contract", () => {
     expect(slotSchema).toContain("operatorSlotScope");
     expect(jsonSchema).toContain('"OperatorTurnPlan"');
     expect(jsonSchema).toContain('"planned_agent_utterance"');
-    expect(jsonSchema).not.toContain('"chosen_intent",\n    "planned_agent_utterance"');
-    const operatorPlanPropertyOrder = Object.keys(JSON.parse(jsonSchema).properties);
+    expect(jsonSchema).not.toContain(
+      '"chosen_intent",\n    "planned_agent_utterance"',
+    );
+    const operatorPlanPropertyOrder = Object.keys(
+      JSON.parse(jsonSchema).properties,
+    );
     expect(operatorPlanPropertyOrder.indexOf("chosen_intent")).toBeLessThan(
       operatorPlanPropertyOrder.indexOf("step_updates"),
     );
-    expect(operatorPlanPropertyOrder.indexOf("planned_agent_utterance")).toBeLessThan(
-      operatorPlanPropertyOrder.indexOf("step_updates"),
-    );
+    expect(
+      operatorPlanPropertyOrder.indexOf("planned_agent_utterance"),
+    ).toBeLessThan(operatorPlanPropertyOrder.indexOf("step_updates"));
     expect(jsonSchema).toContain('"current_phase"');
     expect(jsonSchema).toContain('"happy_path"');
     expect(jsonSchema).toContain('"exception_sweep"');
@@ -695,7 +930,9 @@ describe("Phase 2 operator capture contract", () => {
     expect(transaction).toContain("insertOperatorProvisionalStep");
     expect(transaction).toContain("idempotencyKey: input.idempotencyKey");
     expect(transaction).toContain(".onConflictDoNothing()");
-    expect(transaction).toContain("Operator provisional step idempotency replay");
+    expect(transaction).toContain(
+      "Operator provisional step idempotency replay",
+    );
     expect(transaction).toContain("upsertOperatorSlotState");
     expect(segmenter).toContain("stepCandidatesFromTranscript");
     expect(segmenter).toContain("stepCandidateFromScreenEvent");
@@ -719,7 +956,9 @@ describe("Phase 2 operator capture contract", () => {
     expect(brain).toContain("parseOperatorToolCall");
     expect(brain).toContain("mark_step_boundary");
     expect(brain).toContain("operator-turn:${input.turnIndex}:step:${index}");
-    expect(brain).toContain("operator-turn:${input.input.turnIndex}:tool:${callIndex}:mark_step_boundary");
+    expect(brain).toContain(
+      "operator-turn:${input.input.turnIndex}:tool:${callIndex}:mark_step_boundary",
+    );
     expect(brain).toContain("request_redaction");
     expect(brain).toContain("step.decision_criteria");
     expect(brain).toContain("step.intentional_deviations");
@@ -738,14 +977,38 @@ describe("Phase 2 operator capture contract", () => {
     expect(brain).toContain("@/lib/interview/_core/utterance");
     expect(realtimeCore).toContain("limitToSingleQuestion");
     expect(aiModels).toContain("OPERATOR_BRAIN_MODEL");
-    expect(aiModels).toContain('promptTemplateId.startsWith("operator.turn.plan")');
-    expect(aiModels).toContain('promptTemplateId.startsWith("operator.voice.")');
+    expect(aiModels).toContain("OPERATOR_WORKFLOW_MODEL");
+    expect(aiModels).toContain(
+      'promptTemplateId.startsWith("operator.workflow_")',
+    );
+    expect(aiModels).toContain(
+      'promptTemplateId.startsWith("operator.turn.plan")',
+    );
+    expect(aiModels).toContain(
+      'promptTemplateId.startsWith("operator.voice.")',
+    );
     expect(env).toContain("OTTO_OPERATOR_USE_SEPARATE_VOICE_LLM");
+    expect(env).toContain(
+      "OTTO_OPERATOR_ALLOW_DETERMINISTIC_WORKFLOW_FALLBACK",
+    );
     expect(env).toContain("OPERATOR_BRAIN_MODEL");
+    expect(env).toContain("OPERATOR_WORKFLOW_MODEL");
     expect(frontendEnvExample).toContain("OPERATOR_BRAIN_MODEL");
-    expect(frontendEnvExample).toContain('OTTO_OPERATOR_USE_SEPARATE_VOICE_LLM="false"');
+    expect(frontendEnvExample).toContain("OPERATOR_WORKFLOW_MODEL");
+    expect(frontendEnvExample).toContain(
+      'OTTO_OPERATOR_USE_SEPARATE_VOICE_LLM="false"',
+    );
+    expect(frontendEnvExample).toContain(
+      'OTTO_OPERATOR_ALLOW_DETERMINISTIC_WORKFLOW_FALLBACK="false"',
+    );
     expect(operatorEnvExample).toContain("OPERATOR_BRAIN_MODEL");
-    expect(operatorEnvExample).toContain('OTTO_OPERATOR_USE_SEPARATE_VOICE_LLM="false"');
+    expect(operatorEnvExample).toContain("OPERATOR_WORKFLOW_MODEL");
+    expect(operatorEnvExample).toContain(
+      'OTTO_OPERATOR_USE_SEPARATE_VOICE_LLM="false"',
+    );
+    expect(operatorEnvExample).toContain(
+      'OTTO_OPERATOR_ALLOW_DETERMINISTIC_WORKFLOW_FALLBACK="false"',
+    );
 
     expect(publicTurns).toContain("runOperatorTurn");
     expect(publicTurns).toContain("operator_interview");
@@ -777,10 +1040,14 @@ describe("Phase 2 operator capture contract", () => {
     expect(transaction).toContain("updateOperatorTurnDelivery");
     expect(screenEvents).toContain("requireLiveKitAgentService");
     expect(screenEvents).toContain("assertOperatorCaptureAcceptsTurns");
-    expect(screenEvents.indexOf("const replay = await getIdempotentResponse")).toBeLessThan(
+    expect(
+      screenEvents.indexOf("const replay = await getIdempotentResponse"),
+    ).toBeLessThan(
       screenEvents.indexOf("await assertOperatorCaptureAcceptsTurns"),
     );
-    expect(screenEvents.indexOf("await assertOperatorCaptureAcceptsTurns")).toBeLessThan(
+    expect(
+      screenEvents.indexOf("await assertOperatorCaptureAcceptsTurns"),
+    ).toBeLessThan(
       screenEvents.indexOf("const cached = await reserveIdempotentRequest"),
     );
     expect(screenEvents).toContain("screenEvents");
@@ -838,25 +1105,37 @@ describe("Phase 2 operator capture contract", () => {
     };
 
     expect(operatorToolSchema.required).toContain("planned_agent_utterance");
-    expect(operatorTurnPlanSchema.parse({
-      ...operatorPlan,
-      planned_agent_utterance: "Where does the next handoff happen?",
-    }).planned_agent_utterance).toBe("Where does the next handoff happen?");
-    expect(operatorTurnPlanSchema.parse(operatorPlan).planned_agent_utterance).toBeUndefined();
-    expect(operatorTurnPlanSchema.safeParse({
-      ...operatorPlan,
-      planned_agent_utterance: "",
-    }).success).toBe(false);
+    expect(
+      operatorTurnPlanSchema.parse({
+        ...operatorPlan,
+        planned_agent_utterance: "Where does the next handoff happen?",
+      }).planned_agent_utterance,
+    ).toBe("Where does the next handoff happen?");
+    expect(
+      operatorTurnPlanSchema.parse(operatorPlan).planned_agent_utterance,
+    ).toBeUndefined();
+    expect(
+      operatorTurnPlanSchema.safeParse({
+        ...operatorPlan,
+        planned_agent_utterance: "",
+      }).success,
+    ).toBe(false);
 
-    expect(directorTurnPlanSchema.parse({
-      ...directorPlan,
-      planned_agent_utterance: "What part of the business do you oversee?",
-    }).planned_agent_utterance).toBe("What part of the business do you oversee?");
-    expect(directorTurnPlanSchema.parse(directorPlan).planned_agent_utterance).toBeUndefined();
-    expect(directorTurnPlanSchema.safeParse({
-      ...directorPlan,
-      planned_agent_utterance: "",
-    }).success).toBe(false);
+    expect(
+      directorTurnPlanSchema.parse({
+        ...directorPlan,
+        planned_agent_utterance: "What part of the business do you oversee?",
+      }).planned_agent_utterance,
+    ).toBe("What part of the business do you oversee?");
+    expect(
+      directorTurnPlanSchema.parse(directorPlan).planned_agent_utterance,
+    ).toBeUndefined();
+    expect(
+      directorTurnPlanSchema.safeParse({
+        ...directorPlan,
+        planned_agent_utterance: "",
+      }).success,
+    ).toBe(false);
   });
 
   test("operator LiveKit worker package targets split operator runtime", () => {

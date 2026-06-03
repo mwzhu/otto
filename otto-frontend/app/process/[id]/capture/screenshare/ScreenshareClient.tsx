@@ -44,9 +44,13 @@ type LiveKitTrack = MediaStreamTrack & {
 type LiveKitRoomLike = {
   connect: (url: string, token: string) => Promise<void>;
   disconnect: () => void;
+  remoteParticipants?: Map<string, { identity?: string }>;
   localParticipant: {
     setMicrophoneEnabled?: (enabled: boolean) => Promise<void>;
-    publishTrack?: (track: MediaStreamTrack | LiveKitTrack) => Promise<unknown>;
+    publishTrack?: (
+      track: MediaStreamTrack | LiveKitTrack,
+      options?: { name?: string; source?: string },
+    ) => Promise<unknown>;
     publishData?: (
       payload: Uint8Array,
       options?: { reliable?: boolean; topic?: string },
@@ -58,12 +62,25 @@ type LiveKitRoomLike = {
 type LiveKitClientModule = {
   Room: new (options?: Record<string, unknown>) => LiveKitRoomLike;
   RoomEvent: Record<string, string>;
+  Track?: { Source?: Record<string, string> };
   createLocalAudioTrack?: () => Promise<LiveKitTrack>;
 };
+
+type CaptureHealthKey =
+  | "livekitConnected"
+  | "micPublishing"
+  | "screenTrackPublishing"
+  | "keyframesSaved"
+  | "agentJoined"
+  | "recordingActive";
+
+type CaptureHealth = Record<CaptureHealthKey, boolean>;
 
 const OPERATOR_SCREENSHARE_SESSION_KEY = "otto.operatorScreenshare.session";
 const SCREEN_FRAME_SAMPLE_INTERVAL_MS = 500;
 const SCREEN_FRAME_DUPLICATE_DIFF_THRESHOLD = 0.08;
+const SCREEN_RECORDING_VIDEO_BITS_PER_SECOND = 1_500_000;
+const SCREEN_RECORDING_AUDIO_BITS_PER_SECOND = 64_000;
 
 export default function ScreenshareClient({
   workspaceId,
@@ -83,23 +100,83 @@ export default function ScreenshareClient({
   const [redactionError, setRedactionError] = useState<string | null>(null);
   const [session, setSession] = useState<ScreenshareSession | null>(null);
   const [messages, setMessages] = useState<CaptureConversationMessage[]>([]);
+  const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
   const [capturedFrameCount, setCapturedFrameCount] = useState(0);
+  const [captureHealth, setCaptureHealth] = useState<CaptureHealth>({
+    livekitConnected: false,
+    micPublishing: false,
+    screenTrackPublishing: false,
+    keyframesSaved: false,
+    agentJoined: false,
+    recordingActive: false,
+  });
   const roomRef = useRef<LiveKitRoomLike | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
   const micTrackRef = useRef<LiveKitTrack | null>(null);
   const audioElsRef = useRef<HTMLMediaElement[]>([]);
   const samplerCleanupRef = useRef<(() => void) | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaRecorderChunksRef = useRef<Blob[]>([]);
 
   useEffect(() => {
-    if (session?.liveKit?.mode !== "livekit") return;
+    if (!session) return;
     let cancelled = false;
+    if (session.liveKit?.mode !== "livekit") {
+      const screenStream = screenStreamRef.current;
+      if (!screenStream) return;
+      startMediaRecorderFallback({
+        screenStream,
+        micStream: micStreamRef.current,
+        mediaRecorderRef,
+        mediaRecorderChunksRef,
+      });
+      samplerCleanupRef.current = startScreenFrameSampler({
+        session,
+        stream: screenStream,
+        onError: (message) => {
+          if (!cancelled) setError(message);
+        },
+        onFrameCaptured: () => {
+          if (!cancelled) {
+            setCapturedFrameCount((count) => count + 1);
+            setCaptureHealth((current) => ({
+              ...current,
+              keyframesSaved: true,
+            }));
+          }
+        },
+      });
+      setCaptureHealth((current) => ({
+        ...current,
+        screenTrackPublishing: true,
+        recordingActive: Boolean(mediaRecorderRef.current),
+      }));
+      return () => {
+        cancelled = true;
+        stopMediaRecorderWithoutUpload(mediaRecorderRef);
+        disconnectScreenshareRoom(
+          roomRef,
+          screenStreamRef,
+          micStreamRef,
+          micTrackRef,
+          audioElsRef,
+          samplerCleanupRef,
+          setScreenStream,
+        );
+      };
+    }
     void connectScreenshareRoom({
       session,
       roomRef,
       screenStreamRef,
+      micStreamRef,
       micTrackRef,
       audioElsRef,
       samplerCleanupRef,
+      mediaRecorderRef,
+      mediaRecorderChunksRef,
+      onScreenStreamChange: setScreenStream,
       onEvent: (message) => {
         if (!cancelled) {
           setMessages((current) => appendCaptureMessage(current, message));
@@ -109,42 +186,49 @@ export default function ScreenshareClient({
         if (!cancelled) setError(message);
       },
       onFrameCaptured: () => {
-        if (!cancelled) setCapturedFrameCount((count) => count + 1);
+        if (!cancelled) {
+          setCapturedFrameCount((count) => count + 1);
+          setCaptureHealth((current) => ({ ...current, keyframesSaved: true }));
+        }
+      },
+      onHealthChange: (patch) => {
+        if (!cancelled) {
+          setCaptureHealth((current) => ({ ...current, ...patch }));
+        }
       },
     });
     return () => {
       cancelled = true;
+      stopMediaRecorderWithoutUpload(mediaRecorderRef);
       disconnectScreenshareRoom(
         roomRef,
         screenStreamRef,
+        micStreamRef,
         micTrackRef,
         audioElsRef,
         samplerCleanupRef,
+        setScreenStream,
       );
     };
   }, [session]);
 
-  useEffect(() => {
-    if (!session) return;
-    void sendLiveKitOperatorControl(
-      roomRef.current,
-      paused ? "pause" : "resume",
-      session.captureSessionId,
-    );
-  }, [paused, session]);
-
   async function startCapture() {
     if (!consentGiven) {
-      setError("Please confirm consent before starting the screenshare interview.");
+      setError(
+        "Please confirm consent before starting the screenshare interview.",
+      );
       return;
     }
     setStarting(true);
     setError(null);
     let preauthorizedScreenStream: MediaStream | null = null;
+    let preauthorizedMicStream: MediaStream | null = null;
     try {
       preauthorizedScreenStream = await requestScreenPermission();
       screenStreamRef.current = preauthorizedScreenStream;
-      await requestMicrophonePermission();
+      setScreenStream(preauthorizedScreenStream);
+      preauthorizedMicStream = await requestMicrophonePermission();
+      micStreamRef.current = preauthorizedMicStream;
       const capture = await postJson<{
         capture_session: { id: string };
       }>(
@@ -181,6 +265,14 @@ export default function ScreenshareClient({
       );
       setSession(nextSession);
       setCapturedFrameCount(0);
+      setCaptureHealth({
+        livekitConnected: liveKit?.mode === "livekit" ? false : true,
+        micPublishing: false,
+        screenTrackPublishing: false,
+        keyframesSaved: false,
+        agentJoined: false,
+        recordingActive: liveKit?.mode === "livekit",
+      });
       setMessages([
         {
           id: `capture-started-${capture.capture_session.id}`,
@@ -190,9 +282,16 @@ export default function ScreenshareClient({
         },
       ]);
     } catch (err) {
-      for (const track of preauthorizedScreenStream?.getTracks() ?? []) track.stop();
+      for (const track of preauthorizedScreenStream?.getTracks() ?? [])
+        track.stop();
+      for (const track of preauthorizedMicStream?.getTracks() ?? [])
+        track.stop();
       if (screenStreamRef.current === preauthorizedScreenStream) {
         screenStreamRef.current = null;
+        setScreenStream(null);
+      }
+      if (micStreamRef.current === preauthorizedMicStream) {
+        micStreamRef.current = null;
       }
       setError(
         err instanceof Error
@@ -278,7 +377,7 @@ export default function ScreenshareClient({
             </span>
           </span>
         </div>
-        <ScreenSharePreview stream={screenStreamRef.current} />
+        <ScreenSharePreview stream={screenStream} />
         <div className="flex items-center justify-center gap-3 text-[11.5px] text-ink-secondary">
           <span>
             Screen keyframes captured{" "}
@@ -290,41 +389,98 @@ export default function ScreenshareClient({
             </span>
           )}
         </div>
+        <div className="grid grid-cols-3 gap-2 text-[11px] text-ink-secondary">
+          {captureHealthItems(captureHealth).map((item) => (
+            <div
+              key={item.label}
+              className="flex items-center gap-2 rounded-md border border-subtle bg-canvas px-2 py-1.5"
+            >
+              <span
+                className={[
+                  "size-1.5 rounded-full",
+                  item.ready ? "bg-success" : "bg-ink-muted",
+                ].join(" ")}
+                aria-hidden
+              />
+              <span>{item.label}</span>
+            </div>
+          ))}
+        </div>
         <CaptureControls
           processId={processId}
+          workspaceId={workspaceId}
+          captureSessionId={session.captureSessionId}
           onMuteChange={async (muted) => {
-            await setOperatorMicrophoneMuted(roomRef.current, micTrackRef.current, muted);
+            await setOperatorMicrophoneMuted(
+              roomRef.current,
+              micTrackRef.current,
+              muted,
+            );
             await sendLiveKitOperatorControl(
               roomRef.current,
               muted ? "mute" : "unmute",
               session.captureSessionId,
             );
           }}
-          onPauseChange={setPaused}
-          onComplete={async () => {
-            await sendLiveKitOperatorControl(
-              roomRef.current,
-              "end",
-              session.captureSessionId,
-            );
-            disconnectScreenshareRoom(
-              roomRef,
+          onPauseChange={async (nextPaused) => {
+            setError(null);
+            await setScreenshareCapturePaused({
+              paused: nextPaused,
+              session,
+              room: roomRef.current,
+              mediaRecorderRef,
               screenStreamRef,
-              micTrackRef,
-              audioElsRef,
               samplerCleanupRef,
-            );
+              onFrameCaptured: () => {
+                setCapturedFrameCount((count) => count + 1);
+                setCaptureHealth((current) => ({
+                  ...current,
+                  keyframesSaved: true,
+                }));
+              },
+              onError: setError,
+            });
+            setPaused(nextPaused);
+            setCaptureHealth((current) => ({
+              ...current,
+              recordingActive: !nextPaused && Boolean(mediaRecorderRef.current),
+            }));
+          }}
+          onComplete={async () => {
+            setError(null);
+            stopScreenFrameSampler(samplerCleanupRef);
+            await stopAndUploadMediaRecorderFallback({
+              mediaRecorderRef,
+              mediaRecorderChunksRef,
+              session,
+            });
             await completeOperatorCapture({
               workspaceId,
               processId,
               captureSessionId: session.captureSessionId,
             });
+            await sendLiveKitOperatorControl(
+              roomRef.current,
+              "end",
+              session.captureSessionId,
+            ).catch((error) => {
+              console.warn("Failed to send operator end control", error);
+            });
+            disconnectScreenshareRoom(
+              roomRef,
+              screenStreamRef,
+              micStreamRef,
+              micTrackRef,
+              audioElsRef,
+              samplerCleanupRef,
+              setScreenStream,
+            );
           }}
         />
         {redactToast && (
           <div className="self-center rounded-md bg-ink px-3 py-1.5 text-[11.5px] text-canvas shadow-pop">
-            Got it — redacting the last 30 seconds across the recording, transcript,
-            screen events, and embeddings.
+            Got it — redacting the last 30 seconds across the recording,
+            transcript, screen events, and embeddings.
           </div>
         )}
         {redactionError && (
@@ -351,7 +507,9 @@ export default function ScreenshareClient({
               setTimeout(() => setRedactToast(false), 3500);
             } catch (err) {
               setRedactionError(
-                err instanceof Error ? err.message : "Could not redact capture.",
+                err instanceof Error
+                  ? err.message
+                  : "Could not redact capture.",
               );
             }
           }}
@@ -388,7 +546,7 @@ async function requestMicrophonePermission() {
   }
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    for (const track of stream.getTracks()) track.stop();
+    return stream;
   } catch {
     throw new Error(
       "Microphone permission is required for the screenshare interview.",
@@ -454,12 +612,17 @@ async function connectScreenshareRoom(input: {
   session: ScreenshareSession;
   roomRef: MutableRefObject<LiveKitRoomLike | null>;
   screenStreamRef: MutableRefObject<MediaStream | null>;
+  micStreamRef: MutableRefObject<MediaStream | null>;
   micTrackRef: MutableRefObject<LiveKitTrack | null>;
   audioElsRef: MutableRefObject<HTMLMediaElement[]>;
   samplerCleanupRef: MutableRefObject<(() => void) | null>;
+  mediaRecorderRef: MutableRefObject<MediaRecorder | null>;
+  mediaRecorderChunksRef: MutableRefObject<Blob[]>;
+  onScreenStreamChange: (stream: MediaStream | null) => void;
   onEvent: (message: CaptureConversationMessage) => void;
   onError: (message: string) => void;
   onFrameCaptured: () => void;
+  onHealthChange: (patch: Partial<CaptureHealth>) => void;
 }) {
   const roomUrl = input.session.liveKit?.url;
   const roomToken = input.session.liveKit?.token;
@@ -468,9 +631,42 @@ async function connectScreenshareRoom(input: {
     const livekit = await importLiveKitClient();
     const room = new livekit.Room({ adaptiveStream: true, dynacast: true });
     const events = livekit.RoomEvent;
+    const agentIdentity = input.session.liveKit?.agentParticipantIdentity;
+    room.on(
+      events.ParticipantConnected ?? "participantConnected",
+      (participant) => {
+        const identity =
+          typeof participant === "object" &&
+          participant &&
+          "identity" in participant
+            ? String(participant.identity)
+            : "";
+        if (!agentIdentity || identity === agentIdentity) {
+          input.onHealthChange({ agentJoined: true });
+        }
+      },
+    );
+    room.on(events.LocalTrackPublished ?? "localTrackPublished", (...args) => {
+      const publication = args[0] as
+        | { source?: string; kind?: string }
+        | undefined;
+      if (
+        publication?.source === "screen_share" ||
+        publication?.kind === "video"
+      ) {
+        input.onHealthChange({ screenTrackPublishing: true });
+      }
+      if (
+        publication?.source === "microphone" ||
+        publication?.kind === "audio"
+      ) {
+        input.onHealthChange({ micPublishing: true });
+      }
+    });
     room.on(events.DataReceived ?? "dataReceived", (...args) => {
       const message = captureMessageFromDataEvent(args);
       if (message) input.onEvent(message);
+      input.onHealthChange({ agentJoined: true });
     });
     room.on(events.TrackSubscribed ?? "trackSubscribed", (track) => {
       const remoteTrack = track as LiveKitTrack;
@@ -498,6 +694,15 @@ async function connectScreenshareRoom(input: {
     });
     await room.connect(roomUrl, roomToken);
     input.roomRef.current = room;
+    const agentAlreadyPresent = [
+      ...(room.remoteParticipants?.values() ?? []),
+    ].some(
+      (participant) => !agentIdentity || participant.identity === agentIdentity,
+    );
+    input.onHealthChange({
+      livekitConnected: true,
+      agentJoined: agentAlreadyPresent,
+    });
     input.onEvent({
       id: `room-connected-${input.session.captureSessionId}-${Date.now()}`,
       speaker: "system",
@@ -512,20 +717,51 @@ async function connectScreenshareRoom(input: {
         audio: false,
       }));
     input.screenStreamRef.current = screenStream;
+    input.onScreenStreamChange(screenStream);
+    startMediaRecorderFallback({
+      screenStream,
+      micStream: input.micStreamRef.current,
+      mediaRecorderRef: input.mediaRecorderRef,
+      mediaRecorderChunksRef: input.mediaRecorderChunksRef,
+    });
+    input.onHealthChange({
+      recordingActive: Boolean(input.mediaRecorderRef.current),
+    });
+    const screenShareSource =
+      livekit.Track?.Source?.ScreenShare ?? "screen_share";
     for (const track of screenStream.getVideoTracks()) {
-      await room.localParticipant.publishTrack?.(track);
+      await room.localParticipant.publishTrack?.(track, {
+        name: `operator-screen-${input.session.captureSessionId}`,
+        source: screenShareSource,
+      });
     }
+    input.onHealthChange({ screenTrackPublishing: true });
     input.samplerCleanupRef.current = startScreenFrameSampler({
       session: input.session,
       stream: screenStream,
       onError: input.onError,
       onFrameCaptured: input.onFrameCaptured,
     });
-    await room.localParticipant.setMicrophoneEnabled?.(true);
-    if (!room.localParticipant.setMicrophoneEnabled && livekit.createLocalAudioTrack) {
+    const microphoneSource = livekit.Track?.Source?.Microphone ?? "microphone";
+    const micTracks = input.micStreamRef.current?.getAudioTracks() ?? [];
+    if (micTracks.length > 0) {
+      for (const track of micTracks) {
+        input.micTrackRef.current = track as LiveKitTrack;
+        await room.localParticipant.publishTrack?.(track, {
+          source: microphoneSource,
+        });
+      }
+      input.onHealthChange({ micPublishing: true });
+    } else if (room.localParticipant.setMicrophoneEnabled) {
+      await room.localParticipant.setMicrophoneEnabled(true);
+      input.onHealthChange({ micPublishing: true });
+    } else if (livekit.createLocalAudioTrack) {
       const micTrack = await livekit.createLocalAudioTrack();
       input.micTrackRef.current = micTrack;
-      await room.localParticipant.publishTrack?.(micTrack);
+      await room.localParticipant.publishTrack?.(micTrack, {
+        source: microphoneSource,
+      });
+      input.onHealthChange({ micPublishing: true });
     }
     await sendLiveKitOperatorControl(
       room,
@@ -536,9 +772,11 @@ async function connectScreenshareRoom(input: {
     disconnectScreenshareRoom(
       input.roomRef,
       input.screenStreamRef,
+      input.micStreamRef,
       input.micTrackRef,
       input.audioElsRef,
       input.samplerCleanupRef,
+      input.onScreenStreamChange,
     );
     input.onError(
       error instanceof Error
@@ -574,38 +812,239 @@ async function setOperatorMicrophoneMuted(
   micTrack: LiveKitTrack | null,
   muted: boolean,
 ) {
+  if (micTrack) {
+    micTrack.enabled = !muted;
+    if (muted) {
+      await micTrack.mute?.();
+    } else {
+      await micTrack.unmute?.();
+    }
+    return;
+  }
   if (room?.localParticipant.setMicrophoneEnabled) {
     await room.localParticipant.setMicrophoneEnabled(!muted);
     return;
   }
-  if (muted) {
-    await micTrack?.mute?.();
+}
+
+async function setScreenshareCapturePaused(input: {
+  paused: boolean;
+  session: ScreenshareSession;
+  room: LiveKitRoomLike | null;
+  mediaRecorderRef: MutableRefObject<MediaRecorder | null>;
+  screenStreamRef: MutableRefObject<MediaStream | null>;
+  samplerCleanupRef: MutableRefObject<(() => void) | null>;
+  onFrameCaptured: () => void;
+  onError: (message: string) => void;
+}) {
+  if (input.paused) {
+    stopScreenFrameSampler(input.samplerCleanupRef);
+    pauseMediaRecorder(input.mediaRecorderRef);
   } else {
-    await micTrack?.unmute?.();
+    resumeMediaRecorder(input.mediaRecorderRef);
+    const stream = input.screenStreamRef.current;
+    if (stream && !input.samplerCleanupRef.current) {
+      input.samplerCleanupRef.current = startScreenFrameSampler({
+        session: input.session,
+        stream,
+        onError: input.onError,
+        onFrameCaptured: input.onFrameCaptured,
+      });
+    }
   }
+  await sendLiveKitOperatorControl(
+    input.room,
+    input.paused ? "pause" : "resume",
+    input.session.captureSessionId,
+  );
+}
+
+function stopScreenFrameSampler(
+  samplerCleanupRef: MutableRefObject<(() => void) | null>,
+) {
+  samplerCleanupRef.current?.();
+  samplerCleanupRef.current = null;
 }
 
 function disconnectScreenshareRoom(
   roomRef: MutableRefObject<LiveKitRoomLike | null>,
   screenStreamRef: MutableRefObject<MediaStream | null>,
+  micStreamRef: MutableRefObject<MediaStream | null>,
   micTrackRef: MutableRefObject<LiveKitTrack | null>,
   audioElsRef: MutableRefObject<HTMLMediaElement[]>,
   samplerCleanupRef: MutableRefObject<(() => void) | null>,
+  onScreenStreamChange?: (stream: MediaStream | null) => void,
 ) {
   try {
-    samplerCleanupRef.current?.();
-    for (const track of screenStreamRef.current?.getTracks() ?? []) track.stop();
+    stopScreenFrameSampler(samplerCleanupRef);
+    for (const track of screenStreamRef.current?.getTracks() ?? [])
+      track.stop();
+    for (const track of micStreamRef.current?.getTracks() ?? []) track.stop();
     micTrackRef.current?.stop?.();
     roomRef.current?.disconnect();
   } catch {
     // Ignore teardown races between browser permission prompts and room disconnect.
   }
   screenStreamRef.current = null;
+  micStreamRef.current = null;
+  onScreenStreamChange?.(null);
   micTrackRef.current = null;
   roomRef.current = null;
   samplerCleanupRef.current = null;
   for (const element of audioElsRef.current) element.remove();
   audioElsRef.current = [];
+}
+
+function captureHealthItems(health: CaptureHealth) {
+  return [
+    { label: "LiveKit connected", ready: health.livekitConnected },
+    { label: "Mic publishing", ready: health.micPublishing },
+    { label: "Screen track publishing", ready: health.screenTrackPublishing },
+    { label: "Keyframes saved", ready: health.keyframesSaved },
+    { label: "Agent joined", ready: health.agentJoined },
+    { label: "Browser recording buffer", ready: health.recordingActive },
+  ];
+}
+
+function startMediaRecorderFallback(input: {
+  screenStream: MediaStream;
+  micStream: MediaStream | null;
+  mediaRecorderRef: MutableRefObject<MediaRecorder | null>;
+  mediaRecorderChunksRef: MutableRefObject<Blob[]>;
+}) {
+  if (input.mediaRecorderRef.current || typeof MediaRecorder === "undefined") {
+    return;
+  }
+  const mimeType = preferredMediaRecorderMimeType();
+  try {
+    const recordingStream = new MediaStream([
+      ...input.screenStream.getVideoTracks(),
+      ...(input.micStream?.getAudioTracks() ?? []),
+    ]);
+    const recorder = new MediaRecorder(
+      recordingStream,
+      {
+        ...(mimeType ? { mimeType } : {}),
+        videoBitsPerSecond: SCREEN_RECORDING_VIDEO_BITS_PER_SECOND,
+        audioBitsPerSecond: SCREEN_RECORDING_AUDIO_BITS_PER_SECOND,
+      },
+    );
+    input.mediaRecorderChunksRef.current = [];
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) {
+        input.mediaRecorderChunksRef.current.push(event.data);
+      }
+    };
+    recorder.start(5000);
+    input.mediaRecorderRef.current = recorder;
+  } catch {
+    input.mediaRecorderRef.current = null;
+  }
+}
+
+async function stopAndUploadMediaRecorderFallback(input: {
+  mediaRecorderRef: MutableRefObject<MediaRecorder | null>;
+  mediaRecorderChunksRef: MutableRefObject<Blob[]>;
+  session: ScreenshareSession;
+}) {
+  const recorder = input.mediaRecorderRef.current;
+  if (!recorder) return null;
+  const chunks = await stopMediaRecorder(
+    recorder,
+    input.mediaRecorderChunksRef,
+  );
+  input.mediaRecorderRef.current = null;
+  if (chunks.length === 0) return null;
+  const mimeType = recorder.mimeType || "video/webm";
+  const blob = new Blob(chunks, { type: mimeType });
+  const extension = mimeType.includes("mp4") ? "mp4" : "webm";
+  const filename = `operator-capture-${input.session.captureSessionId}.${extension}`;
+  const presign = await postJson<{
+    artifact: { id: string };
+    upload_url: string;
+  }>(
+    `/api/workspaces/${input.session.workspaceId}/artifacts/presign`,
+    {
+      filename,
+      mime_type: mimeType,
+      size_bytes: blob.size,
+      artifact_type: "video",
+    },
+    `operator-mediarecorder-presign-${input.session.captureSessionId}`,
+  );
+  const upload = await fetch(presign.upload_url, {
+    method: "PUT",
+    headers: { "content-type": mimeType },
+    body: blob,
+  });
+  if (!upload.ok)
+    throw new Error(`Recording upload failed (${upload.status}).`);
+  return postJson(
+    `/api/processes/${input.session.processId}/operator-captures/${input.session.captureSessionId}/recording`,
+    {
+      workspace_id: input.session.workspaceId,
+      artifact_id: presign.artifact.id,
+      provider: "mediarecorder-final-blob",
+    },
+    `operator-mediarecorder-bind-${input.session.captureSessionId}`,
+  );
+}
+
+function stopMediaRecorderWithoutUpload(
+  mediaRecorderRef: MutableRefObject<MediaRecorder | null>,
+) {
+  const recorder = mediaRecorderRef.current;
+  mediaRecorderRef.current = null;
+  if (recorder && recorder.state !== "inactive") {
+    recorder.stop();
+  }
+}
+
+function pauseMediaRecorder(
+  mediaRecorderRef: MutableRefObject<MediaRecorder | null>,
+) {
+  const recorder = mediaRecorderRef.current;
+  if (recorder?.state === "recording") {
+    recorder.requestData();
+    recorder.pause();
+  }
+}
+
+function resumeMediaRecorder(
+  mediaRecorderRef: MutableRefObject<MediaRecorder | null>,
+) {
+  const recorder = mediaRecorderRef.current;
+  if (recorder?.state === "paused") {
+    recorder.resume();
+  }
+}
+
+function stopMediaRecorder(
+  recorder: MediaRecorder,
+  chunksRef: MutableRefObject<Blob[]>,
+) {
+  return new Promise<Blob[]>((resolve) => {
+    if (recorder.state === "inactive") {
+      resolve(chunksRef.current);
+      return;
+    }
+    const finalize = () => resolve(chunksRef.current);
+    recorder.addEventListener("stop", finalize, { once: true });
+    recorder.requestData();
+    recorder.stop();
+  });
+}
+
+function preferredMediaRecorderMimeType() {
+  const candidates = [
+    "video/webm;codecs=vp9,opus",
+    "video/webm;codecs=vp8,opus",
+    "video/webm",
+    "video/mp4",
+  ];
+  return candidates.find((candidate) =>
+    MediaRecorder.isTypeSupported(candidate),
+  );
 }
 
 function startScreenFrameSampler(input: {
@@ -637,26 +1076,45 @@ function startScreenFrameSampler(input: {
   let frameIndex = 0;
   let uploadInFlight = false;
   let readyWarningSent = false;
+  let firstFrameSaved = false;
+
+  const warnIfStalled = (reason: string) => {
+    if (readyWarningSent || firstFrameSaved) return;
+    if (Date.now() - Date.parse(input.session.startedAt) <= 4000) return;
+    readyWarningSent = true;
+    const tracks = input.stream.getVideoTracks();
+    const trackState = tracks
+      .map((track) => `${track.readyState}${track.muted ? ":muted" : ""}`)
+      .join(", ");
+    input.onError(
+      `Screen sharing is connected, but no screen frames are available yet (${reason}${trackState ? `; track ${trackState}` : ""}). Try sharing a window or entire screen, then restart the interview if this persists.`,
+    );
+  };
 
   const sample = async () => {
-    if (
-      stopped ||
-      uploadInFlight ||
-      video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA
-    ) {
-      if (!readyWarningSent && Date.now() - Date.parse(input.session.startedAt) > 4000) {
-        readyWarningSent = true;
-        input.onError(
-          "Screen sharing is connected, but no screen frames are available yet. Try sharing a window or entire screen instead of this tab.",
-        );
-      }
+    if (stopped || uploadInFlight) {
+      return;
+    }
+    if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+      warnIfStalled(`video not ready: ${video.readyState}`);
+      return;
+    }
+    if (!input.stream.active || input.stream.getVideoTracks().length === 0) {
+      warnIfStalled("screen stream is inactive");
       return;
     }
     const width = Math.max(1, video.videoWidth);
     const height = Math.max(1, video.videoHeight);
-    if (width <= 1 || height <= 1) return;
+    if (width <= 1 || height <= 1) {
+      warnIfStalled(
+        `video dimensions unavailable: ${video.videoWidth}x${video.videoHeight}`,
+      );
+      return;
+    }
     const hash = hashVideoFrame(video, hashCanvas);
-    const diffScore = lastHash ? hammingDistance(hash, lastHash) / hash.length : 1;
+    const diffScore = lastHash
+      ? hammingDistance(hash, lastHash) / hash.length
+      : 1;
     if (lastHash && diffScore < SCREEN_FRAME_DUPLICATE_DIFF_THRESHOLD) return;
     lastHash = hash;
 
@@ -691,7 +1149,8 @@ function startScreenFrameSampler(input: {
         headers: { "content-type": "image/jpeg" },
         body: blob,
       });
-      if (!upload.ok) throw new Error(`Frame upload failed (${upload.status}).`);
+      if (!upload.ok)
+        throw new Error(`Frame upload failed (${upload.status}).`);
       await postJson(
         `/api/processes/${input.session.processId}/operator-captures/${input.session.captureSessionId}/screen-frames`,
         {
@@ -713,6 +1172,7 @@ function startScreenFrameSampler(input: {
         `screen-frame-bind-${input.session.captureSessionId}-${currentFrame}`,
       );
       input.onFrameCaptured();
+      firstFrameSaved = true;
     } catch (error) {
       input.onError(
         error instanceof Error
@@ -725,6 +1185,8 @@ function startScreenFrameSampler(input: {
   };
 
   void video.play().catch(() => undefined);
+  video.addEventListener("loadedmetadata", () => void sample());
+  video.addEventListener("playing", () => void sample());
   timer = window.setInterval(
     () => void sample(),
     SCREEN_FRAME_SAMPLE_INTERVAL_MS,
@@ -746,10 +1208,13 @@ function hashVideoFrame(video: HTMLVideoElement, canvas: HTMLCanvasElement) {
   const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
   const luminance: number[] = [];
   for (let index = 0; index < data.length; index += 4) {
-    luminance.push(data[index] * 0.299 + data[index + 1] * 0.587 + data[index + 2] * 0.114);
+    luminance.push(
+      data[index] * 0.299 + data[index + 1] * 0.587 + data[index + 2] * 0.114,
+    );
   }
   const mean =
-    luminance.reduce((sum, value) => sum + value, 0) / Math.max(1, luminance.length);
+    luminance.reduce((sum, value) => sum + value, 0) /
+    Math.max(1, luminance.length);
   return luminance.map((value) => (value >= mean ? "1" : "0")).join("");
 }
 

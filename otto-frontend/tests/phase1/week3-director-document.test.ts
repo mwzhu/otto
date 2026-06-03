@@ -48,6 +48,7 @@ import { loadDirectorProbeLibrary, probeLibrary } from "@/lib/interview/director
 import {
   buildDocumentExtractionStaticInput,
   chunkDocument,
+  extractDocumentInventory,
 } from "@/lib/documents/pipeline";
 
 const root = process.cwd();
@@ -74,14 +75,15 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(blocks.dynamicBlock).toContain("00000000-0000-0000-0000-000000000101: Quote Approvals");
   });
 
-  test("cacheable static prompt blocks are large enough for Anthropic prompt caching", () => {
+  test("director cacheable static prompt blocks stay separate from compact document prompts", () => {
     const blocks = buildPromptCacheBlocks({
       currentSlots: new Map(),
       recentTurns: [],
       latestUtterance: "test",
     });
     expect(blocks.staticBlock.length).toBeGreaterThan(4096);
-    expect(buildDocumentExtractionStaticInput().length).toBeGreaterThan(4096);
+    expect(buildDocumentExtractionStaticInput().length).toBeLessThan(1800);
+    expect(buildDocumentExtractionStaticInput()).not.toContain("Document inventory JSON schema");
   });
 
   test("streaming planner waits for the complete planned utterance string", () => {
@@ -2084,6 +2086,7 @@ describe("Week 3 director brain and document pipeline", () => {
     ).toBe("claude-opus-4-7");
     expect(anthropicMaxTokensForPrompt("director.turn.plan")).toBe(8000);
     expect(anthropicMaxTokensForPrompt("director.voice.phrase-intent")).toBe(200);
+    expect(anthropicMaxTokensForPrompt("document.extract-claims")).toBe(8000);
     expect(anthropicMaxTokensForPrompt("synthesis.inventory")).toBe(1200);
     expect(anthropicPricingForModel("claude-haiku-4-5").output).toBeLessThan(
       anthropicPricingForModel("claude-sonnet-4-6").output,
@@ -2154,6 +2157,33 @@ describe("Week 3 director brain and document pipeline", () => {
     });
     expect(result.value).toEqual({ ok: true });
     if (priorAnthropic) process.env.ANTHROPIC_API_KEY = priorAnthropic;
+  });
+
+  test("document inventory falls back to heuristic extraction when structured output fails", async () => {
+    process.env.OTTO_LLM_FORCE_INVALID = "true";
+    let candidates: Awaited<ReturnType<typeof extractDocumentInventory>>;
+    try {
+      candidates = await extractDocumentInventory(
+        [
+          "Process: Forecast Submission",
+          "Owner: Finance Operations",
+          "Frequency: weekly",
+          "Systems: Google Sheets, Salesforce",
+          "Pain points: manual spreadsheet cleanup.",
+        ].join("\n"),
+      );
+    } finally {
+      delete process.env.OTTO_LLM_FORCE_INVALID;
+    }
+
+    expect(candidates).toEqual([
+      expect.objectContaining({
+        processName: "Forecast Submission",
+        ownerRole: "Finance Operations",
+        frequency: "weekly",
+        systems: ["Google Sheets", "Salesforce"],
+      }),
+    ]);
   });
 
   test("structured adapter parses Anthropic tool-use input when a tool schema is provided", async () => {

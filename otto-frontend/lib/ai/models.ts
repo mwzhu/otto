@@ -36,6 +36,7 @@ export function anthropicModelForPrompt(
     | "DIRECTOR_BRAIN_MODEL"
     | "DIRECTOR_VOICE_MODEL"
     | "OPERATOR_BRAIN_MODEL"
+    | "OPERATOR_WORKFLOW_MODEL"
     | "SYNTHESIS_PLANNER_MODEL"
   >,
   promptTemplateId: string,
@@ -55,6 +56,14 @@ export function anthropicModelForPrompt(
   if (promptTemplateId.startsWith("operator.voice.")) {
     return env.OPERATOR_BRAIN_MODEL ?? env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6";
   }
+  if (isOperatorWorkflowPrompt(promptTemplateId)) {
+    return (
+      env.OPERATOR_WORKFLOW_MODEL ??
+      env.OPERATOR_BRAIN_MODEL ??
+      env.ANTHROPIC_MODEL ??
+      "claude-sonnet-4-6"
+    );
+  }
   if (promptTemplateId.startsWith("synthesis.")) {
     return env.SYNTHESIS_PLANNER_MODEL ?? env.ANTHROPIC_MODEL ?? "claude-opus-4-7";
   }
@@ -62,12 +71,21 @@ export function anthropicModelForPrompt(
 }
 
 export function anthropicMaxTokensForPrompt(promptTemplateId: string) {
+  if (promptTemplateId.startsWith("document.extract-claims")) return 8000;
   if (promptTemplateId.startsWith("director.turn.plan")) return 8000;
   if (promptTemplateId.startsWith("director.turn.extract")) return 8000;
   if (promptTemplateId.startsWith("director.voice.")) return 200;
   if (promptTemplateId.startsWith("operator.turn.plan")) return 700;
   if (promptTemplateId.startsWith("operator.voice.")) return 200;
+  if (isOperatorWorkflowPrompt(promptTemplateId)) return 16000;
   return 1200;
+}
+
+function isOperatorWorkflowPrompt(promptTemplateId: string) {
+  return (
+    promptTemplateId.startsWith("operator.workflow.") ||
+    promptTemplateId.startsWith("operator.workflow_")
+  );
 }
 
 export function anthropicPricingForModel(model: string): AnthropicPricing {

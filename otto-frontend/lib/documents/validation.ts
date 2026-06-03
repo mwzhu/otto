@@ -4,6 +4,7 @@ import { getServerEnv } from "@/lib/env";
 import { ApiError } from "@/lib/http/json";
 
 export const MAX_DOCUMENT_UPLOAD_BYTES = 25 * 1024 * 1024;
+export const MAX_SCREEN_RECORDING_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 
 const supportedDocumentTypes = new Map<string, string[]>([
   ["text/plain", [".txt", ".text", ".log"]],
@@ -33,12 +34,29 @@ export function validateDocumentUploadMetadata(input: {
   if (input.artifactType === "document" && !input.sizeBytes) {
     throw new ApiError(400, "bad_request", "Document size is required.");
   }
-  if (input.sizeBytes && input.sizeBytes > MAX_DOCUMENT_UPLOAD_BYTES) {
+  if (
+    input.artifactType === "document" &&
+    input.sizeBytes &&
+    input.sizeBytes > MAX_DOCUMENT_UPLOAD_BYTES
+  ) {
     throw new ApiError(
       400,
       "bad_request",
       `Document is too large. Maximum supported size is ${Math.round(
         MAX_DOCUMENT_UPLOAD_BYTES / 1024 / 1024,
+      )}MB.`,
+    );
+  }
+  if (
+    input.artifactType === "video" &&
+    input.sizeBytes &&
+    input.sizeBytes > MAX_SCREEN_RECORDING_UPLOAD_BYTES
+  ) {
+    throw new ApiError(
+      400,
+      "bad_request",
+      `Screen recording is too large. Maximum supported size is ${Math.round(
+        MAX_SCREEN_RECORDING_UPLOAD_BYTES / 1024 / 1024,
       )}MB.`,
     );
   }

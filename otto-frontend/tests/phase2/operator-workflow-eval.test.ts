@@ -185,6 +185,54 @@ describe("operator workflow builder early eval gate", () => {
     );
   });
 
+  test("technical capture artifacts are not promoted to business workflow nodes", () => {
+    const graph = buildDeterministicOperatorGraph({
+      orgId: "org-eval",
+      workspaceId: "workspace-eval",
+      processId: "process-eval",
+      processName: "Promotion Management",
+      captureSessionIds: ["capture-eval"],
+      transcriptSegments: [],
+      screenEvents: [],
+      visualObservations: [
+        {
+          id: "vo-technical-1",
+          tsMs: 0,
+          provider: "deterministic-screen-vision",
+          uiSummary: "Keyframe candidate 1 from operator-capture.webm",
+          ocrText: null,
+          structuredJson: {
+            ui_state_label: "Keyframe candidate 1 from operator-capture.webm",
+            actions_observed: [
+              "screen recording upload",
+              "video keyframe candidate",
+              "ocr pending",
+            ],
+          },
+          confidence: 0.66,
+          evidenceIds: ["e-technical-1"],
+          degradedReasons: ["local_frame_ocr_not_configured"],
+        },
+      ],
+      documentChunks: [],
+      provisionalSteps: [
+        {
+          id: "ps-technical-1",
+          tsStartMs: 0,
+          tsEndMs: 10_000,
+          title: "Keyframe Candidate 1 From Operator Capture.Webm",
+          confidence: 0.32,
+        },
+      ],
+      slotStates: [],
+    });
+
+    const taskTitles = graph.nodes
+      .filter((node) => node.type === "task")
+      .map((node) => node.data.title);
+    expect(taskTitles).toEqual(["Map Promotion Management"]);
+  });
+
   test("mixed-mode evidence is chunked and stitched in timeline order", () => {
     const pack: OperatorEvidencePack = {
       orgId: "org-eval",
@@ -395,7 +443,7 @@ describe("operator workflow builder early eval gate", () => {
     );
   });
 
-  test("long captures keep every task candidate and route across rows", () => {
+  test("long captures keep every task candidate and lay out top to bottom", () => {
     const graph = buildDeterministicOperatorGraph({
       orgId: "org-eval",
       workspaceId: "workspace-eval",
@@ -416,23 +464,32 @@ describe("operator workflow builder early eval gate", () => {
     });
 
     const taskNodes = graph.nodes.filter((node) => node.type === "task");
+    const startNode = graph.nodes.find((node) => node.type === "start");
+    const endNode = graph.nodes.find((node) => node.type === "end");
     expect(taskNodes).toHaveLength(80);
     expect(new Set(taskNodes.map((node) => node.position.y)).size).toBeGreaterThan(1);
-    expect(graph.edges.some((edge) => (edge.waypoints ?? []).length > 0)).toBe(true);
+    expect(startNode?.position.y).toBeLessThan(taskNodes[0].position.y);
+    expect(taskNodes[taskNodes.length - 1].position.y).toBeLessThan(
+      endNode?.position.y ?? 0,
+    );
+    expect(graph.edges.every((edge) => edge.sourceSide === "bottom")).toBe(true);
+    expect(graph.edges.every((edge) => edge.targetSide === "top")).toBe(true);
     expect(graph.warnings?.map((warning) => warning.code)).not.toContain(
       "operator_graph_task_limit_applied",
     );
   });
 
-  test("operator layout routes long graphs without overlapping task rows", () => {
+  test("operator layout routes workflow maps from start to end vertically", () => {
     const layout = layoutOperatorGraph(10);
-    expect(layout.startPosition).toEqual({ x: 80, y: 120 });
-    expect(layout.taskPosition(0)).toEqual({ x: 320, y: 120 });
-    expect(layout.taskPosition(8)).toEqual({ x: 320, y: 310 });
-    expect(layout.endPosition).toEqual({ x: 840, y: 310 });
-    expect(operatorEdgeWaypoints(layout.taskPosition(7), layout.taskPosition(8))).toEqual([
-      { x: 2290, y: 120 },
-      { x: 2290, y: 310 },
+    expect(layout.startPosition).toEqual({ x: 360, y: 80 });
+    expect(layout.taskPosition(0)).toEqual({ x: 300, y: 320 });
+    expect(layout.decisionPosition(2)).toEqual({ x: 330, y: 790 });
+    expect(layout.taskPosition(8)).toEqual({ x: 300, y: 2400 });
+    expect(layout.endPosition).toEqual({ x: 350, y: 2890 });
+    expect(operatorEdgeWaypoints(layout.taskPosition(7), layout.taskPosition(8))).toBeUndefined();
+    expect(operatorEdgeWaypoints({ x: 100, y: 100 }, { x: 500, y: 400 })).toEqual([
+      { x: 100, y: 250 },
+      { x: 500, y: 250 },
     ]);
   });
 

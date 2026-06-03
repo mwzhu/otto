@@ -90,11 +90,33 @@ export async function runOperatorRedaction(input: OperatorRedactionInput) {
       `);
       const transcriptIds = transcriptRows.rows.map((row) => row.id);
       const screenIds = screenRows.rows.map((row) => row.id);
+      const visualRows = await tx.execute<{
+        id: string;
+        artifact_id: string | null;
+        evidence_id: string | null;
+      }>(sql`
+        UPDATE visual_observations
+        SET redacted_at = coalesce(redacted_at, now()),
+            tombstoned_at = coalesce(tombstoned_at, now()),
+            updated_at = now()
+        WHERE org_id = ${input.orgId}
+          AND workspace_id = ${input.workspaceId}
+          AND capture_session_id = ${input.captureSessionId}
+          AND ts_ms BETWEEN ${redaction.startMs} AND ${redaction.endMs}
+        RETURNING id, artifact_id, evidence_id
+      `);
+      const visualObservationIds = visualRows.rows.map((row) => row.id);
+      const visualEvidenceIds = uniqueStrings(
+        visualRows.rows.map((row) => row.evidence_id),
+      );
       const artifactIds = uniqueStrings(
-        screenRows.rows.flatMap((row) => [
-          row.screenshot_artifact_id,
-          row.metadata_artifact_id,
-        ]),
+        [
+          ...screenRows.rows.flatMap((row) => [
+            row.screenshot_artifact_id,
+            row.metadata_artifact_id,
+          ]),
+          ...visualRows.rows.map((row) => row.artifact_id),
+        ],
       );
       const rawCaptureArtifactRows = (
         await tx.execute<{ id: string; storage_key: string }>(sql`
@@ -152,6 +174,10 @@ export async function runOperatorRedaction(input: OperatorRedactionInput) {
               AND ${screenIds.length > 0}
               AND source_id = ANY(${uuidArraySql(screenIds)})
             )
+            OR (
+              ${visualEvidenceIds.length > 0}
+              AND id = ANY(${uuidArraySql(visualEvidenceIds)})
+            )
           )
         RETURNING id
       `);
@@ -191,7 +217,8 @@ export async function runOperatorRedaction(input: OperatorRedactionInput) {
             'redaction_applied', true,
             'redaction_id', ${redaction.id},
             'redacted_transcript_segment_ids', ${JSON.stringify(transcriptIds)}::jsonb,
-            'redacted_screen_event_ids', ${JSON.stringify(screenIds)}::jsonb
+            'redacted_screen_event_ids', ${JSON.stringify(screenIds)}::jsonb,
+            'redacted_visual_observation_ids', ${JSON.stringify(visualObservationIds)}::jsonb
           ),
           updated_at = now()
         WHERE org_id = ${input.orgId}
@@ -203,7 +230,12 @@ export async function runOperatorRedaction(input: OperatorRedactionInput) {
           )
       `);
 
-      const affectedTraceIds = [...transcriptIds, ...screenIds, ...evidenceIds];
+      const affectedTraceIds = [
+        ...transcriptIds,
+        ...screenIds,
+        ...visualObservationIds,
+        ...evidenceIds,
+      ];
       const completed = (
         await tx
           .update(redactions)
@@ -231,6 +263,7 @@ export async function runOperatorRedaction(input: OperatorRedactionInput) {
           end_ms: redaction.endMs,
           transcript_segment_ids: transcriptIds,
           screen_event_ids: screenIds,
+          visual_observation_ids: visualObservationIds,
           evidence_ids: evidenceIds,
           affected_artifact_ids: allArtifactIds,
           raw_capture_artifact_ids: rawCaptureArtifactIds,
@@ -242,6 +275,7 @@ export async function runOperatorRedaction(input: OperatorRedactionInput) {
         redaction: completed,
         transcript_segment_ids: transcriptIds,
         screen_event_ids: screenIds,
+        visual_observation_ids: visualObservationIds,
         evidence_ids: evidenceIds,
         affected_artifact_ids: allArtifactIds,
         raw_capture_artifact_ids: rawCaptureArtifactIds,

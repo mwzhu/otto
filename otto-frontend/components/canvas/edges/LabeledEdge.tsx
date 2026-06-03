@@ -10,6 +10,8 @@ type Data = {
   targetSide?: "top" | "bottom" | "left" | "right";
 };
 
+export const VERTICAL_BRANCH_LANE_OFFSET_X = 180;
+
 export function LabeledEdge({
   id,
   sourceX,
@@ -26,6 +28,25 @@ export function LabeledEdge({
   if (data?.waypoints && data.waypoints.length > 0) {
     // Use the authored waypoints directly to produce orthogonal routing.
     for (const wp of data.waypoints) points.push([wp.x, wp.y]);
+    points.push([targetX, targetY]);
+  } else if (data?.label && shouldRouteBranchAroundRow(sourceX, sourceY, targetX, targetY)) {
+    const offsetY = branchLabelDirection(data.label) * 96;
+    const sourceOffsetX = Math.min(120, Math.max(72, Math.abs(targetX - sourceX) * 0.22));
+    const targetOffsetX = Math.min(120, Math.max(72, Math.abs(targetX - sourceX) * 0.22));
+    points.push([sourceX + sourceOffsetX, sourceY]);
+    points.push([sourceX + sourceOffsetX, sourceY + offsetY]);
+    points.push([targetX - targetOffsetX, targetY + offsetY]);
+    points.push([targetX - targetOffsetX, targetY]);
+    points.push([targetX, targetY]);
+  } else if (shouldRouteBranchAroundColumn(sourceX, sourceY, targetX, targetY, data)) {
+    const direction = branchLabelDirection(data?.label);
+    const offsetX = direction * VERTICAL_BRANCH_LANE_OFFSET_X;
+    const verticalDirection = Math.sign(targetY - sourceY) || 1;
+    const offsetY = Math.min(96, Math.max(56, Math.abs(targetY - sourceY) * 0.2));
+    points.push([sourceX, sourceY + verticalDirection * offsetY]);
+    points.push([sourceX + offsetX, sourceY + verticalDirection * offsetY]);
+    points.push([targetX + offsetX, targetY - verticalDirection * offsetY]);
+    points.push([targetX, targetY - verticalDirection * offsetY]);
     points.push([targetX, targetY]);
   } else {
     // Default orthogonal routing: vertical-first or horizontal-first depending
@@ -65,7 +86,25 @@ export function LabeledEdge({
   const labelPoint =
     data?.waypoints && data.waypoints.length > 0
       ? data.waypoints[0]
-      : { x: (sourceX + targetX) / 2, y: (sourceY + targetY) / 2 };
+      : data?.label && shouldRouteBranchAroundRow(sourceX, sourceY, targetX, targetY)
+        ? {
+            x: (sourceX + targetX) / 2,
+            y: sourceY + branchLabelDirection(data.label) * 96,
+          }
+      : shouldRouteBranchAroundColumn(sourceX, sourceY, targetX, targetY, data)
+        ? {
+            x:
+              sourceX +
+              branchLabelDirection(data?.label) * VERTICAL_BRANCH_LANE_OFFSET_X,
+            y: (sourceY + targetY) / 2,
+          }
+      : {
+          x: (sourceX + targetX) / 2,
+          y:
+            data?.sourceSide === "right" && data?.targetSide === "left"
+              ? (sourceY + targetY) / 2 - 18
+              : (sourceY + targetY) / 2,
+        };
 
   const strokeColor = selected
     ? "#1A1A1A"
@@ -92,7 +131,7 @@ export function LabeledEdge({
               transform: `translate(-50%, -50%) translate(${labelPoint.x}px, ${labelPoint.y}px)`,
               pointerEvents: "none",
             }}
-            className="rounded-full border border-subtle bg-surface px-2 py-0.5 text-[10.5px] font-medium text-ink-secondary shadow-card"
+            className="max-w-[180px] rounded-full border border-subtle bg-surface px-2 py-0.5 text-center text-[10.5px] font-medium leading-tight text-ink-secondary shadow-card"
           >
             {data.label}
           </div>
@@ -100,6 +139,38 @@ export function LabeledEdge({
       )}
     </>
   );
+}
+
+function shouldRouteBranchAroundRow(
+  sourceX: number,
+  sourceY: number,
+  targetX: number,
+  targetY: number,
+) {
+  return Math.abs(sourceY - targetY) < 12 && Math.abs(targetX - sourceX) > 260;
+}
+
+function shouldRouteBranchAroundColumn(
+  sourceX: number,
+  sourceY: number,
+  targetX: number,
+  targetY: number,
+  data?: Data,
+) {
+  return (
+    Boolean(data?.label) &&
+    !isPrimaryBranchLabel(data?.label) &&
+    Math.abs(sourceX - targetX) < 16 &&
+    Math.abs(targetY - sourceY) > 160
+  );
+}
+
+function branchLabelDirection(label: string | undefined) {
+  return /^no\b/i.test(label ?? "") ? 1 : -1;
+}
+
+function isPrimaryBranchLabel(label: string | undefined) {
+  return /^yes\b/i.test(label ?? "");
 }
 
 function roundedOrthogonalPath(points: [number, number][], r: number) {

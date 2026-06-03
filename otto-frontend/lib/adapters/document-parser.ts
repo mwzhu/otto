@@ -23,6 +23,8 @@ export async function parseDocument(input: {
 }): Promise<ParsedDocument> {
   const env = getServerEnv();
   const providerErrors: string[] = [];
+  const textParsed = await parseTextUpload(input, providerErrors);
+  if (textParsed) return textParsed;
   if (env.LLAMAPARSE_API_KEY) {
     try {
       return await parseWithLlamaParse(
@@ -46,13 +48,11 @@ export async function parseDocument(input: {
       providerErrors.push(errorMessage("unstructured", error));
     }
   }
-  const localParsed = await parseLocalUpload(input, providerErrors);
-  if (localParsed) return localParsed;
   if (providerErrors.length > 0) {
     throw new Error(`Document parser failed: ${providerErrors.join("; ")}`);
   }
   throw new Error(
-    `No parser is configured for ${input.mimeType}. Use TXT, Markdown, CSV, or JSON for local uploads, or configure LlamaParse/Unstructured.`,
+    `No parser is configured for ${input.mimeType}. Use TXT, Markdown, CSV, or JSON, or configure LlamaParse/Unstructured.`,
   );
 }
 
@@ -219,7 +219,7 @@ async function fetchOkOnce(url: string, init?: RequestInit) {
   );
 }
 
-async function parseLocalUpload(
+async function parseTextUpload(
   input: {
     filename: string;
     mimeType: string;
@@ -228,18 +228,19 @@ async function parseLocalUpload(
   },
   providerErrors: string[],
 ): Promise<ParsedDocument | null> {
-  const localKey = localUploadKeyFromUrl(input.storageUrl);
-  if (!localKey) return null;
   if (!isLocallyTextParsable(input.mimeType)) {
-    if (providerErrors.length > 0) return null;
-    throw new Error(
-      `No local parser is available for ${input.mimeType}. Configure LlamaParse or Unstructured for this document type.`,
-    );
+    return null;
   }
-  const upload = await readLocalUpload(localKey);
-  const text = normalizeExtractedText(new TextDecoder("utf-8", { fatal: false }).decode(upload.bytes));
+  const localKey = localUploadKeyFromUrl(input.storageUrl);
+  const bytes = localKey
+    ? (await readLocalUpload(localKey)).bytes
+    : await readPublicUploadBytes(input.storageUrl);
+  if (!bytes) return null;
+  const text = normalizeExtractedText(
+    new TextDecoder("utf-8", { fatal: false }).decode(bytes),
+  );
   if (!text.trim()) {
-    throw new Error("Local uploaded document contained no text.");
+    throw new Error("Uploaded text document contained no text.");
   }
   return {
     text,
@@ -249,6 +250,12 @@ async function parseLocalUpload(
       providerErrors,
     },
   };
+}
+
+async function readPublicUploadBytes(storageUrl?: string | null) {
+  if (!storageUrl) return null;
+  const response = await fetchOkWithRetry(storageUrl);
+  return response.arrayBuffer();
 }
 
 function extractLlamaParseText(body: LlamaParseGetResponse) {

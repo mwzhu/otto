@@ -43,10 +43,14 @@ export default function SynthesisClient() {
   const [status, setStatus] = useState<SynthesisStatus | null>(null);
   const [statusTimedOut, setStatusTimedOut] = useState(false);
   const animationDone = idx >= STAGES.length;
+  const nextIsOverview = next.startsWith("/overview");
   const synthesisBlocked =
-    status?.terminal === true && status.ready_for_overview !== true;
+    nextIsOverview &&
+    status?.terminal === true &&
+    status.ready_for_overview !== true;
   const backendDone =
     status?.ready_for_overview === true ||
+    (!nextIsOverview && status?.terminal === true) ||
     (!captureSessionId && !synthesisBlocked && statusTimedOut);
   const done = animationDone && backendDone;
 
@@ -78,9 +82,12 @@ export default function SynthesisClient() {
       try {
         const params = new URLSearchParams();
         if (workspaceId) params.set("workspace_id", workspaceId);
-        if (captureSessionId) params.set("capture_session_id", captureSessionId);
+        if (captureSessionId)
+          params.set("capture_session_id", captureSessionId);
         const query = params.toString();
-        const statusUrl = query ? `/api/synthesis/status?${query}` : "/api/synthesis/status";
+        const statusUrl = query
+          ? `/api/synthesis/status?${query}`
+          : "/api/synthesis/status";
         const response = await fetch(statusUrl, { cache: "no-store" });
         if (response.ok) {
           const nextStatus = (await response.json()) as SynthesisStatus;
@@ -122,16 +129,15 @@ export default function SynthesisClient() {
             {synthesisBlocked
               ? "The latest synthesis run finished without an overview. Check the run before opening the process map."
               : done
-              ? "Your process map is ready for review."
-              : animationDone && !backendDone
-                ? "Waiting for the latest synthesis run to finish."
-                : "Turning captures into a versioned, evidence-anchored map."}
+                ? "Your process map is ready for review."
+                : animationDone && !backendDone
+                  ? "Waiting for the latest synthesis run to finish."
+                  : "Turning captures into a versioned, evidence-anchored map."}
           </p>
         </div>
         <ol className="w-full space-y-2 rounded-lg border border-subtle bg-surface p-4 shadow-card">
           {STAGES.map((s, i) => {
-            const state =
-              i < idx ? "done" : i === idx ? "active" : "pending";
+            const state = i < idx ? "done" : i === idx ? "active" : "pending";
             return (
               <li
                 key={s}
@@ -185,7 +191,13 @@ function StageIcon({ state }: { state: "done" | "active" | "pending" }) {
     return (
       <span className="grid size-4 place-items-center rounded-full bg-status-success text-canvas">
         <svg width="8" height="8" viewBox="0 0 10 10" aria-hidden>
-          <path d="M2 5l2 2 4-4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+          <path
+            d="M2 5l2 2 4-4"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+          />
         </svg>
       </span>
     );

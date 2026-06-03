@@ -25,6 +25,7 @@ export function EndNode({ data }: NodeProps<{ title: string }>) {
         </span>
       </div>
       <Handle type="target" position={Position.Top} className="!opacity-0" />
+      <Handle type="target" position={Position.Left} id="left" className="!opacity-0" />
     </div>
   );
 }

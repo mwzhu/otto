@@ -9,11 +9,15 @@ export function CaptureControls({
   onPauseChange,
   onComplete,
   processId,
+  workspaceId,
+  captureSessionId,
 }: {
   onMuteChange?: (muted: boolean) => Promise<void> | void;
-  onPauseChange: (paused: boolean) => void;
+  onPauseChange: (paused: boolean) => Promise<void> | void;
   onComplete?: () => Promise<void> | void;
   processId: string;
+  workspaceId?: string;
+  captureSessionId?: string;
 }) {
   const router = useRouter();
   const [muted, setMuted] = useState(false);
@@ -61,8 +65,16 @@ export function CaptureControls({
         size="sm"
         onClick={() => {
           setPaused((p) => {
-            onPauseChange(!p);
-            return !p;
+            const next = !p;
+            void Promise.resolve(onPauseChange(next)).catch((err) => {
+              setError(
+                err instanceof Error
+                  ? err.message
+                  : "Could not update pause state.",
+              );
+              setPaused(p);
+            });
+            return next;
           });
         }}
       >
@@ -77,9 +89,11 @@ export function CaptureControls({
           try {
             await onComplete?.();
             router.push(
-              `/synthesis?next=${encodeURIComponent(
-                `/process/${processId}/workspace`,
-              )}`,
+              synthesisHref({
+                next: `/process/${processId}/workspace`,
+                workspaceId,
+                captureSessionId,
+              }),
             );
           } catch (err) {
             setError(
@@ -99,6 +113,19 @@ export function CaptureControls({
       )}
     </div>
   );
+}
+
+function synthesisHref(input: {
+  next: string;
+  workspaceId?: string;
+  captureSessionId?: string;
+}) {
+  const params = new URLSearchParams({ next: input.next });
+  if (input.workspaceId) params.set("workspace_id", input.workspaceId);
+  if (input.captureSessionId) {
+    params.set("capture_session_id", input.captureSessionId);
+  }
+  return `/synthesis?${params.toString()}`;
 }
 
 function formatTime(s: number) {

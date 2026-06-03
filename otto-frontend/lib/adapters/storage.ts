@@ -4,7 +4,11 @@ import { DeleteObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { getServerEnv, requireEnv } from "@/lib/env";
 import { withRetry, type RetryOptions } from "@/lib/adapters/retry";
-import { deleteLocalUpload, localUploadUrl } from "@/lib/adapters/local-upload";
+import {
+  deleteLocalUpload,
+  localUploadUrl,
+  writeLocalUpload,
+} from "@/lib/adapters/local-upload";
 
 let s3: S3Client | null = null;
 
@@ -48,12 +52,63 @@ export async function createPresignedArtifactUpload(input: {
   }, input.retry);
 }
 
+export async function uploadArtifactObject(input: {
+  key: string;
+  bytes: Buffer | ArrayBuffer | Uint8Array;
+  contentType: string;
+  retry?: RetryOptions;
+}) {
+  const bytes = toArrayBuffer(input.bytes);
+  if (shouldUseLocalUploadFallback()) {
+    await writeLocalUpload({
+      key: input.key,
+      bytes,
+      contentType: input.contentType,
+    });
+    return {
+      ok: true as const,
+      storage: "local" as const,
+      url: localUploadUrl(input.key),
+      sizeBytes: bytes.byteLength,
+    };
+  }
+  await withRetry(async () => {
+    await getS3().send(
+      new PutObjectCommand({
+        Bucket: requireEnv("R2_BUCKET"),
+        Key: input.key,
+        Body: Buffer.from(bytes),
+        ContentType: input.contentType,
+      }),
+    );
+  }, input.retry);
+  return {
+    ok: true as const,
+    storage: "r2" as const,
+    url: storagePublicUrl(input.key),
+    sizeBytes: bytes.byteLength,
+  };
+}
+
 export function storagePublicUrl(key: string) {
   if (shouldUseLocalUploadFallback()) {
     return localUploadUrl(key);
   }
   const base = requireEnv("R2_PUBLIC_BASE_URL").replace(/\/$/, "");
   return `${base}/${key}`;
+}
+
+export function r2S3UploadConfig() {
+  if (!hasR2Config()) return null;
+  const accountId = requireEnv("R2_ACCOUNT_ID");
+  return {
+    endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
+    bucket: requireEnv("R2_BUCKET"),
+    accessKey: requireEnv("R2_ACCESS_KEY_ID"),
+    secret: requireEnv("R2_SECRET_ACCESS_KEY"),
+    region: "auto",
+    forcePathStyle: true,
+  };
 }
 
 export async function deleteArtifactObject(input: {
@@ -104,6 +159,16 @@ function hasR2Config() {
 function shouldUseLocalUploadFallback() {
   const env = getServerEnv();
   return !hasR2Config() && env.NODE_ENV !== "production";
+}
+
+function toArrayBuffer(bytes: Buffer | ArrayBuffer | Uint8Array) {
+  if (bytes instanceof ArrayBuffer) return bytes;
+  if (ArrayBuffer.isView(bytes)) {
+    const copy = new Uint8Array(bytes.byteLength);
+    copy.set(new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength));
+    return copy.buffer;
+  }
+  return bytes;
 }
 
 function safeFilename(filename: string) {

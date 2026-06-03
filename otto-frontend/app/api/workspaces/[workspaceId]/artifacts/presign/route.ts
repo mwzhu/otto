@@ -3,6 +3,7 @@ import { getDb, setOrgContext } from "@/lib/db/client";
 import { artifacts, auditLog } from "@/lib/db/schema";
 import { requireAuth, ensureWorkspaceRole } from "@/lib/auth/session";
 import {
+  ApiError,
   apiError,
   apiJson,
   readJsonWithHash,
@@ -69,7 +70,7 @@ export async function POST(
         artifactId,
         filename: body.filename,
       });
-      const uploadUrl = await createPresignedArtifactUpload({
+      const uploadUrl = await createUploadUrl({
         key,
         contentType: validatedUpload.mimeType,
       });
@@ -115,5 +116,23 @@ export async function POST(
     return apiJson(result.body, { status: result.statusCode });
   } catch (error) {
     return apiError(error);
+  }
+}
+
+async function createUploadUrl(input: { key: string; contentType: string }) {
+  try {
+    return await createPresignedArtifactUpload(input);
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.startsWith("Missing required environment variable: R2_")
+    ) {
+      throw new ApiError(
+        503,
+        "server_error",
+        "Artifact storage is not configured. Run the app with npm run dev for local uploads, or configure R2 storage for production mode.",
+      );
+    }
+    throw error;
   }
 }

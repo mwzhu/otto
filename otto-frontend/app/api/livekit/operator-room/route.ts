@@ -158,6 +158,13 @@ export async function POST(request: Request) {
         captureParticipantUserId(reserved.capture) ?? auth.userId,
       language: captureLanguage(reserved.capture),
     });
+    console.info("operator LiveKit room token issued", {
+      capture_session_id: body.capture_session_id,
+      process_id: reserved.capture.processId,
+      workspace_id: body.workspace_id,
+      mode: room.mode,
+      capture_mode: room.captureMode,
+    });
 
     const env = getServerEnv();
     await getDb().transaction(async (tx) => {

@@ -1,5 +1,6 @@
 import "server-only";
 
+import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { getDb, setOrgContext } from "@/lib/db/client";
 import {
@@ -10,11 +11,17 @@ import {
   provisionalSteps,
   screenEvents,
   transcriptSegments,
+  visualObservations,
 } from "@/lib/db/schema";
 import { writeAgentDecision } from "@/lib/db/write-agent-decision";
 import { sanitizeForLogs, sanitizeJsonForLogs } from "@/lib/security/sanitize";
 import { analyzeScreenRecording } from "@/lib/adapters/screen-recording-analyzer";
 import { analyzeScreenFrame } from "@/lib/adapters/vision";
+import {
+  artifactStorageKey,
+  deleteArtifactObject,
+  uploadArtifactObject,
+} from "@/lib/adapters/storage";
 
 export type ProcessScreenRecordingInput = {
   artifactId: string;
@@ -25,6 +32,17 @@ export type ProcessScreenRecordingInput = {
   idempotencyKey?: string;
 };
 
+type UploadedFrameObject = {
+  artifactId: string;
+  filename: string;
+  storageKey: string;
+  storageUrl: string;
+  mimeType: "image/png";
+  sizeBytes: number;
+};
+
+const SCREEN_RECORDING_ANALYZER_VERSION = "png-frame-extraction-v2";
+
 export async function processScreenRecordingArtifact(
   input: ProcessScreenRecordingInput,
 ) {
@@ -34,7 +52,12 @@ export async function processScreenRecordingArtifact(
       await tx
         .select()
         .from(artifacts)
-        .where(and(eq(artifacts.id, input.artifactId), eq(artifacts.orgId, input.orgId)))
+        .where(
+          and(
+            eq(artifacts.id, input.artifactId),
+            eq(artifacts.orgId, input.orgId),
+          ),
+        )
         .limit(1)
     )[0];
   });
@@ -47,6 +70,9 @@ export async function processScreenRecordingArtifact(
   }
 
   const started = new Date();
+  let frameUploads: Array<UploadedFrameObject | null> = [];
+  const uploadedFrameObjects: UploadedFrameObject[] = [];
+  let frameObjectsPersisted = false;
   try {
     const preflight = await getDb().transaction(async (tx) => {
       await setOrgContext(tx, artifact.orgId);
@@ -119,6 +145,53 @@ export async function processScreenRecordingArtifact(
       storageUrl: artifact.storageUrl,
       durationSeconds: artifact.durationSeconds,
     });
+    const frameDiffScores = analysis.keyframes.map((keyframe, index) =>
+      keyframeDiffScore(
+        analysis.keyframes[index - 1]?.perceptualHash,
+        keyframe.perceptualHash,
+      ),
+    );
+    const multimodalBudget = Number.isFinite(
+      Number(process.env.OTTO_OPERATOR_VISION_MAX_FRAMES),
+    )
+      ? Math.max(
+          0,
+          Math.floor(Number(process.env.OTTO_OPERATOR_VISION_MAX_FRAMES)),
+        )
+      : 40;
+    const multimodalIndexes = budgetedMultimodalIndexes({
+      keyframes: analysis.keyframes,
+      frameDiffScores,
+      budget: multimodalBudget,
+    });
+    frameUploads = await Promise.all(
+      analysis.keyframes.map(async (keyframe, index) => {
+        if (!keyframe.bytes) return null;
+        const artifactId = randomUUID();
+        const filename = `${artifact.filename.replace(/\.[^.]+$/, "")}-frame-${String(index + 1).padStart(3, "0")}.png`;
+        const storageKey = artifactStorageKey({
+          orgId: artifact.orgId,
+          workspaceId: artifact.workspaceId,
+          artifactId,
+          filename,
+        });
+        const uploaded = await uploadArtifactObject({
+          key: storageKey,
+          bytes: keyframe.bytes,
+          contentType: keyframe.mimeType ?? "image/png",
+        });
+        const frameObject: UploadedFrameObject = {
+          artifactId,
+          filename,
+          storageKey,
+          storageUrl: uploaded.url,
+          mimeType: keyframe.mimeType ?? "image/png",
+          sizeBytes: uploaded.sizeBytes,
+        };
+        uploadedFrameObjects.push(frameObject);
+        return frameObject;
+      }),
+    );
 
     const result = await getDb().transaction(async (tx) => {
       await setOrgContext(tx, artifact.orgId);
@@ -154,6 +227,7 @@ export async function processScreenRecordingArtifact(
               storage_key: artifact.storageKey,
               duration_seconds: artifact.durationSeconds,
               provider: analysis.provider,
+              analyzer_version: SCREEN_RECORDING_ANALYZER_VERSION,
               extraction_status: "processed",
               transcript_segment_count: analysis.transcriptSegments.length,
               keyframe_count: analysis.keyframes.length,
@@ -164,11 +238,47 @@ export async function processScreenRecordingArtifact(
           .returning()
       )[0];
 
+      const frameArtifactRows = frameUploads.some(Boolean)
+        ? await tx
+            .insert(artifacts)
+            .values(
+              frameUploads.flatMap((upload) =>
+                upload
+                  ? [
+                      {
+                        id: upload.artifactId,
+                        orgId: artifact.orgId,
+                        workspaceId: artifact.workspaceId,
+                        captureSessionId: input.captureSessionId,
+                        uploadedByUserId:
+                          input.userId ?? artifact.uploadedByUserId,
+                        artifactType: "screen_frame" as const,
+                        status: "ready" as const,
+                        storageKey: upload.storageKey,
+                        storageUrl: upload.storageUrl,
+                        filename: upload.filename,
+                        mimeType: upload.mimeType,
+                        sizeBytes: upload.sizeBytes,
+                        ttlAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+                      },
+                    ]
+                  : [],
+              ),
+            )
+            .returning()
+        : [];
+      const frameArtifactByIndex = new Map(
+        frameArtifactRows.map((row) => [
+          frameUploads.findIndex((upload) => upload?.artifactId === row.id),
+          row,
+        ]),
+      );
+
       const keyframeVision = await Promise.all(
-        analysis.keyframes.map((keyframe) =>
+        analysis.keyframes.map((keyframe, index) =>
           analyzeScreenFrame({
-            filename: artifact.filename,
-            mimeType: artifact.mimeType,
+            filename: keyframe.label || artifact.filename,
+            mimeType: keyframe.mimeType ?? "image/png",
             storageKey: artifact.storageKey,
             storageUrl: artifact.storageUrl,
             appName: "uploaded recording",
@@ -176,7 +286,12 @@ export async function processScreenRecordingArtifact(
             uiStateLabel: keyframe.label,
             ocrText: keyframe.ocrText,
             signalTags: keyframe.signalTags,
-            diffScore: 1,
+            diffScore: frameDiffScores[index],
+            bytes: keyframe.bytes,
+            allowMultimodal: multimodalIndexes.has(index),
+            forceMultimodal: keyframe.signalTags.some((tag) =>
+              tag.startsWith("transcript_trigger_"),
+            ),
           }),
         ),
       );
@@ -195,6 +310,8 @@ export async function processScreenRecordingArtifact(
                 windowTitle: artifact.filename,
                 ocrText: keyframeVision[index].ocrText ?? keyframe.ocrText,
                 uiStateLabel: keyframeVision[index].uiStateLabel,
+                screenshotArtifactId:
+                  frameArtifactByIndex.get(index)?.id ?? undefined,
                 signalTags: uniqueStrings([
                   ...keyframe.signalTags.filter((tag) => tag !== "ocr_pending"),
                   ...keyframeVision[index].signalTags,
@@ -206,10 +323,16 @@ export async function processScreenRecordingArtifact(
                   filename: artifact.filename,
                   provider: analysis.provider,
                   vision_provider: keyframeVision[index].provider,
+                  vision_model: keyframeVision[index].model,
+                  ocr_provider: keyframe.ocrProvider,
                   keyframe_index: index,
-                  meaningful_state_change: keyframeVision[index].meaningfulStateChange,
+                  meaningful_state_change:
+                    keyframeVision[index].meaningfulStateChange,
                   degraded_reasons: keyframeVision[index].degradedReasons,
-                  extraction_status: keyframeVision[index].ocrText ? "ocr_extracted" : "vision_enriched",
+                  frame_artifact_id: frameArtifactByIndex.get(index)?.id,
+                  extraction_status: keyframeVision[index].ocrText
+                    ? "ocr_extracted"
+                    : "vision_enriched",
                 }),
               })),
             )
@@ -275,48 +398,112 @@ export async function processScreenRecordingArtifact(
             .returning()
         : [];
 
-      const evidenceRows = (
+      const uploadEvidenceRow = (
         await tx
           .insert(evidence)
-          .values([
-            {
-              orgId: artifact.orgId,
-              workspaceId: artifact.workspaceId,
-              sourceType: "screen_event",
-              sourceId: uploadEvent.id,
-              evidenceLabel: "observed",
-              quote: `Uploaded screen recording: ${artifact.filename}`,
-              summary: "Uploaded screen recording is available for workflow extraction.",
-              observedAt: new Date(),
-              confidence: "0.62",
-            },
-            ...keyframeEvents.map((event) => ({
-              orgId: artifact.orgId,
-              workspaceId: artifact.workspaceId,
-              sourceType: "screen_event" as const,
-              sourceId: event.id,
-              evidenceLabel: "observed" as const,
-              quote: event.uiStateLabel ?? "Screen recording keyframe candidate",
-              summary:
-                "A sampled screen recording keyframe may show a workflow state.",
-              observedAt: new Date(),
-              confidence: "0.58",
-            })),
-            ...transcriptRows.map((segment) => ({
-              orgId: artifact.orgId,
-              workspaceId: artifact.workspaceId,
-              sourceType: "transcript_segment" as const,
-              sourceId: segment.id,
-              evidenceLabel: "stated_operator" as const,
-              quote: segment.text,
-              summary:
-                "Narration from uploaded screen recording describes workflow behavior.",
-              observedAt: new Date(),
-              confidence: confidenceString(Number(segment.confidence ?? 0.68)),
-            })),
-          ])
+          .values({
+            orgId: artifact.orgId,
+            workspaceId: artifact.workspaceId,
+            sourceType: "screen_event",
+            sourceId: uploadEvent.id,
+            evidenceLabel: "observed",
+            quote: `Uploaded screen recording: ${artifact.filename}`,
+            summary:
+              "Uploaded screen recording is available for workflow extraction.",
+            observedAt: new Date(),
+            confidence: "0.62",
+          })
           .returning()
+      )[0];
+      const keyframeEvidenceRows = keyframeEvents.length
+        ? await tx
+            .insert(evidence)
+            .values(
+              keyframeEvents.map((event) => ({
+                orgId: artifact.orgId,
+                workspaceId: artifact.workspaceId,
+                sourceType: "screen_event" as const,
+                sourceId: event.id,
+                evidenceLabel: "observed" as const,
+                quote:
+                  event.uiStateLabel ?? "Screen recording keyframe candidate",
+                summary:
+                  "A sampled screen recording keyframe may show a workflow state.",
+                observedAt: new Date(),
+                confidence: "0.58",
+              })),
+            )
+            .returning()
+        : [];
+      const transcriptEvidenceRows = transcriptRows.length
+        ? await tx
+            .insert(evidence)
+            .values(
+              transcriptRows.map((segment) => ({
+                orgId: artifact.orgId,
+                workspaceId: artifact.workspaceId,
+                sourceType: "transcript_segment" as const,
+                sourceId: segment.id,
+                evidenceLabel: "stated_operator" as const,
+                quote: segment.text,
+                summary:
+                  "Narration from uploaded screen recording describes workflow behavior.",
+                observedAt: new Date(),
+                confidence: confidenceString(
+                  Number(segment.confidence ?? 0.68),
+                ),
+              })),
+            )
+            .returning()
+        : [];
+      const evidenceRows = [
+        uploadEvidenceRow,
+        ...keyframeEvidenceRows,
+        ...transcriptEvidenceRows,
+      ];
+      const keyframeEvidenceBySourceId = new Map(
+        keyframeEvidenceRows.map((row) => [row.sourceId, row]),
       );
+      const visualObservationRows = keyframeEvents.length
+        ? await tx
+            .insert(visualObservations)
+            .values(
+              keyframeEvents.map((event, index) => {
+                const vision = keyframeVision[index];
+                const evidenceForObservation = keyframeEvidenceBySourceId.get(
+                  event.id,
+                );
+                if (!evidenceForObservation) {
+                  throw new Error(
+                    `Missing keyframe evidence for screen event ${event.id}`,
+                  );
+                }
+                return {
+                  orgId: artifact.orgId,
+                  workspaceId: artifact.workspaceId,
+                  captureSessionId: input.captureSessionId,
+                  screenEventId: event.id,
+                  artifactId:
+                    frameArtifactByIndex.get(index)?.id ?? artifact.id,
+                  tsMs: event.tsMs,
+                  provider: vision.provider,
+                  ocrText: vision.ocrText ?? null,
+                  uiSummary: vision.uiStateLabel,
+                  structuredJson: sanitizeJsonForLogs(vision.structuredJson),
+                  confidence: confidenceString(vision.confidence),
+                  degradedReasons: vision.degradedReasons,
+                  model: vision.model,
+                  promptTemplateId: vision.promptTemplateId,
+                  promptTemplateVersion: vision.promptTemplateVersion,
+                  idempotencyKey: `screen-vision:${artifact.id}:${event.id}:${vision.provider}:${vision.model}:${vision.promptTemplateVersion}`,
+                  emitsEvidence: true,
+                  evidenceId: evidenceForObservation.id,
+                };
+              }),
+            )
+            .onConflictDoNothing()
+            .returning()
+        : [];
 
       if (analysis.degradedReasons.length > 0) {
         const isSilentRecording = analysis.transcriptSegments.length === 0;
@@ -329,10 +516,9 @@ export async function processScreenRecordingArtifact(
           title: isSilentRecording
             ? "Schedule follow-up voice pass for silent screen recording"
             : "Review uploaded screen recording extraction gaps",
-          description:
-            isSilentRecording
-              ? "This uploaded walkthrough produced screen evidence but no narration transcript. Run a short operator voice pass to validate step intent, exceptions, and handoffs before final approval."
-              : "Batch video analysis produced partial evidence. Review missing transcript, OCR, or low-confidence keyframe gaps before final approval.",
+          description: isSilentRecording
+            ? "This uploaded walkthrough produced screen evidence but no narration transcript. Run a short operator voice pass to validate step intent, exceptions, and handoffs before final approval."
+            : "Batch video analysis produced partial evidence. Review missing transcript, OCR, or low-confidence keyframe gaps before final approval.",
           targetType: "artifact",
           targetId: artifact.id,
           priority: isSilentRecording ? "0.92" : "0.85",
@@ -340,9 +526,13 @@ export async function processScreenRecordingArtifact(
           assignedToUserId: input.userId ?? artifact.uploadedByUserId,
           contextJson: sanitizeJsonForLogs({
             artifact_id: artifact.id,
-            screen_event_ids: [uploadEvent.id, ...keyframeEvents.map((event) => event.id)],
+            screen_event_ids: [
+              uploadEvent.id,
+              ...keyframeEvents.map((event) => event.id),
+            ],
             transcript_segment_ids: transcriptRows.map((segment) => segment.id),
             evidence_ids: evidenceRows.map((row) => row.id),
+            visual_observation_ids: visualObservationRows.map((row) => row.id),
             provisional_step_ids: stepRows.map((step) => step.id),
             process_id: input.processId,
             provider: analysis.provider,
@@ -367,9 +557,13 @@ export async function processScreenRecordingArtifact(
         metadataJson: {
           process_id: input.processId,
           capture_session_id: input.captureSessionId,
-          screen_event_ids: [uploadEvent.id, ...keyframeEvents.map((event) => event.id)],
+          screen_event_ids: [
+            uploadEvent.id,
+            ...keyframeEvents.map((event) => event.id),
+          ],
           transcript_segment_ids: transcriptRows.map((segment) => segment.id),
           evidence_ids: evidenceRows.map((row) => row.id),
+          visual_observation_ids: visualObservationRows.map((row) => row.id),
           provisional_step_ids: stepRows.map((step) => step.id),
           provider: analysis.provider,
           degraded_reasons: analysis.degradedReasons,
@@ -383,14 +577,24 @@ export async function processScreenRecordingArtifact(
         .where(eq(artifacts.id, artifact.id));
       return {
         replayed: false,
-        screen_event_ids: [uploadEvent.id, ...keyframeEvents.map((event) => event.id)],
+        screen_event_ids: [
+          uploadEvent.id,
+          ...keyframeEvents.map((event) => event.id),
+        ],
         transcript_segment_ids: transcriptRows.map((segment) => segment.id),
         evidence_ids: evidenceRows.map((row) => row.id),
+        visual_observation_ids: visualObservationRows.map((row) => row.id),
         provisional_step_ids: stepRows.map((step) => step.id),
         keyframe_count: keyframeEvents.length,
         transcript_segment_count: transcriptRows.length,
       };
     });
+    if (result.replayed) {
+      await cleanupUploadedFrameObjects(uploadedFrameObjects);
+      uploadedFrameObjects.length = 0;
+    } else {
+      frameObjectsPersisted = true;
+    }
 
     await writeAgentDecision({
       orgId: artifact.orgId,
@@ -443,6 +647,10 @@ export async function processScreenRecordingArtifact(
       replayed: result.replayed,
     };
   } catch (error) {
+    if (!frameObjectsPersisted) {
+      await cleanupUploadedFrameObjects(uploadedFrameObjects);
+      uploadedFrameObjects.length = 0;
+    }
     await markArtifactFailed({
       orgId: artifact.orgId,
       workspaceId: artifact.workspaceId,
@@ -454,6 +662,25 @@ export async function processScreenRecordingArtifact(
       error,
     });
     throw error;
+  }
+}
+
+async function cleanupUploadedFrameObjects(
+  frameUploads: UploadedFrameObject[],
+) {
+  if (frameUploads.length === 0) return;
+  const results = await Promise.allSettled(
+    frameUploads.map((upload) =>
+      deleteArtifactObject({ key: upload.storageKey }),
+    ),
+  );
+  const failures = results.flatMap((result) =>
+    result.status === "rejected"
+      ? [sanitizeForLogs(errorMessage(result.reason))]
+      : [],
+  );
+  if (failures.length > 0) {
+    console.warn("Failed to clean up orphaned screen frame uploads", failures);
   }
 }
 
@@ -475,7 +702,12 @@ async function markArtifactFailed(input: {
     await tx
       .update(artifacts)
       .set({ status: "failed", updatedAt: new Date() })
-      .where(and(eq(artifacts.id, input.artifactId), eq(artifacts.orgId, input.orgId)));
+      .where(
+        and(
+          eq(artifacts.id, input.artifactId),
+          eq(artifacts.orgId, input.orgId),
+        ),
+      );
     await tx.insert(auditLog).values({
       orgId: input.orgId,
       workspaceId: input.workspaceId,
@@ -553,6 +785,7 @@ async function findExistingScreenRecordingExtraction(
     WHERE se.org_id = ${input.orgId}
       AND se.capture_session_id = ${input.captureSessionId}
       AND se.metadata_json->>'artifact_id' = ${input.artifactId}
+      AND se.metadata_json->>'analyzer_version' = ${SCREEN_RECORDING_ANALYZER_VERSION}
       AND se.event_type IN ('screen_recording_upload', 'screen_recording_keyframe')
       AND se.deleted_at IS NULL
       AND se.redacted_at IS NULL
@@ -562,10 +795,62 @@ async function findExistingScreenRecordingExtraction(
   return row;
 }
 
+function budgetedMultimodalIndexes(input: {
+  keyframes: Array<{
+    ocrText?: string;
+    signalTags: string[];
+  }>;
+  frameDiffScores: number[];
+  budget: number;
+}) {
+  if (input.budget <= 0) return new Set<number>();
+  const scored = input.keyframes.map((keyframe, index) => ({
+    index,
+    score:
+      input.frameDiffScores[index] +
+      (keyframe.ocrText?.trim() ? 0.15 : 0) +
+      (keyframe.signalTags.some((tag) => tag.startsWith("transcript_trigger_"))
+        ? 1
+        : 0) +
+      (keyframe.signalTags.some((tag) =>
+        /error|warning|spreadsheet|export|download|copy|paste|approve|reject/i.test(
+          tag,
+        ),
+      )
+        ? 0.35
+        : 0),
+  }));
+  return new Set(
+    scored
+      .sort((left, right) => right.score - left.score)
+      .slice(0, input.budget)
+      .map((frame) => frame.index),
+  );
+}
+
+function keyframeDiffScore(
+  previousHash: string | undefined,
+  currentHash: string | undefined,
+) {
+  if (!previousHash || !currentHash) return 1;
+  if (previousHash.length !== currentHash.length) {
+    return previousHash === currentHash ? 0 : 1;
+  }
+  let distance = 0;
+  for (let index = 0; index < currentHash.length; index += 1) {
+    if (previousHash[index] !== currentHash[index]) distance += 1;
+  }
+  return distance / Math.max(1, currentHash.length);
+}
+
 function confidenceString(value: number) {
   return Math.min(1, Math.max(0, value)).toFixed(3);
 }
 
 function uniqueStrings(values: string[]) {
   return [...new Set(values.filter(Boolean))];
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }

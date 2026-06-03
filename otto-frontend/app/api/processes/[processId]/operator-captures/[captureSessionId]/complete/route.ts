@@ -14,7 +14,12 @@ import {
   getIdempotentResponse,
   storeIdempotentResponse,
 } from "@/lib/db/idempotency";
-import { inngest, operatorCaptureCompletedEventName } from "@/lib/inngest/client";
+import {
+  inngest,
+  operatorCaptureCompletedEventName,
+  operatorScreenRecordingUploadedEventName,
+} from "@/lib/inngest/client";
+import { stopOperatorTrackEgress } from "@/lib/adapters/livekit";
 
 export const runtime = "nodejs";
 
@@ -50,10 +55,25 @@ export async function POST(
         requestHash: hash,
       });
       if (cached.hit) {
+        const cachedCapture = (cached.responseJson as {
+          capture_session?: typeof captureSessions.$inferSelect;
+        }).capture_session;
+        const shouldSendRecordingEvent =
+          cachedCapture &&
+          captureHasDurableRecording(cachedCapture) &&
+          !recordingRouteOwnsProcessing(cachedCapture)
+            ? !(await captureHasRecordingProcessing(tx, {
+                captureSessionId: cachedCapture.id,
+                artifactId: cachedCapture.recordingArtifactId,
+              }))
+            : false;
         return {
           body: cached.responseJson,
           statusCode: cached.statusCode,
           shouldSendEvent: false,
+          shouldSendRecordingEvent,
+          recordingArtifactId: cachedCapture?.recordingArtifactId ?? null,
+          egressId: cachedCapture ? activeEgressId(cachedCapture) : null,
         };
       }
 
@@ -116,16 +136,41 @@ export async function POST(
         responseJson: response,
         statusCode: 200,
       });
+      const hasDurableRecording = captureHasDurableRecording(captureSession);
+      const hasProcessedRecording = hasDurableRecording
+        ? await captureHasRecordingProcessing(tx, {
+            captureSessionId: captureSession.id,
+            artifactId: captureSession.recordingArtifactId,
+          })
+        : false;
       return {
         body: response,
         statusCode: 200,
-        shouldSendEvent: existing.completedAt === null,
+        // Historical guard: shouldSendEvent: existing.completedAt === null
+        shouldSendEvent:
+          existing.completedAt === null &&
+          !hasDurableRecording &&
+          !captureHasActiveRecording(captureSession),
+        shouldSendRecordingEvent:
+          hasDurableRecording &&
+          !recordingRouteOwnsProcessing(captureSession) &&
+          !hasProcessedRecording,
+        recordingArtifactId: captureSession.recordingArtifactId,
+        egressId: activeEgressId(captureSession),
       };
     });
 
     const captureSession = (result.body as {
       capture_session?: { id?: string };
     }).capture_session;
+    console.info("operator capture completion accepted", {
+      capture_session_id: captureSession?.id ?? captureSessionId,
+      process_id: processId,
+      workspace_id: body.workspace_id,
+      should_send_background_event: result.shouldSendEvent,
+      should_send_recording_event: result.shouldSendRecordingEvent ?? false,
+      egress_id: result.egressId ?? null,
+    });
     let backgroundEvent:
       | { ok: true }
       | { ok: false; message: string }
@@ -155,14 +200,128 @@ export async function POST(
         };
       }
     }
+    let backgroundRecordingEvent:
+      | { ok: true }
+      | { ok: false; message: string }
+      | undefined;
+    if (
+      result.shouldSendRecordingEvent &&
+      captureSession?.id &&
+      result.recordingArtifactId
+    ) {
+      try {
+        await inngest.send({
+          name: operatorScreenRecordingUploadedEventName,
+          data: {
+            artifactId: result.recordingArtifactId,
+            captureSessionId: captureSession.id,
+            processId,
+            workspaceId: body.workspace_id,
+            orgId: auth.orgId,
+            userId: auth.userId,
+            idempotencyKey: `${idempotencyKey}:recording`,
+          },
+        });
+        backgroundRecordingEvent = { ok: true };
+      } catch (error) {
+        console.error("Failed to enqueue operator recording processing event", error);
+        backgroundRecordingEvent = {
+          ok: false,
+          message:
+            error instanceof Error
+              ? error.message
+              : "Could not enqueue recording processing.",
+        };
+      }
+    }
+    if (!result.shouldSendEvent && result.egressId) {
+      try {
+        await getDb().transaction(async (tx) => {
+          await setOrgContext(tx, auth.orgId);
+          await tx
+            .update(captureSessions)
+            .set({ recordingStatus: "stopping", updatedAt: new Date() })
+            .where(eq(captureSessions.id, captureSessionId));
+        });
+        void stopOperatorTrackEgress(result.egressId).catch((error) => {
+          console.error("Failed to stop operator LiveKit Egress", error);
+        });
+      } catch (error) {
+        console.error("Failed to stop operator LiveKit Egress", error);
+      }
+    }
 
     return apiJson(
-      backgroundEvent
-        ? { ...(result.body as object), background_event: backgroundEvent }
+      backgroundEvent || backgroundRecordingEvent
+        ? {
+            ...(result.body as object),
+            ...(backgroundEvent ? { background_event: backgroundEvent } : {}),
+            ...(backgroundRecordingEvent
+              ? { background_recording_event: backgroundRecordingEvent }
+              : {}),
+          }
         : result.body,
       { status: result.statusCode },
     );
   } catch (error) {
     return apiError(error);
   }
+}
+
+function captureHasActiveRecording(capture: typeof captureSessions.$inferSelect) {
+  return (
+    capture.captureMode === "operator_screenshare" &&
+    (capture.recordingStatus === "recording" || activeEgressId(capture) !== null)
+  );
+}
+
+function captureHasDurableRecording(capture: typeof captureSessions.$inferSelect) {
+  return capture.captureMode === "operator_screenshare" && Boolean(capture.recordingArtifactId);
+}
+
+function recordingRouteOwnsProcessing(capture: typeof captureSessions.$inferSelect) {
+  return capture.recordingProvider === "mediarecorder-final-blob";
+}
+
+function activeEgressId(capture: typeof captureSessions.$inferSelect) {
+  const metadata =
+    capture.metadataJson &&
+    typeof capture.metadataJson === "object" &&
+    !Array.isArray(capture.metadataJson)
+      ? (capture.metadataJson as Record<string, unknown>)
+      : {};
+  const value = metadata.egress_id;
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+async function captureHasRecordingProcessing(
+  tx: Pick<ReturnType<typeof getDb>, "execute">,
+  input: { captureSessionId: string; artifactId: string | null },
+) {
+  if (!input.artifactId) return false;
+  const processed = await tx.execute<{ processed: boolean }>(sql`
+    SELECT (
+      EXISTS (
+        SELECT 1
+        FROM agent_decision_log
+        WHERE capture_session_id = ${input.captureSessionId}
+          AND stage_name = 'screen_recording_upload_pipeline'
+          AND tool_calls->>'artifact_id' = ${input.artifactId}
+      )
+      OR EXISTS (
+        SELECT 1
+        FROM visual_observations
+        WHERE capture_session_id = ${input.captureSessionId}
+          AND artifact_id = ${input.artifactId}
+      )
+      OR EXISTS (
+        SELECT 1
+        FROM transcript_segments
+        WHERE capture_session_id = ${input.captureSessionId}
+          AND timing_source LIKE 'screen_recording_transcript:%'
+          AND metadata_json->>'artifact_id' = ${input.artifactId}
+      )
+    ) AS processed
+  `);
+  return processed.rows[0]?.processed === true;
 }

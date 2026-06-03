@@ -149,8 +149,15 @@ export async function POST(
       const signalTags = uniqueStrings([
         "screen_frame_keyframe",
         "screen_keyframe_pending_vision",
+        "live_preview",
         ...body.signal_tags,
       ]);
+      console.info("operator screen frame received", {
+        process_id: processId,
+        capture_session_id: captureSessionId,
+        frame_index: body.frame_index,
+        ts_ms: body.ts_ms,
+      });
       const screenEvent = (
         await tx
           .insert(screenEvents)
@@ -168,6 +175,7 @@ export async function POST(
             signalTags,
             metadataJson: sanitizeJsonForLogs({
               ...(body.metadata_json ?? {}),
+              source: "live_preview",
               artifact_id: artifact.id,
               process_id: processId,
               frame_index: body.frame_index,
@@ -188,7 +196,7 @@ export async function POST(
             workspaceId: body.workspace_id,
             sourceType: "screen_event",
             sourceId: screenEvent.id,
-            evidenceLabel: "observed",
+            evidenceLabel: "preview",
             quote: screenEventQuote(body, signalTags),
             summary: screenEvent.uiStateLabel ?? "Captured screenshare keyframe",
             observedAt: new Date(),

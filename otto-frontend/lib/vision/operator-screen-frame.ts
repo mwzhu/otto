@@ -9,6 +9,7 @@ import {
   evidence,
   provisionalSteps,
   screenEvents,
+  visualObservations,
 } from "@/lib/db/schema";
 import { writeAgentDecision } from "@/lib/db/write-agent-decision";
 import { stepCandidateFromScreenEvent } from "@/lib/interview/operator/segmenter";
@@ -131,6 +132,34 @@ export async function processOperatorScreenFrame(
         )
         .returning()
     )[0];
+    const visualObservation = evidenceRow
+      ? (
+          await tx
+            .insert(visualObservations)
+            .values({
+              orgId: input.orgId,
+              workspaceId: input.workspaceId,
+              captureSessionId: input.captureSessionId,
+              screenEventId: updatedScreenEvent.id,
+              artifactId: row.artifact.id,
+              tsMs: updatedScreenEvent.tsMs,
+              provider: vision.provider,
+              ocrText: vision.ocrText ?? updatedScreenEvent.ocrText,
+              uiSummary: vision.uiStateLabel,
+              structuredJson: sanitizeJsonForLogs(vision.structuredJson),
+              confidence: vision.confidence.toFixed(3),
+              degradedReasons: vision.degradedReasons,
+              model: vision.model,
+              promptTemplateId: vision.promptTemplateId,
+              promptTemplateVersion: vision.promptTemplateVersion,
+              idempotencyKey: `screen-vision:${row.artifact.id}:${updatedScreenEvent.id}:${vision.provider}:${vision.model}:${vision.promptTemplateVersion}`,
+              emitsEvidence: true,
+              evidenceId: evidenceRow.id,
+            })
+            .onConflictDoNothing()
+            .returning()
+        )[0] ?? null
+      : null;
     const segmentedStep =
       vision.meaningfulStateChange && evidenceRow
         ? stepCandidateFromScreenEvent({
@@ -167,6 +196,7 @@ export async function processOperatorScreenFrame(
                 evidence_ids: [evidenceRow.id],
                 process_id: input.processId,
                 vision_provider: vision.provider,
+                visual_observation_id: visualObservation?.id,
               }),
             })
             .onConflictDoNothing()
@@ -186,6 +216,7 @@ export async function processOperatorScreenFrame(
         capture_session_id: input.captureSessionId,
         artifact_id: input.artifactId,
         evidence_id: evidenceRow?.id,
+        visual_observation_id: visualObservation?.id,
         provisional_step_id: provisionalStep?.id,
         signal_tags: signalTags,
         degraded_reasons: vision.degradedReasons,
@@ -199,10 +230,12 @@ export async function processOperatorScreenFrame(
       screenEventId: updatedScreenEvent.id,
       artifactId: row.artifact.id,
       evidenceId: evidenceRow?.id,
+      visualObservationId: visualObservation?.id,
       provisionalStepId: provisionalStep?.id,
       signalTags,
       degradedReasons: vision.degradedReasons,
       meaningfulStateChange: vision.meaningfulStateChange,
+      model: vision.model,
     };
   });
 
@@ -221,7 +254,7 @@ export async function processOperatorScreenFrame(
       screen_event_id: input.screenEventId,
       result,
     },
-    model: "deterministic-screen-vision",
+    model: result.ok ? result.model ?? "deterministic-screen-vision" : "deterministic-screen-vision",
     tokenCountInput: 0,
     tokenCountOutput: result.ok ? result.signalTags.length : 0,
     costCents: 0,

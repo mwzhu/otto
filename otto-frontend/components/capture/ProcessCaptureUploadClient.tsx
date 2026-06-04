@@ -15,6 +15,33 @@ type FileRow = {
   error?: string;
 };
 
+const MAX_DOCUMENT_UPLOAD_BYTES = 50 * 1024 * 1024;
+const DOCUMENT_EXTENSIONS = [
+  ".pdf",
+  ".doc",
+  ".docx",
+  ".ppt",
+  ".pptx",
+  ".xls",
+  ".xlsx",
+];
+const DOCUMENT_MIME_TYPES = [
+  "application/pdf",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-powerpoint",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+];
+const VIDEO_EXTENSIONS = [".mp4", ".mov", ".m4v", ".webm"];
+const VIDEO_MIME_TYPES = [
+  "video/mp4",
+  "video/quicktime",
+  "video/webm",
+  "video/x-m4v",
+];
+
 export function ProcessCaptureUploadClient({
   workspaceId,
   processId,
@@ -34,40 +61,60 @@ export function ProcessCaptureUploadClient({
     async (files: File[]) => {
       const file = files[0];
       if (!file || busy) return;
+      const validationError = validateProcessUploadFile(file, uploadKind);
+      if (validationError) {
+        setRow({
+          name: file.name,
+          size: file.size,
+          status: "failed",
+          error: validationError,
+        });
+        return;
+      }
       setBusy(true);
       setRow({ name: file.name, size: file.size, status: "uploading" });
       try {
         const artifactType = uploadKind === "screen_recording" ? "video" : "document";
-        const presign = await postJson<{
-          artifact: { id: string };
-          upload_url: string;
-        }>(
-          `/api/workspaces/${workspaceId}/artifacts/presign`,
-          {
-            filename: file.name,
-            mime_type: file.type || fallbackMimeType(uploadKind),
-            size_bytes: file.size,
-            artifact_type: artifactType,
-          },
-          `process-capture-presign-${processId}-${file.name}-${file.size}`,
+        const presign = await withUploadStep(
+          "Preparing upload",
+          () =>
+            postJson<{
+              artifact: { id: string };
+              upload_url: string;
+            }>(
+              `/api/workspaces/${workspaceId}/artifacts/presign`,
+              {
+                filename: file.name,
+                mime_type: file.type || fallbackMimeType(uploadKind),
+                size_bytes: file.size,
+                artifact_type: artifactType,
+              },
+              `process-capture-presign-${processId}-${file.name}-${file.size}`,
+            ),
         );
-        const upload = await fetch(presign.upload_url, {
-          method: "PUT",
-          headers: { "content-type": file.type || fallbackMimeType(uploadKind) },
-          body: file,
+        await withUploadStep("Uploading file", async () => {
+          const upload = await fetch(presign.upload_url, {
+            method: "PUT",
+            headers: { "content-type": file.type || fallbackMimeType(uploadKind) },
+            body: file,
+          });
+          if (!upload.ok) {
+            throw new Error(`storage upload failed (${upload.status})`);
+          }
         });
-        if (!upload.ok) {
-          throw new Error(`Upload failed (${upload.status}).`);
-        }
         setRow({ name: file.name, size: file.size, status: "binding" });
-        await postJson(
-          `/api/processes/${processId}/captures/uploads`,
-          {
-            workspace_id: workspaceId,
-            artifact_id: presign.artifact.id,
-            upload_kind: uploadKind,
-          },
-          `process-capture-complete-${processId}-${presign.artifact.id}`,
+        await withUploadStep(
+          "Creating capture",
+          () =>
+            postJson(
+              `/api/processes/${processId}/captures/uploads`,
+              {
+                workspace_id: workspaceId,
+                artifact_id: presign.artifact.id,
+                upload_kind: uploadKind,
+              },
+              `process-capture-complete-${processId}-${presign.artifact.id}`,
+            ),
         );
         setRow({ name: file.name, size: file.size, status: "done" });
       } catch (error) {
@@ -116,7 +163,7 @@ export function ProcessCaptureUploadClient({
         <input
           ref={inputRef}
           type="file"
-          accept={uploadKind === "screen_recording" ? "video/*" : undefined}
+          accept={acceptedFileExtensions(uploadKind)}
           className="hidden"
           onChange={(event) => void handleFiles(Array.from(event.target.files ?? []))}
         />
@@ -173,6 +220,49 @@ function fallbackMimeType(uploadKind: UploadKind) {
   return uploadKind === "screen_recording"
     ? "video/mp4"
     : "application/octet-stream";
+}
+
+function acceptedFileExtensions(uploadKind: UploadKind) {
+  return uploadKind === "screen_recording"
+    ? VIDEO_EXTENSIONS.join(",")
+    : DOCUMENT_EXTENSIONS.join(",");
+}
+
+function validateProcessUploadFile(file: File, uploadKind: UploadKind) {
+  if (file.size === 0) {
+    return "Unsupported file: empty files cannot be uploaded.";
+  }
+  if (uploadKind === "document" && file.size > MAX_DOCUMENT_UPLOAD_BYTES) {
+    return "Unsupported file: process documents must be 50 MB or smaller.";
+  }
+  if (!isAcceptedProcessUploadFile(file, uploadKind)) {
+    return uploadKind === "screen_recording"
+      ? "Unsupported file type. Upload an MP4, QuickTime, or WebM screen recording."
+      : "Unsupported file type. Upload PDF, DOCX, PPTX, XLSX, or similar process documents.";
+  }
+  return null;
+}
+
+function isAcceptedProcessUploadFile(file: File, uploadKind: UploadKind) {
+  const normalizedName = file.name.toLowerCase();
+  const mimeTypes =
+    uploadKind === "screen_recording" ? VIDEO_MIME_TYPES : DOCUMENT_MIME_TYPES;
+  const extensions =
+    uploadKind === "screen_recording" ? VIDEO_EXTENSIONS : DOCUMENT_EXTENSIONS;
+  if (mimeTypes.includes(file.type)) return true;
+  return extensions.some((extension) => normalizedName.endsWith(extension));
+}
+
+async function withUploadStep<T>(
+  step: string,
+  action: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Upload failed.";
+    throw new Error(`${step}: ${message}`);
+  }
 }
 
 function statusLabel(status: FileRow["status"]) {

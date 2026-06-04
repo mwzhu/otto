@@ -9,10 +9,13 @@ from typing import Any
 import httpx
 
 from operator_agent.schemas import (
+    CheckedTurnResponse,
     DeliveryUpdateResponse,
     DispatchedTurnResponse,
+    ExtractionTurnResponse,
     IngestedTurnResponse,
     PlannedTurnResponse,
+    RespondedTurnResponse,
 )
 
 
@@ -30,6 +33,20 @@ class PlannedTurn:
     plan: dict[str, Any]
     planned_agent_utterance: str
     metadata: dict[str, Any]
+    degraded_quality: bool
+    raw: dict[str, Any]
+    degraded_reasons: list[str] = field(default_factory=list)
+    local_turn_correlation_id: str | None = None
+
+
+@dataclass(frozen=True)
+class RespondedTurn:
+    plan: dict[str, Any]
+    planned_agent_utterance: str
+    decision_log_id: str
+    metadata: dict[str, Any]
+    voice_metadata: dict[str, Any] | None
+    steering_context: dict[str, Any] | None
     degraded_quality: bool
     raw: dict[str, Any]
     degraded_reasons: list[str] = field(default_factory=list)
@@ -130,6 +147,95 @@ class OperatorApiClient:
         body = await self._post("/api/internal/operator-turns/plan", payload, idempotency_key)
         return planned_turn_from_body(body, local_turn_correlation_id)
 
+    async def respond_turn(
+        self,
+        *,
+        capture_session_id: str,
+        turn: IngestedTurn,
+        idempotency_key: str,
+        on_planned_agent_utterance: Any | None = None,
+        local_turn_correlation_id: str | None = None,
+        pending_extraction_turns: list[int] | None = None,
+        pending_slot_paths: list[str] | None = None,
+        last_spoken_intent: str | None = None,
+        extraction_window_id: str | None = None,
+    ) -> RespondedTurn:
+        payload: dict[str, Any] = {
+            "capture_session_id": capture_session_id,
+            "latest_utterance": turn.latest_utterance,
+            "transcript_segment_ids": turn.transcript_segment_ids,
+            "evidence_ids": turn.evidence_ids,
+            "turn_index": turn.turn_index,
+            "pending_extraction_turns": pending_extraction_turns or [],
+            "pending_slot_paths": pending_slot_paths or [],
+        }
+        if local_turn_correlation_id:
+            payload["local_turn_correlation_id"] = local_turn_correlation_id
+        if extraction_window_id:
+            payload["extraction_window_id"] = extraction_window_id
+        if last_spoken_intent:
+            payload["last_spoken_intent"] = last_spoken_intent
+        if on_planned_agent_utterance is not None:
+            return await self._stream_respond_turn(
+                payload=payload,
+                idempotency_key=idempotency_key,
+                on_planned_agent_utterance=on_planned_agent_utterance,
+                local_turn_correlation_id=local_turn_correlation_id,
+            )
+        body = await self._post("/api/internal/operator-turns/respond", payload, idempotency_key)
+        return responded_turn_from_body(body, local_turn_correlation_id)
+
+    async def _stream_respond_turn(
+        self,
+        *,
+        payload: dict[str, Any],
+        idempotency_key: str,
+        on_planned_agent_utterance: Any,
+        local_turn_correlation_id: str | None,
+    ) -> RespondedTurn:
+        final_body: dict[str, Any] | None = None
+        async with self._client.stream(
+            "POST",
+            f"{self._base_url}/api/internal/operator-turns/respond",
+            headers={
+                **self._headers,
+                "accept": "text/event-stream",
+                "idempotency-key": idempotency_key,
+            },
+            json=payload,
+        ) as response:
+            response.raise_for_status()
+            event_name: str | None = None
+            data_lines: list[str] = []
+            async for line in response.aiter_lines():
+                if line.startswith("event:"):
+                    event_name = line[len("event:") :].strip()
+                    continue
+                if line.startswith("data:"):
+                    data_lines.append(line[len("data:") :].strip())
+                    continue
+                if line.strip():
+                    continue
+                if not event_name:
+                    data_lines = []
+                    continue
+                data = json.loads("\n".join(data_lines) or "{}")
+                if event_name == "planned_agent_utterance":
+                    utterance = str(data.get("utterance") or "").strip()
+                    if utterance:
+                        maybe_awaitable = on_planned_agent_utterance(utterance)
+                        if asyncio.iscoroutine(maybe_awaitable):
+                            await maybe_awaitable
+                elif event_name == "final":
+                    final_body = data
+                elif event_name == "error":
+                    raise RuntimeError(str(data.get("message") or "Respond stream failed."))
+                event_name = None
+                data_lines = []
+        if final_body is None:
+            raise RuntimeError("Respond stream ended without a final response.")
+        return responded_turn_from_body(final_body, local_turn_correlation_id)
+
     async def _stream_plan_turn(
         self,
         *,
@@ -180,6 +286,67 @@ class OperatorApiClient:
         if final_body is None:
             raise RuntimeError("Planner stream ended without a final plan.")
         return planned_turn_from_body(final_body, local_turn_correlation_id)
+
+    async def extract_turn(
+        self,
+        *,
+        capture_session_id: str,
+        turn: IngestedTurn,
+        spoken_agent_utterance: str,
+        idempotency_key: str,
+        local_turn_correlation_id: str | None = None,
+        extraction_window_id: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "capture_session_id": capture_session_id,
+            "latest_utterance": turn.latest_utterance,
+            "transcript_segment_ids": turn.transcript_segment_ids,
+            "evidence_ids": turn.evidence_ids,
+            "turn_index": turn.turn_index,
+            "spoken_agent_utterance": spoken_agent_utterance,
+        }
+        if local_turn_correlation_id:
+            payload["local_turn_correlation_id"] = local_turn_correlation_id
+        if extraction_window_id:
+            payload["extraction_window_id"] = extraction_window_id
+        window_turn_indexes = turn.raw.get("window_turn_indexes")
+        if isinstance(window_turn_indexes, list):
+            payload["window_turn_indexes"] = window_turn_indexes
+        body = await self._post(
+            "/api/internal/operator-turns/extract",
+            payload,
+            idempotency_key,
+        )
+        ExtractionTurnResponse.model_validate(body)
+        return body
+
+    async def check_turn(
+        self,
+        *,
+        capture_session_id: str,
+        turn: IngestedTurn,
+        decision_log_id: str,
+        spoken_agent_utterance: str,
+        steering_context: dict[str, Any] | None,
+        idempotency_key: str,
+        local_turn_correlation_id: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "capture_session_id": capture_session_id,
+            "decision_log_id": decision_log_id,
+            "turn_index": turn.turn_index,
+            "spoken_agent_utterance": spoken_agent_utterance,
+            "steering_context": steering_context or {},
+        }
+        if local_turn_correlation_id:
+            payload["local_turn_correlation_id"] = local_turn_correlation_id
+        body = await self._post(
+            "/api/internal/operator-turns/check",
+            payload,
+            idempotency_key,
+        )
+        CheckedTurnResponse.model_validate(body)
+        return body
 
     async def dispatch_turn(
         self,
@@ -370,6 +537,25 @@ def planned_turn_from_body(
         degraded_reasons=parsed.degraded_reasons,
         raw=body,
         local_turn_correlation_id=local_turn_correlation_id,
+    )
+
+
+def responded_turn_from_body(
+    body: dict[str, Any],
+    local_turn_correlation_id: str | None,
+) -> RespondedTurn:
+    parsed = RespondedTurnResponse.model_validate(body)
+    return RespondedTurn(
+        plan=parsed.plan,
+        planned_agent_utterance=parsed.planned_agent_utterance,
+        decision_log_id=parsed.decision_log_id,
+        metadata=parsed.metadata,
+        voice_metadata=parsed.voice_metadata,
+        steering_context=parsed.steering_context,
+        degraded_quality=parsed.degraded_quality,
+        degraded_reasons=parsed.degraded_reasons,
+        raw=body,
+        local_turn_correlation_id=parsed.local_turn_correlation_id or local_turn_correlation_id,
     )
 
 

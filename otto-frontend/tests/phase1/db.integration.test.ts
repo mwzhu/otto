@@ -27,6 +27,10 @@ const week4SystemClaimId = "dededede-dede-5ded-8ded-dededededede";
 const week4PersonClaimId = "efefefef-efef-5efe-8efe-efefefefefef";
 const week4RiskClaimAId = "10101010-1010-5010-8010-101010101010";
 const week4RiskClaimBId = "20202020-2020-5020-8020-202020202020";
+const week4MergeCandidateId = "21212121-2121-5121-8121-212121212121";
+const week4MergeEvidenceId = "23232323-2323-5232-8232-232323232323";
+const week4MergeRiskClaimId = "24242424-2424-5242-8242-242424242424";
+const week4MergeTargetProcessId = "25252525-2525-5252-8252-252525252525";
 const week5FollowUpId = "30303030-3030-5030-8030-303030303030";
 const week5SynthesisRunId = "40404040-4040-5040-8040-404040404040";
 const week5TranscriptId = "50505050-5050-5050-8050-505050505050";
@@ -151,6 +155,13 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
     applyMigration("0002_workspace_data_tier_real.sql");
     applyMigration("0003_director_voice_m1.sql");
     applyMigration("0004_director_process_slots_and_degraded_reasons.sql");
+    applyMigration("0005_operator_graph.sql");
+    applyMigration("0006_capture_evidence.sql");
+    applyMigration("0007_redactions.sql");
+    applyMigration("0008_director_voice_decoupling.sql");
+    applyMigration("0009_provisional_step_sources.sql");
+    applyMigration("0010_operator_visual_comprehension.sql");
+    applyMigration("0011_workflow_semantic_models.sql");
     execFileSync(
       "docker",
       [
@@ -320,6 +331,67 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
       frequency: "weekly",
       risk_evidence_count: 2,
       exact_risk_evidence: true,
+    });
+  });
+
+  test("Week 4 candidate merge preserves candidate evidence on the target process", async () => {
+    await seedWeek4MergeCandidate(appClient);
+
+    const { mergeCandidateProcess } = await import(
+      "@/lib/candidate-processes/promotion"
+    );
+
+    const merged = await mergeCandidateProcess(
+      { orgId, workspaceId, userId, idempotencyKey: "week4-merge-candidate" },
+      week4MergeCandidateId,
+      week4MergeTargetProcessId,
+    );
+
+    expect(merged).toMatchObject({
+      candidate_process_id: week4MergeCandidateId,
+      target_process_id: week4MergeTargetProcessId,
+      status: "merged",
+    });
+
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    const rows = await appClient.query(
+      `
+        SELECT
+          (SELECT status FROM candidate_processes WHERE id = $1) AS candidate_status,
+          (SELECT promoted_process_id::text FROM candidate_processes WHERE id = $1) AS target_process_id,
+          (SELECT count(*)::int
+             FROM capture_process_links
+            WHERE process_id = $2
+              AND capture_session_id = $3
+              AND link_type = 'enriched') AS enriched_links,
+          (SELECT count(*)::int
+             FROM claims c
+             JOIN claim_evidence ce ON ce.claim_id = c.id
+            WHERE c.subject_type = 'process'
+              AND c.subject_id = $2
+              AND c.field IN ('frequency', 'risk')
+              AND ce.evidence_id = $4) AS preserved_process_evidence,
+          (SELECT count(*)::int
+             FROM audit_log
+            WHERE event_type = 'candidate_process.merged'
+              AND subject_id = $1) AS audit_rows
+      `,
+      [
+        week4MergeCandidateId,
+        week4MergeTargetProcessId,
+        directorCaptureId,
+        week4MergeEvidenceId,
+      ],
+    );
+
+    expect(rows.rows[0]).toEqual({
+      candidate_status: "merged",
+      target_process_id: week4MergeTargetProcessId,
+      enriched_links: 1,
+      preserved_process_evidence: 2,
+      audit_rows: 1,
     });
   });
 
@@ -1012,7 +1084,8 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
         SELECT
           (SELECT count(*)::int
              FROM slot_states
-            WHERE capture_session_id = $1) AS slots,
+            WHERE capture_session_id = $1
+              AND status <> 'empty') AS slots,
           (SELECT count(*)::int
              FROM agent_decision_log
             WHERE capture_session_id = $1) AS decisions,
@@ -1090,7 +1163,8 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
         SELECT
           (SELECT count(*)::int
              FROM slot_states
-            WHERE capture_session_id = $1) AS slots,
+            WHERE capture_session_id = $1
+              AND status <> 'empty') AS slots,
           (SELECT count(*)::int
              FROM agent_decision_log
             WHERE capture_session_id = $1) AS decisions,
@@ -2107,7 +2181,7 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
         { params: Promise.resolve({ captureSessionId }) },
       );
       expect(repeatedCompleteResponse.status).toBe(200);
-      expect(sendSpy).toHaveBeenCalledTimes(2);
+      expect(sendSpy).toHaveBeenCalledTimes(1);
 
       const presignResponse = await presignRoute.POST(
         apiRequest(
@@ -3468,14 +3542,7 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
 
     const openingRoute = await import("@/app/api/internal/director-turns/opening/route");
     const noticeRoute = await import("@/app/api/internal/director-turns/notice/route");
-    const planRoute = await import("@/app/api/internal/director-turns/plan/route");
-    const dispatchRoute = await import("@/app/api/internal/director-turns/dispatch/route");
-    const chosenIntent = {
-      intent: "discover_function",
-      target_slot: "function.name",
-      score: 100,
-      reason: "Completed sessions should reject dispatch before applying this.",
-    };
+    const respondRoute = await import("@/app/api/internal/director-turns/respond/route");
     const requests = [
       openingRoute.POST(
         serviceRequest(
@@ -3499,9 +3566,9 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
           "completed-notice",
         ),
       ),
-      planRoute.POST(
+      respondRoute.POST(
         serviceRequest(
-          "http://otto.test/api/internal/director-turns/plan",
+          "http://otto.test/api/internal/director-turns/respond",
           {
             capture_session_id: completedInternalWriteCaptureId,
             latest_utterance: "We run forecasting.",
@@ -3509,34 +3576,7 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
             evidence_ids: [],
             turn_index: 1,
           },
-          "completed-plan",
-        ),
-      ),
-      dispatchRoute.POST(
-        serviceRequest(
-          "http://otto.test/api/internal/director-turns/dispatch",
-          {
-            capture_session_id: completedInternalWriteCaptureId,
-            latest_utterance: "We run forecasting.",
-            transcript_segment_ids: [],
-            evidence_ids: [],
-            turn_index: 1,
-            plan: {
-              utterance_type: "substantive_answer",
-              slot_updates: [],
-              claims: [],
-              tool_calls: [],
-              contradiction_signals: [],
-              current_phase: "orient",
-              proposed_next_phase: "inventory",
-              phase_transition_ready: false,
-              ranked_intents: [chosenIntent],
-              chosen_intent: chosenIntent,
-            },
-            planned_agent_utterance: "What are the main processes your team owns?",
-            degraded_quality: false,
-          },
-          "completed-dispatch",
+          "completed-respond",
         ),
       ),
     ];
@@ -3560,8 +3600,7 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
                 AND key IN (
                   'completed-opening',
                   'completed-notice',
-                  'completed-plan',
-                  'completed-dispatch'
+                  'completed-respond'
                 )) AS idempotency_rows
         `,
         [completedInternalWriteCaptureId, orgId],
@@ -4549,6 +4588,7 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
         VALUES ($1, $2, $3, 'function.name', 'filled', 0.92, 100)
         ON CONFLICT (capture_session_id, slot_path)
           WHERE candidate_process_id IS NULL
+            AND provisional_step_id IS NULL
         DO UPDATE SET status = 'filled', confidence = 0.92, priority = 100
       `,
       [orgId, workspaceId, priorityCoverageCaptureId],
@@ -4875,6 +4915,126 @@ async function seedWeek4PromotionGraph(client: Client) {
   }
 }
 
+async function seedWeek4MergeCandidate(client: Client) {
+  await seedWeek2Graph(client);
+  await client.query("SELECT set_config('app.current_org_id', $1, false)", [
+    orgId,
+  ]);
+  await client.query(
+    `
+      INSERT INTO processes (
+        id,
+        org_id,
+        workspace_id,
+        name,
+        description,
+        status
+      )
+      VALUES ($1, $2, $3, 'Promotion Exception Merge Target', 'Existing tracked process for candidate merge testing.', 'draft')
+      ON CONFLICT (id)
+      DO UPDATE SET
+        name = EXCLUDED.name,
+        description = EXCLUDED.description,
+        status = EXCLUDED.status,
+        updated_at = now()
+    `,
+    [week4MergeTargetProcessId, orgId, workspaceId],
+  );
+  await client.query(
+    `
+      INSERT INTO evidence (
+        id,
+        org_id,
+        workspace_id,
+        source_type,
+        evidence_label,
+        quote
+      )
+      VALUES ($1, $2, $3, 'transcript_segment', 'stated_director', $4)
+      ON CONFLICT (id)
+      DO UPDATE SET quote = EXCLUDED.quote, redacted_at = NULL, tombstoned_at = NULL
+    `,
+    [
+      week4MergeEvidenceId,
+      orgId,
+      workspaceId,
+      "Renewal discount exceptions are the same queue as promotion exceptions.",
+    ],
+  );
+  await client.query(
+    `
+      INSERT INTO candidate_processes (
+        id,
+        org_id,
+        workspace_id,
+        capture_session_id,
+        proposed_name,
+        proposed_function,
+        frequency,
+        complexity_hint,
+        status,
+        confidence,
+        evidence_ids,
+        promoted_process_id
+      )
+      VALUES ($1, $2, $3, $4, 'Promotion Exception Duplicate', 'Category Manager', 'daily', $5, 'pending', 0.76, ARRAY[$6]::uuid[], NULL)
+      ON CONFLICT (id)
+      DO UPDATE SET
+        status = 'pending',
+        proposed_name = EXCLUDED.proposed_name,
+        frequency = EXCLUDED.frequency,
+        complexity_hint = EXCLUDED.complexity_hint,
+        confidence = EXCLUDED.confidence,
+        evidence_ids = EXCLUDED.evidence_ids,
+        promoted_process_id = NULL
+    `,
+    [
+      week4MergeCandidateId,
+      orgId,
+      workspaceId,
+      directorCaptureId,
+      "Duplicate candidate should merge into the existing promotion review process.",
+      week4MergeEvidenceId,
+    ],
+  );
+  await client.query(
+    `
+      INSERT INTO claims (
+        id,
+        org_id,
+        workspace_id,
+        subject_type,
+        subject_id,
+        field,
+        value,
+        confidence,
+        metadata_json
+      )
+      VALUES ($1, $2, $3, 'candidate_process', $4, 'risk', $5::jsonb, 0.76, '{}'::jsonb)
+      ON CONFLICT (id)
+      DO UPDATE SET value = EXCLUDED.value, confidence = EXCLUDED.confidence
+    `,
+    [
+      week4MergeRiskClaimId,
+      orgId,
+      workspaceId,
+      week4MergeCandidateId,
+      JSON.stringify({
+        type: "duplicate_candidate",
+        text: "This candidate overlaps the promotion exception queue.",
+      }),
+    ],
+  );
+  await client.query(
+    `
+      INSERT INTO claim_evidence (claim_id, evidence_id)
+      VALUES ($1, $2)
+      ON CONFLICT DO NOTHING
+    `,
+    [week4MergeRiskClaimId, week4MergeEvidenceId],
+  );
+}
+
 async function seedWeek5CoverageGraph(client: Client) {
   await seedWeek2Graph(client);
   await client.query("SELECT set_config('app.current_org_id', $1, false)", [
@@ -4900,6 +5060,7 @@ async function seedWeek5CoverageGraph(client: Client) {
         ($1, $2, $3, 'systems.systems_of_record', $7::jsonb, 'conflicting', 0.42, ARRAY[]::uuid[], now(), 85)
       ON CONFLICT (capture_session_id, slot_path)
         WHERE candidate_process_id IS NULL
+          AND provisional_step_id IS NULL
       DO UPDATE SET
         value = excluded.value,
         status = excluded.status,

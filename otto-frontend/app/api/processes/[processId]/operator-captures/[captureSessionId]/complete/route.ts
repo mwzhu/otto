@@ -96,6 +96,12 @@ export async function POST(
         throw new ApiError(404, "not_found", "Operator capture not found.");
       }
 
+      await assertAllOperatorExtractionTerminal(tx, {
+        orgId: auth.orgId,
+        workspaceId: body.workspace_id,
+        captureSessionId,
+      });
+
       const captureSession =
         existing.completedAt === null
           ? (
@@ -265,6 +271,71 @@ export async function POST(
     );
   } catch (error) {
     return apiError(error);
+  }
+}
+
+type OperatorCompletionTx = Parameters<
+  Parameters<ReturnType<typeof getDb>["transaction"]>[0]
+>[0];
+
+async function assertAllOperatorExtractionTerminal(
+  tx: OperatorCompletionTx,
+  input: {
+    orgId: string;
+    workspaceId: string;
+    captureSessionId: string;
+  },
+) {
+  const result = await tx.execute<{
+    pending_extraction_turns: string | number;
+    failed_extraction_turns: string | number;
+    pending_extraction_windows: string | number;
+    failed_extraction_windows: string | number;
+  }>(sql`
+    WITH extraction_turns AS (
+      SELECT delivery_json->>'extraction_status' AS extraction_status
+      FROM agent_decision_log
+      WHERE org_id = ${input.orgId}
+        AND workspace_id = ${input.workspaceId}
+        AND capture_session_id = ${input.captureSessionId}
+        AND stage_name = 'operator.turn'
+        AND delivery_json ? 'extraction_status'
+    ),
+    extraction_windows AS (
+      SELECT status
+      FROM operator_extraction_windows
+      WHERE org_id = ${input.orgId}
+        AND workspace_id = ${input.workspaceId}
+        AND capture_session_id = ${input.captureSessionId}
+    )
+    SELECT
+      (SELECT count(*) FROM extraction_turns WHERE extraction_status IN ('pending', 'running'))::int
+        AS pending_extraction_turns,
+      (SELECT count(*) FROM extraction_turns WHERE extraction_status = 'failed')::int
+        AS failed_extraction_turns,
+      (SELECT count(*) FROM extraction_windows WHERE status IN ('pending', 'running'))::int
+        AS pending_extraction_windows,
+      (SELECT count(*) FROM extraction_windows WHERE status = 'failed')::int
+        AS failed_extraction_windows
+  `);
+  const row = result.rows[0];
+  const pendingExtractionTurns = Number(row?.pending_extraction_turns ?? 0);
+  const failedExtractionTurns = Number(row?.failed_extraction_turns ?? 0);
+  const pendingExtractionWindows = Number(row?.pending_extraction_windows ?? 0);
+  const failedExtractionWindows = Number(row?.failed_extraction_windows ?? 0);
+  if (pendingExtractionTurns > 0 || pendingExtractionWindows > 0) {
+    throw new ApiError(
+      409,
+      "conflict",
+      "Operator capture has pending structured extraction (extraction_pending). Retry completion after notes finish updating.",
+    );
+  }
+  if (failedExtractionTurns > 0 || failedExtractionWindows > 0) {
+    throw new ApiError(
+      409,
+      "conflict",
+      "Operator capture has failed structured extraction (extraction_failed). Retry extraction before synthesis.",
+    );
   }
 }
 

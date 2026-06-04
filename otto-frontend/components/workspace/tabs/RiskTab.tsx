@@ -1,6 +1,7 @@
 "use client";
 
 import type { ProcessFollowUpTask } from "@/lib/processes/follow-up-queries";
+import { followUpDescriptionForDisplay } from "@/lib/processes/follow-up-presentation";
 
 export function RiskTab({
   processId: _processId,
@@ -39,6 +40,7 @@ export function RiskTab({
 }
 
 function RiskFollowUpItem({ task }: { task: ProcessFollowUpTask }) {
+  const description = followUpDescriptionForDisplay(task);
   const reason = typeof task.context_json.reason === "string"
     ? task.context_json.reason.replaceAll("_", " ")
     : task.task_type.replaceAll("_", " ");
@@ -47,9 +49,9 @@ function RiskFollowUpItem({ task }: { task: ProcessFollowUpTask }) {
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="text-[12.5px] font-semibold text-ink">{task.title}</div>
-          {task.description && (
+          {description && (
             <p className="mt-1 text-[12px] leading-relaxed text-ink-secondary">
-              {task.description}
+              {description}
             </p>
           )}
         </div>

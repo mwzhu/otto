@@ -644,6 +644,39 @@ export const directorExtractionWindows = pgTable(
   }),
 );
 
+export const operatorExtractionWindows = pgTable(
+  "operator_extraction_windows",
+  {
+    extractionWindowId: text("extraction_window_id").primaryKey(),
+    orgId: uuid("org_id").references(() => organizations.id).notNull(),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id).notNull(),
+    captureSessionId: uuid("capture_session_id")
+      .references(() => captureSessions.id)
+      .notNull(),
+    turnIndex: integer("turn_index"),
+    transcriptSegmentIds: uuid("transcript_segment_ids")
+      .array()
+      .default(sql`'{}'::uuid[]`)
+      .notNull(),
+    openedAt: timestamp("opened_at", { withTimezone: true }).notNull(),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    closedBy: text("closed_by"),
+    status: text("status").default("pending").notNull(),
+    metadataJson: jsonb("metadata_json").default(sql`'{}'::jsonb`).notNull(),
+    ...timestamps,
+  },
+  (table) => ({
+    orgIdx: index("operator_extraction_windows_org_id_idx").on(table.orgId),
+    captureIdx: index("operator_extraction_windows_capture_session_id_idx").on(
+      table.captureSessionId,
+    ),
+    captureTurnIdx: index("operator_extraction_windows_capture_turn_idx").on(
+      table.captureSessionId,
+      table.turnIndex,
+    ),
+  }),
+);
+
 export const documentChunks = pgTable(
   "document_chunks",
   {
@@ -1326,6 +1359,91 @@ export const workflowSemanticModels = pgTable(
     ),
     synthesisRunIdx: index("workflow_semantic_models_synthesis_run_id_idx").on(
       table.synthesisRunId,
+    ),
+  }),
+);
+
+export const automationOpportunitySets = pgTable(
+  "automation_opportunity_sets",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id").references(() => organizations.id).notNull(),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id).notNull(),
+    processId: uuid("process_id").references(() => processes.id).notNull(),
+    versionId: uuid("version_id").references(() => processVersions.id).notNull(),
+    synthesisRunId: uuid("synthesis_run_id").references(() => synthesisRuns.id),
+    evidencePackHash: text("evidence_pack_hash").notNull(),
+    opportunitySetHash: text("opportunity_set_hash").notNull(),
+    promptTemplateId: text("prompt_template_id").notNull(),
+    promptTemplateVersion: text("prompt_template_version").notNull(),
+    model: text("model").notNull(),
+    llmRequestHash: text("llm_request_hash"),
+    llmResponseHash: text("llm_response_hash"),
+    generator: text("generator").notNull(),
+    generatorVersion: integer("generator_version").default(1).notNull(),
+    opportunitiesJson: jsonb("opportunities_json")
+      .default(sql`'[]'::jsonb`)
+      .notNull(),
+    diagnosticsJson: jsonb("diagnostics_json")
+      .default(sql`'[]'::jsonb`)
+      .notNull(),
+    ...timestamps,
+  },
+  (table) => ({
+    orgIdx: index("automation_opportunity_sets_org_id_idx").on(table.orgId),
+    versionIdx: index("automation_opportunity_sets_version_idx").on(
+      table.versionId,
+    ),
+    versionPackIdx: uniqueIndex(
+      "automation_opportunity_sets_version_pack_idx",
+    ).on(table.versionId, table.evidencePackHash),
+  }),
+);
+
+export const opportunityAssumptionOverrides = pgTable(
+  "opportunity_assumption_overrides",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id").references(() => organizations.id).notNull(),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id).notNull(),
+    versionId: uuid("version_id").references(() => processVersions.id).notNull(),
+    opportunitySetKey: text("opportunity_set_key").notNull(),
+    opportunityId: text("opportunity_id").notNull(),
+    assumptionsJson: jsonb("assumptions_json").notNull(),
+    editedByUserId: uuid("edited_by_user_id").references(() => users.id),
+    ...timestamps,
+  },
+  (table) => ({
+    setOpportunityIdx: uniqueIndex("opportunity_override_set_opp_idx").on(
+      table.versionId,
+      table.opportunitySetKey,
+      table.opportunityId,
+    ),
+  }),
+);
+
+export const workspaceRoiPrices = pgTable(
+  "workspace_roi_prices",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id").references(() => organizations.id).notNull(),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id).notNull(),
+    loadedHourlyCost: numeric("loaded_hourly_cost", {
+      precision: 10,
+      scale: 2,
+    }).notNull(),
+    costPerError: numeric("cost_per_error", {
+      precision: 10,
+      scale: 2,
+    }).notNull(),
+    delayCost: numeric("delay_cost", { precision: 10, scale: 2 }).notNull(),
+    currency: text("currency").default("USD").notNull(),
+    editedByUserId: uuid("edited_by_user_id").references(() => users.id),
+    ...timestamps,
+  },
+  (table) => ({
+    workspaceIdx: uniqueIndex("workspace_roi_prices_workspace_idx").on(
+      table.workspaceId,
     ),
   }),
 );

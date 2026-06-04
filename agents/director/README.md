@@ -10,16 +10,13 @@ The worker owns the realtime audio loop:
    - `POST /api/internal/director-turns/opening`
    - `POST /api/internal/director-turns/ingest`
    - `POST /api/internal/director-turns/context` during worker startup/recovery
-   - `POST /api/internal/director-turns/plan` as SSE for live planning
    - `POST /api/internal/director-turns/respond` as SSE for decoupled fast speech
-   - `POST /api/internal/director-turns/dispatch`
    - `POST /api/internal/director-turns/extract` for async structured extraction
    - `POST /api/internal/director-turns/check` for async spoken-output checks
    - `POST /api/internal/director-turns/:turnIndex/delivery`
    - `POST /api/internal/director-turns/complete`
-4. Stream the Next.js director plan response by default, speak from the first complete
-   `planned_agent_utterance`, and let dispatch commit concurrently with TTS. The Python planner
-   remains a buffered fallback runtime.
+4. Stream the Next.js director respond route, speak from the fast phrasing event, and let
+   structured extraction/checking finish asynchronously after delivery.
 5. Listen for reliable LiveKit data-channel controls on `otto.director.control`:
    - `mute` and `unmute` track intentional silence without ending or recovering the interview.
    - `pause` and `resume` stop or resume turn handling and interrupt active speech.
@@ -88,8 +85,8 @@ Required environment:
 - `DATABASE_SERVICE_URL` in the Next.js deployment. This must be the service-role database URL,
   not the RLS-limited app URL, because internal director endpoints resolve `capture_session_id` to
   org/workspace/user before they can set tenant RLS context.
-- `ANTHROPIC_API_KEY` for the Next.js `/plan` runtime. Without it, the server/worker use the
-  deterministic conversational fallback.
+- `ANTHROPIC_API_KEY` for the Next.js `/respond`, `/extract`, and `/check` runtimes. Without it,
+  the server/worker use deterministic conversational fallbacks where available.
 - `OTTO_DIRECTOR_PREFLIGHT_STRICT=true` for production readiness checks in non-production
   environments. `NODE_ENV=production` automatically enables the same strict requirements. In strict
   mode, missing `ANTHROPIC_API_KEY` is a failure instead of a fallback warning. The worker and
@@ -101,14 +98,13 @@ Required environment:
   `OTTO_ANTHROPIC_RAW_LOGGING_OFF_ACK=true` in strict mode, after confirming Deepgram no-store or
   LiveKit Inference equivalent controls, Cartesia no-retention controls, and Anthropic raw-payload
   logging controls.
-- `DIRECTOR_BRAIN_MODEL` and `DIRECTOR_VOICE_MODEL` to override model roles. Director planning now
-  defaults to Sonnet because the same plan call also chooses the spoken utterance.
+- `DIRECTOR_BRAIN_MODEL` and `DIRECTOR_VOICE_MODEL` to override model roles. Director extraction
+  defaults to Sonnet, while the latency-critical voice phraser defaults to Haiku.
 - `OTTO_VOICE_PHRASE_TIMEOUT_MS` to bound the Sonnet voice rewrite before speech. The default is
   `2500`; if the voice model misses that deadline, the worker speaks the deterministic consultant
   phrasing for the brain's chosen intent and records `voice_timeout_fallback` in decision metadata.
   This marks voice phrasing as degraded without marking transcript extraction or claims as degraded.
-- `OTTO_DIRECTOR_PLANNER_RUNTIME=next` to use the default streamed Next.js `/plan` endpoint. Set
-  `python` only for local buffered fallback testing.
+- `OTTO_DIRECTOR_PLANNER_RUNTIME=next` to use the Next.js internal endpoints.
 
 Provider environment depends on whether you use LiveKit Inference or direct provider plugins:
 
@@ -248,18 +244,28 @@ and avoids stale local entry points.
 capture session:
 
 1. ingest transcript/evidence through the internal API
-2. run the configured planner runtime, defaulting to the streamed Next.js `/plan` route
-3. dispatch tool/claim/slot updates through the internal API
-4. mark delivery completed
+2. stream `/respond` for the fast spoken utterance and mark delivery completed
+3. run `/check` for spoken-output validation
+4. run `/extract` for structured slot/claim updates
 5. print `decision_log_id`, candidate ids, slot updates, degraded flag, latency timings, and a
    backend pre-TTS budget check
 
 It is the backend proof step before the full LiveKit microphone/TTS session test. The smoke command
 only requires `OTTO_INTERNAL_API_BASE_URL`, `LIVEKIT_AGENT_SERVICE_TOKEN`, and
 `OTTO_CAPTURE_SESSION_ID`. It does not require LiveKit, Deepgram, Cartesia, or vendor privacy
-acknowledgement environment because it only measures ingest + planning + dispatch; full production
+acknowledgement environment because it only measures ingest + respond + extract; full production
 acceptance still needs real LiveKit/Deepgram/Cartesia playout traces for ASR, TTS, interruption,
 and end-to-end turn timing.
+
+After a real voice run, verify the fast phraser wrote Haiku telemetry:
+
+```bash
+cd otto-frontend
+VOICE_TELEMETRY_PROMPTS=director.voice.phrase-intent npm run verify:voice-telemetry
+```
+
+Use `VOICE_TELEMETRY_SINCE=<iso timestamp>` to scope the check to a rollout window, and optionally
+set `VOICE_TELEMETRY_MAX_AVG_MS=<milliseconds>` when a latency threshold is part of the rollout gate.
 
 `otto-director-session-verify` is the post-call evidence check for a real capture session. It calls
 the internal service-token verification endpoint and prints transcript/decision counts, terminal

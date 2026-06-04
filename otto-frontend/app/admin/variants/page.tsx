@@ -1,14 +1,20 @@
 import { VariantQueue } from "@/components/admin/VariantQueue";
 import { requirePageAuth } from "@/lib/auth/session";
 import { getCurrentWorkspace } from "@/lib/workspaces/current";
-import { getVariantReviewQueue } from "@/lib/admin/variant-queries";
+import {
+  getProcessMergeTargets,
+  getVariantReviewQueue,
+} from "@/lib/admin/variant-queries";
 
 export default async function VariantsPage() {
   const auth = await requirePageAuth();
   const workspace = await getCurrentWorkspace(auth);
-  const rows = workspace
-    ? await getVariantReviewQueue(auth.orgId, workspace.id)
-    : [];
+  const [rows, mergeTargets] = workspace
+    ? await Promise.all([
+        getVariantReviewQueue(auth.orgId, workspace.id),
+        getProcessMergeTargets(auth.orgId, workspace.id),
+      ])
+    : [[], []];
 
   return (
     <div className="space-y-6">
@@ -21,7 +27,11 @@ export default async function VariantsPage() {
           need an explicit FDE decision before merging.
         </p>
       </header>
-      <VariantQueue rows={rows} />
+      <VariantQueue
+        rows={rows}
+        workspaceId={workspace?.id ?? ""}
+        mergeTargets={mergeTargets}
+      />
     </div>
   );
 }

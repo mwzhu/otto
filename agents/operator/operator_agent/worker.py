@@ -46,6 +46,7 @@ async def entrypoint(ctx: JobContext) -> None:
             capture_session_id=capture_session_id,
             api=api,
             room=ctx.room,
+            voice_runtime=config.voice_runtime,
             tts_audio_metadata=cartesia_audio_metadata(config),
         )
 
@@ -58,7 +59,12 @@ async def entrypoint(ctx: JobContext) -> None:
             vad=silero.VAD.load(),
             turn_handling=TurnHandlingOptions(
                 turn_detection=MultilingualModel(),
-                endpointing={"min_delay": 1.0, "max_delay": 6.0},
+                endpointing={
+                    "mode": endpointing_mode(config.endpointing_mode),
+                    "min_delay": config.endpointing_min_delay,
+                    "max_delay": config.endpointing_max_delay,
+                    "alpha": config.endpointing_alpha,
+                },
                 interruption={"enabled": True},
             ),
             user_away_timeout=None,
@@ -175,6 +181,10 @@ def cartesia_audio_metadata(config: OperatorAgentConfig) -> dict[str, str | bool
         "vendor_privacy_ack": config.vendor_privacy_ack,
         "privacy_no_retention_ack": config.cartesia_no_retention_ack,
     }
+
+
+def endpointing_mode(value: str) -> str:
+    return value if value in {"fixed", "dynamic"} else "dynamic"
 
 
 def capture_session_id_from_room(room_name: str) -> str:

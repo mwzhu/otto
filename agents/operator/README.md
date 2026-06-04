@@ -3,17 +3,33 @@
 LiveKit worker for operator workflow capture.
 
 It joins rooms named `operator-{capture_session_id}` using
-`LIVEKIT_OPERATOR_AGENT_NAME` (default `otto-operator`) and calls the split
-operator turn runtime:
+`LIVEKIT_OPERATOR_AGENT_NAME` (default `otto-operator`) and calls Otto's
+operator turn runtime.
 
 - `/api/internal/operator-turns/ingest`
-- `/api/internal/operator-turns/plan`
-- `/api/internal/operator-turns/dispatch`
+- `/api/internal/operator-turns/respond` when `OTTO_OPERATOR_VOICE_RUNTIME=steered_cascade`
+- `/api/internal/operator-turns/extract` for async structured extraction in `steered_cascade`
+- `/api/internal/operator-turns/check` for async spoken-output checks in `steered_cascade`
+- `/api/internal/operator-turns/plan` and `/dispatch` while the legacy runtime remains enabled
 - `/api/internal/operator-turns/:turnIndex/delivery`
 
-The worker streams `/plan` with `Accept: text/event-stream`, starts TTS as soon
-as `planned_agent_utterance` arrives, then dispatches the full structured plan
-and records delivery telemetry after playout.
+By default the operator worker stays on `planned_cascade` during rollout. Set
+`OTTO_OPERATOR_VOICE_RUNTIME=steered_cascade` to stream `/respond`, start TTS as
+soon as `planned_agent_utterance` arrives, and let structured extraction finish
+through `/extract` in the background. `OPERATOR_VOICE_MODEL` controls the fast
+voice phraser and defaults to Haiku in `.env.example`.
+
+After a real steered-cascade voice run, verify the fast phraser wrote Haiku
+telemetry:
+
+```bash
+cd otto-frontend
+VOICE_TELEMETRY_PROMPTS=operator.voice.phrase-intent npm run verify:voice-telemetry
+```
+
+Use `VOICE_TELEMETRY_SINCE=<iso timestamp>` to scope the check to a rollout
+window, and optionally set `VOICE_TELEMETRY_MAX_AVG_MS=<milliseconds>` when a
+latency threshold is part of the rollout gate.
 
 ## Local Run
 

@@ -207,6 +207,7 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
   const [draft, setDraft] = useState("");
   const [interim, setInterim] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [turnWaitMessage, setTurnWaitMessage] = useState<string | null>(null);
   const [listening, setListening] = useState(false);
   const [paused, setPaused] = useState(false);
   const [muted, setMuted] = useState(false);
@@ -242,7 +243,7 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
 
   const hydrateTranscript = useCallback(async (activeSession: DirectorSession) => {
     const history = await refreshTranscript(activeSession);
-    setMessages(history);
+    setMessages((current) => mergeTranscriptMessages(current, history));
     liveKitDirectorTurnIndexesRef.current = new Set(
       history
         .filter(
@@ -451,10 +452,16 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
       const text = utterance.trim();
       if (!session || !text || submitting) return;
       setSubmitting(true);
+      setTurnWaitMessage(null);
       setError(null);
       appendMessage("director", text);
       setDraft("");
       setInterim("");
+      const slowTurnTimer = window.setTimeout(() => {
+        setTurnWaitMessage(
+          "Structured notes are still updating. Your answer is saved locally and Otto will continue once the turn response returns.",
+        );
+      }, 6000);
 
       try {
         const response = await postJson<DirectorTurnResponse>(
@@ -471,6 +478,8 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
       } catch (err) {
         setError(err instanceof Error ? err.message : "Could not save the turn.");
       } finally {
+        window.clearTimeout(slowTurnTimer);
+        setTurnWaitMessage(null);
         setSubmitting(false);
       }
     },
@@ -877,6 +886,11 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
               {error}
             </p>
           )}
+          {turnWaitMessage && (
+            <p className="rounded-md border border-subtle bg-muted px-3 py-2 text-[12px] text-ink-secondary">
+              {turnWaitMessage}
+            </p>
+          )}
           <div className="flex flex-col gap-2 sm:flex-row">
             <Button
               type="button"
@@ -1015,6 +1029,31 @@ function introMessage(session: DirectorSession): TranscriptMessage {
       minute: "2-digit",
     }),
   };
+}
+
+function mergeTranscriptMessages(
+  current: TranscriptMessage[],
+  history: TranscriptMessage[],
+) {
+  if (current.length === 0) return history;
+  if (history.length === 0) return current;
+  const seen = new Set(history.map(transcriptMessageIdentity));
+  const optimistic = current.filter(
+    (message) => !seen.has(transcriptMessageIdentity(message)),
+  );
+  return [...history, ...optimistic];
+}
+
+function transcriptMessageIdentity(message: TranscriptMessage) {
+  if (typeof message.turn_index === "number") {
+    return [
+      message.speaker,
+      message.turn_index,
+      message.stage_name ?? "director.turn",
+      message.text,
+    ].join(":");
+  }
+  return [message.speaker, message.stage_name ?? "", message.text].join(":");
 }
 
 function StatusPill({ status }: { status: CoverageSlot["status"] }) {

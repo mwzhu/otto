@@ -4,7 +4,6 @@ import { useEffect, useMemo, useRef } from "react";
 import { useWorkspaceStore } from "@/lib/store/workspace";
 import { Pill } from "@/components/ui/Pill";
 import { ConfidenceBadge } from "@/components/common/ConfidenceBadge";
-import { cn } from "@/lib/cn";
 import type { Claim, Evidence } from "@/lib/types";
 
 export function EvidenceDrawer({
@@ -54,20 +53,18 @@ export function EvidenceDrawer({
     }
   }, [open, workspaceId, evidences]);
 
+  if (!open) {
+    return null;
+  }
+
   return (
     <>
       <div
-        className={cn(
-          "fixed inset-0 z-40 bg-ink/10 transition-opacity",
-          open ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0",
-        )}
+        className="fixed inset-0 z-40 bg-ink/10"
         onClick={close}
       />
       <aside
-        className={cn(
-          "fixed right-0 top-0 z-50 flex h-full w-[420px] flex-col border-l border-subtle bg-surface shadow-pop transition-transform",
-          open ? "translate-x-0" : "translate-x-full",
-        )}
+        className="fixed right-0 top-0 z-50 flex h-full w-[420px] flex-col border-l border-subtle bg-surface shadow-pop"
       >
         <header className="flex items-start justify-between gap-3 border-b border-subtle px-5 py-4">
           <div>

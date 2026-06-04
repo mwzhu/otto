@@ -11,6 +11,7 @@ import {
   layoutOperatorGraph,
   operatorEdgeWaypoints,
 } from "@/lib/synthesis/operator-layout";
+import { averageMetric, reportEvalScores } from "../evals/report";
 
 type WorkflowFixture = {
   minimums: Record<
@@ -80,13 +81,21 @@ describe("operator workflow builder early eval gate", () => {
       };
     });
 
-    for (const [metric, minimum] of Object.entries(fixture.minimums)) {
-      const average =
-        scores.reduce(
-          (sum, score) => sum + score[metric as keyof (typeof scores)[number]],
-          0,
-        ) / scores.length;
-      expect(average, `${metric} average`).toBeGreaterThanOrEqual(minimum);
+    const metrics = Object.entries(fixture.minimums).map(([metric, minimum]) => ({
+      name: metric,
+      score: averageMetric(scores, metric as keyof (typeof scores)[number]),
+      minimum,
+    }));
+    reportEvalScores({
+      suite: "operator.workflow-builder",
+      fixture: "../evals/operator/workflow-fixtures.json",
+      cases: fixture.cases.length,
+      metrics,
+    });
+    for (const metric of metrics) {
+      expect(metric.score, `${metric.name} average`).toBeGreaterThanOrEqual(
+        metric.minimum,
+      );
     }
   });
 

@@ -17,6 +17,35 @@ type FileRow = {
   error?: string;
 };
 
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+const ACCEPTED_FILE_EXTENSIONS = [
+  ".pdf",
+  ".doc",
+  ".docx",
+  ".ppt",
+  ".pptx",
+  ".xls",
+  ".xlsx",
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".webp",
+  ".gif",
+];
+const ACCEPTED_FILE_TYPES = [
+  "application/pdf",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-powerpoint",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+];
+
 const STAGE_LABEL: Record<Status, string> = {
   queued: "Queued",
   extracting: "Extracting claims",
@@ -37,10 +66,12 @@ export function UploadClient() {
       size: f.size,
       status: "queued",
       progress: 0,
+      error: validateUploadFile(f) ?? undefined,
     }));
     setFiles((prev) => [...prev, ...rows]);
 
     rows.forEach((row, idx) => {
+      if (row.error) return;
       uploadFile(fl[idx], row.id).catch((error) => {
         setFiles((prev) =>
           prev.map((item) =>
@@ -123,6 +154,7 @@ export function UploadClient() {
           ref={inputRef}
           type="file"
           multiple
+          accept={ACCEPTED_FILE_EXTENSIONS.join(",")}
           className="hidden"
           onChange={(e) => addFiles(Array.from(e.target.files ?? []))}
         />
@@ -232,6 +264,27 @@ async function uploadFile(file: File, rowId: string) {
       ),
   );
   updateUploadRow(rowId, "done", 100);
+}
+
+function validateUploadFile(file: File) {
+  if (file.size === 0) {
+    return "Unsupported file: empty files cannot be uploaded.";
+  }
+  if (file.size > MAX_UPLOAD_BYTES) {
+    return "Unsupported file: files must be 50 MB or smaller.";
+  }
+  if (!isAcceptedUploadFile(file)) {
+    return "Unsupported file type. Upload PDF, DOCX, PPTX, XLSX, or image files.";
+  }
+  return null;
+}
+
+function isAcceptedUploadFile(file: File) {
+  const normalizedName = file.name.toLowerCase();
+  if (ACCEPTED_FILE_TYPES.includes(file.type)) return true;
+  return ACCEPTED_FILE_EXTENSIONS.some((extension) =>
+    normalizedName.endsWith(extension),
+  );
 }
 
 async function ensureWorkspace() {

@@ -1,24 +1,25 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import { cn } from "@/lib/cn";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/Button";
-import { useDraftsStore } from "@/lib/store/drafts";
 import { useWorkspaceStore } from "@/lib/store/workspace";
+import type { ProcessSummary } from "@/lib/types";
 
 type Tab = { label: string; href: string; segment: string | null };
 
 export function WorkspaceTopNav({
   processId,
   processName,
+  processStatus = "draft",
 }: {
   processId: string;
   processName: string;
+  processStatus?: ProcessSummary["process_status"];
 }) {
   const pathname = usePathname();
-  const router = useRouter();
   const sp = useSearchParams();
 
   const base = `/process/${processId}/workspace`;
@@ -28,9 +29,8 @@ export function WorkspaceTopNav({
     { label: "Automation", href: `${base}/automation`, segment: "automation" },
   ];
 
-  const isApproved = useDraftsStore((s) => s.isApproved(processId));
-  const approve = useDraftsStore((s) => s.approve);
   const toggleRefine = useWorkspaceStore((s) => s.toggleRefine);
+  const status = processStatus === "approved" ? "approved" : "draft";
 
   return (
     <div className="flex flex-col gap-3 border-b border-subtle bg-canvas px-6 py-3">
@@ -39,7 +39,7 @@ export function WorkspaceTopNav({
           <h1 className="text-[20px] font-semibold tracking-tight text-ink">
             {processName}
           </h1>
-          <StatusBadge status={isApproved ? "approved" : "draft"} />
+          <StatusBadge status={status} />
         </div>
         <div className="flex items-center gap-2">
           <Button variant="secondary" size="sm" onClick={() => toggleRefine()}>
@@ -57,19 +57,19 @@ export function WorkspaceTopNav({
           <Button variant="secondary" size="sm">
             <ShareIcon /> Invite Colleague
           </Button>
-          {!isApproved ? (
-            <Button size="sm" onClick={() => approve(processId)}>
-              Approve Draft
-            </Button>
-          ) : (
+          {status === "approved" ? (
             <Button size="sm" variant="outline" disabled>
               Approved
             </Button>
+          ) : (
+            <Link href={base} className="inline-flex">
+              <Button size="sm">Review Draft</Button>
+            </Link>
           )}
         </div>
       </div>
 
-      <nav className="flex items-center gap-1">
+      <nav aria-label="Workspace sections" className="flex items-center gap-1">
         {tabs.map((t) => {
           const active = pathname === t.href;
           return (

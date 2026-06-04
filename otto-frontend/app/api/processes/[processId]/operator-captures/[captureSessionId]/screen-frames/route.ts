@@ -278,6 +278,7 @@ export async function POST(
       return { body: response, statusCode: 201, shouldSendEvent: true };
     });
 
+    let backgroundWarning: { message: string } | null = null;
     if (result.shouldSendEvent) {
       const screenEventId =
         typeof result.body === "object" &&
@@ -290,23 +291,35 @@ export async function POST(
           ? result.body.screen_event.id
           : null;
       if (screenEventId) {
-        await inngest.send({
-          name: operatorScreenFrameCapturedEventName,
-          data: {
-            orgId: auth.orgId,
-            workspaceId: body.workspace_id,
-            processId,
-            captureSessionId,
-            artifactId: body.artifact_id,
-            screenEventId,
-            userId: auth.userId,
-            idempotencyKey,
-          },
-        });
+        try {
+          await inngest.send({
+            name: operatorScreenFrameCapturedEventName,
+            data: {
+              orgId: auth.orgId,
+              workspaceId: body.workspace_id,
+              processId,
+              captureSessionId,
+              artifactId: body.artifact_id,
+              screenEventId,
+              userId: auth.userId,
+              idempotencyKey,
+            },
+          });
+        } catch {
+          backgroundWarning = {
+            message:
+              "Screen keyframe was saved, but vision analysis did not queue. Keep recording and retry the interview if visual grounding does not update.",
+          };
+        }
       }
     }
 
-    return apiJson(result.body, { status: result.statusCode });
+    return apiJson(
+      backgroundWarning
+        ? { ...(result.body as Record<string, unknown>), warning: backgroundWarning }
+        : result.body,
+      { status: result.statusCode },
+    );
   } catch (error) {
     return apiError(error);
   }

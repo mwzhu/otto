@@ -41,18 +41,21 @@ export function CaptureControls({
       <Button
         variant="secondary"
         size="sm"
-        onClick={() => {
-          setMuted((current) => {
-            const next = !current;
-            void Promise.resolve(onMuteChange?.(next)).catch((err) => {
-              setError(
-                err instanceof Error
-                  ? err.message
-                  : "Could not update microphone state.",
-              );
-            });
-            return next;
-          });
+        onClick={async () => {
+          const previous = muted;
+          const next = !previous;
+          setMuted(next);
+          setError(null);
+          try {
+            await onMuteChange?.(next);
+          } catch (err) {
+            setMuted(previous);
+            setError(
+              err instanceof Error
+                ? err.message
+                : "Could not update microphone state.",
+            );
+          }
         }}
       >
         {muted ? "Unmute" : "Mute"}
@@ -63,19 +66,21 @@ export function CaptureControls({
       <Button
         variant="secondary"
         size="sm"
-        onClick={() => {
-          setPaused((p) => {
-            const next = !p;
-            void Promise.resolve(onPauseChange(next)).catch((err) => {
-              setError(
-                err instanceof Error
-                  ? err.message
-                  : "Could not update pause state.",
-              );
-              setPaused(p);
-            });
-            return next;
-          });
+        onClick={async () => {
+          const previous = paused;
+          const next = !previous;
+          setPaused(next);
+          setError(null);
+          try {
+            await onPauseChange(next);
+          } catch (err) {
+            setPaused(previous);
+            setError(
+              err instanceof Error
+                ? err.message
+                : "Could not update pause state.",
+            );
+          }
         }}
       >
         {paused ? "Resume" : "Pause Interview"}

@@ -14,6 +14,7 @@ from otto_realtime_core import (
     text_content,
 )
 from operator_agent.agent import OperatorWorkflowAgent
+from operator_agent.otto_api import IngestedTurn, RespondedTurn
 from operator_agent.worker import operator_worker_http_port
 
 
@@ -373,6 +374,315 @@ class OperatorWorkerContractTests(unittest.TestCase):
             [event["event"] for event in decoded],
             ["operator.screen_track.observed", "operator.screen_track.observed"],
         )
+
+    def test_steered_cascade_speaks_before_async_extract_and_check_finish(self) -> None:
+        class FakeApi:
+            def __init__(
+                self,
+                release_extract: asyncio.Event,
+                release_check: asyncio.Event,
+            ) -> None:
+                self.release_extract = release_extract
+                self.release_check = release_check
+                self.extract_done = asyncio.Event()
+                self.check_done = asyncio.Event()
+                self.calls: list[str] = []
+                self.extract_payloads: list[dict[str, object]] = []
+                self.check_payloads: list[dict[str, object]] = []
+                self.delivery_payloads: list[dict[str, object]] = []
+
+            async def ingest_turn(self, **kwargs):
+                self.calls.append("ingest")
+                return IngestedTurn(
+                    latest_utterance=kwargs["utterance"],
+                    transcript_segment_ids=["segment-1"],
+                    evidence_ids=["evidence-1"],
+                    turn_index=7,
+                    raw={},
+                )
+
+            async def respond_turn(self, **kwargs):
+                self.calls.append("respond")
+                callback = kwargs.get("on_planned_agent_utterance")
+                if callback:
+                    callback("Got it. What happens after approval?")
+                return RespondedTurn(
+                    plan={
+                        "chosen_intent": {
+                            "intent": "capture_next_step",
+                            "target_slot": "steps.next_action",
+                            "score": 100,
+                            "reason": "Capture the next workflow step.",
+                        }
+                    },
+                    planned_agent_utterance="Got it. What happens after approval?",
+                    decision_log_id="respond-decision-1",
+                    metadata={"model": "deterministic-steering"},
+                    voice_metadata={"model": "voice-model"},
+                    steering_context={
+                        "target_slots": ["steps.next_action"],
+                        "do_not_ask": [],
+                    },
+                    degraded_quality=False,
+                    degraded_reasons=[],
+                    raw={"extraction_status": "pending"},
+                    local_turn_correlation_id=kwargs.get("local_turn_correlation_id"),
+                )
+
+            async def extract_turn(self, **kwargs):
+                self.calls.append("extract")
+                self.extract_payloads.append(kwargs)
+                await self.release_extract.wait()
+                self.extract_done.set()
+                return {
+                    "decision_log_id": "extract-decision-1",
+                    "planned_agent_utterance": "Advisory only",
+                    "extraction_status": "complete",
+                    "extraction_latency_ms": 12,
+                    "degraded_quality": False,
+                    "degraded_reasons": [],
+                }
+
+            async def check_turn(self, **kwargs):
+                self.calls.append("check")
+                self.check_payloads.append(kwargs)
+                await self.release_check.wait()
+                self.check_done.set()
+                return {
+                    "checker_status": "complete",
+                    "checker_violations": [],
+                    "checker_violation_count": 0,
+                    "stale_question_count": 0,
+                    "metadata": {"model": "checker"},
+                }
+
+            async def update_delivery(self, **kwargs):
+                self.calls.append("delivery")
+                self.delivery_payloads.append(kwargs)
+                return {"delivery": {"id": kwargs["decision_log_id"]}}
+
+        class FakeSpeech:
+            interrupted = False
+
+            async def wait_for_playout(self):
+                return None
+
+        class FakeSession:
+            def __init__(self) -> None:
+                self.spoken: list[str] = []
+
+            def say(self, text, *, allow_interruptions):
+                del allow_interruptions
+                self.spoken.append(text)
+                return FakeSpeech()
+
+        class FakeParticipant:
+            def __init__(self) -> None:
+                self.events: list[dict[str, object]] = []
+
+            async def publish_data(self, payload, *, reliable, topic):
+                del reliable, topic
+                self.events.append(json.loads(payload.decode("utf-8")))
+
+        class FakeRoom:
+            def __init__(self) -> None:
+                self.local_participant = FakeParticipant()
+
+            def on(self, event, handler):
+                del event, handler
+                return None
+
+        async def run_case():
+            from livekit.agents import ChatContext, ChatMessage, StopResponse
+
+            release_extract = asyncio.Event()
+            release_check = asyncio.Event()
+            api = FakeApi(release_extract, release_check)
+            session = FakeSession()
+            room = FakeRoom()
+            agent = OperatorWorkflowAgent(
+                capture_session_id=CAPTURE_SESSION_ID,
+                api=api,
+                room=room,
+                voice_runtime="steered_cascade",
+            )
+            agent._activity = SimpleNamespace(session=session)
+            message = ChatMessage(
+                role="user",
+                content=["I approve the exception request."],
+            )
+            with mock.patch("operator_agent.agent.EXTRACTION_WINDOW_DEBOUNCE_SECONDS", 0.01):
+                with self.assertRaises(StopResponse):
+                    await agent.on_user_turn_completed(ChatContext.empty(), message)
+                self.assertEqual(session.spoken, ["Got it. What happens after approval?"])
+                self.assertIn("delivery", api.calls)
+                self.assertFalse(api.extract_done.is_set())
+                self.assertFalse(api.check_done.is_set())
+                release_check.set()
+                release_extract.set()
+                await asyncio.wait_for(api.check_done.wait(), timeout=1)
+                await asyncio.wait_for(api.extract_done.wait(), timeout=1)
+            return api, room
+
+        api, room = asyncio.run(run_case())
+        self.assertIn("respond", api.calls)
+        self.assertIn("check", api.calls)
+        self.assertIn("extract", api.calls)
+        self.assertEqual(api.delivery_payloads[0]["decision_log_id"], "respond-decision-1")
+        self.assertEqual(
+            api.extract_payloads[0]["turn"].latest_utterance,
+            "I approve the exception request.",
+        )
+        self.assertEqual(
+            api.check_payloads[0]["steering_context"]["target_slots"],
+            ["steps.next_action"],
+        )
+        event_names = [event["event"] for event in room.local_participant.events]
+        self.assertIn("operator.turn.dispatched", event_names)
+        self.assertIn("operator.turn.output_checked", event_names)
+        self.assertIn("operator.turn.extracted", event_names)
+
+    def test_steered_cascade_coalesces_quick_split_finals_for_extraction(self) -> None:
+        class FakeApi:
+            def __init__(self, release_extract: asyncio.Event) -> None:
+                self.release_extract = release_extract
+                self.extract_started = asyncio.Event()
+                self.extract_done = asyncio.Event()
+                self.turn_index = 0
+                self.extract_payloads: list[dict[str, object]] = []
+
+            async def ingest_turn(self, **kwargs):
+                self.turn_index += 1
+                return IngestedTurn(
+                    latest_utterance=kwargs["utterance"],
+                    transcript_segment_ids=[f"segment-{self.turn_index}"],
+                    evidence_ids=[f"evidence-{self.turn_index}"],
+                    turn_index=self.turn_index,
+                    raw={},
+                )
+
+            async def respond_turn(self, **kwargs):
+                callback = kwargs.get("on_planned_agent_utterance")
+                utterance = f"Fast operator response {kwargs['turn'].turn_index}?"
+                if callback:
+                    callback(utterance)
+                return RespondedTurn(
+                    plan={
+                        "chosen_intent": {
+                            "intent": "capture_next_step",
+                            "target_slot": "step.action_object",
+                            "score": 100,
+                            "reason": "Capture the next workflow step.",
+                        }
+                    },
+                    planned_agent_utterance=utterance,
+                    decision_log_id=f"respond-{kwargs['turn'].turn_index}",
+                    metadata={"model": "deterministic-steering"},
+                    voice_metadata={"model": "voice-model"},
+                    steering_context={"target_slots": ["step.action_object"]},
+                    degraded_quality=False,
+                    degraded_reasons=[],
+                    raw={"extraction_status": "pending"},
+                    local_turn_correlation_id=kwargs.get("local_turn_correlation_id"),
+                )
+
+            async def extract_turn(self, **kwargs):
+                self.extract_payloads.append(kwargs)
+                self.extract_started.set()
+                await self.release_extract.wait()
+                self.extract_done.set()
+                return {
+                    "decision_log_id": "extract-window-1",
+                    "extraction_status": "complete",
+                    "extraction_latency_ms": 8,
+                    "slot_update_latency_ms": 8,
+                    "degraded_quality": False,
+                    "degraded_reasons": [],
+                }
+
+            async def check_turn(self, **kwargs):
+                return {
+                    "checker_status": "complete",
+                    "checker_violations": [],
+                    "checker_violation_count": 0,
+                    "stale_question_count": 0,
+                    "metadata": {"model": "checker"},
+                }
+
+            async def update_delivery(self, **kwargs):
+                return {"delivery": {"id": kwargs["decision_log_id"]}}
+
+        class FakeSpeech:
+            interrupted = False
+
+            async def wait_for_playout(self):
+                return None
+
+        class FakeSession:
+            def __init__(self) -> None:
+                self.spoken: list[str] = []
+
+            def say(self, text, *, allow_interruptions):
+                del allow_interruptions
+                self.spoken.append(text)
+                return FakeSpeech()
+
+        class FakeParticipant:
+            async def publish_data(self, payload, *, reliable, topic):
+                del payload, reliable, topic
+                return None
+
+        class FakeRoom:
+            local_participant = FakeParticipant()
+
+            def on(self, event, handler):
+                del event, handler
+                return None
+
+        async def run_case():
+            from livekit.agents import ChatContext, ChatMessage, StopResponse
+
+            release_extract = asyncio.Event()
+            api = FakeApi(release_extract)
+            session = FakeSession()
+            agent = OperatorWorkflowAgent(
+                capture_session_id=CAPTURE_SESSION_ID,
+                api=api,
+                room=FakeRoom(),
+                voice_runtime="steered_cascade",
+            )
+            agent._activity = SimpleNamespace(session=session)
+            with mock.patch("operator_agent.agent.EXTRACTION_WINDOW_DEBOUNCE_SECONDS", 0.05):
+                for text in [
+                    "I open the invoice record,",
+                    "then copy the customer id into Salesforce.",
+                ]:
+                    with self.assertRaises(StopResponse):
+                        await agent.on_user_turn_completed(
+                            ChatContext.empty(),
+                            ChatMessage(role="user", content=[text]),
+                        )
+                await asyncio.wait_for(api.extract_started.wait(), timeout=1)
+                self.assertEqual(len(api.extract_payloads), 1)
+                release_extract.set()
+                await asyncio.wait_for(api.extract_done.wait(), timeout=1)
+            return api, session
+
+        api, session = asyncio.run(run_case())
+        self.assertEqual(
+            session.spoken,
+            ["Fast operator response 1?", "Fast operator response 2?"],
+        )
+        extracted_turn = api.extract_payloads[0]["turn"]
+        self.assertEqual(
+            extracted_turn.latest_utterance,
+            "I open the invoice record, then copy the customer id into Salesforce.",
+        )
+        self.assertEqual(
+            extracted_turn.transcript_segment_ids,
+            ["segment-1", "segment-2"],
+        )
+        self.assertEqual(extracted_turn.raw["window_turn_indexes"], [1, 2])
 
 
 if __name__ == "__main__":

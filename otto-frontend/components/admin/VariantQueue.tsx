@@ -4,23 +4,96 @@ import { useState } from "react";
 import { Pill } from "@/components/ui/Pill";
 import { Button } from "@/components/ui/Button";
 import { cn } from "@/lib/cn";
-import type { VariantReviewRow } from "@/lib/admin/variant-queries";
+import type {
+  ProcessMergeTarget,
+  VariantReviewRow,
+} from "@/lib/admin/variant-queries";
 
-export function VariantQueue({ rows }: { rows: VariantReviewRow[] }) {
-  const [decisions, setDecisions] = useState<Record<string, "accept" | "reject">>({});
+type DecisionState = {
+  action: "promoted" | "merged" | "discarded";
+  detail?: string;
+};
+
+export function VariantQueue({
+  rows,
+  workspaceId,
+  mergeTargets,
+}: {
+  rows: VariantReviewRow[];
+  workspaceId: string;
+  mergeTargets: ProcessMergeTarget[];
+}) {
+  const [decisions, setDecisions] = useState<Record<string, DecisionState>>({});
+  const [pending, setPending] = useState<Record<string, string | undefined>>({});
+  const [errors, setErrors] = useState<Record<string, string | undefined>>({});
+  const [targets, setTargets] = useState<Record<string, string | undefined>>({});
+
+  async function mutateCandidate(
+    row: VariantReviewRow,
+    action: "promote" | "merge" | "discard",
+  ) {
+    setPending((prev) => ({ ...prev, [row.id]: action }));
+    setErrors((prev) => ({ ...prev, [row.id]: undefined }));
+    const targetProcessId = targets[row.id] ?? mergeTargets[0]?.id;
+    try {
+      const response = await fetch(`/api/candidate-processes/${row.id}/${action}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": `admin-variant-${action}-${row.id}`,
+        },
+        body: JSON.stringify({
+          workspace_id: workspaceId,
+          ...(action === "merge" ? { target_process_id: targetProcessId } : {}),
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(
+          payload?.error?.message ?? `Could not ${action} candidate.`,
+        );
+      }
+      setDecisions((prev) => ({
+        ...prev,
+        [row.id]:
+          action === "promote"
+            ? { action: "promoted", detail: payload.process_id }
+            : action === "merge"
+              ? {
+                  action: "merged",
+                  detail:
+                    mergeTargets.find((target) => target.id === targetProcessId)
+                      ?.name ?? "selected process",
+                }
+              : { action: "discarded" },
+      }));
+    } catch (error) {
+      setErrors((prev) => ({
+        ...prev,
+        [row.id]:
+          error instanceof Error
+            ? error.message
+            : `Could not ${action} candidate.`,
+      }));
+    } finally {
+      setPending((prev) => ({ ...prev, [row.id]: undefined }));
+    }
+  }
+
   return (
     <div className="space-y-3">
       {rows.map((row) => {
         const d = decisions[row.id];
+        const busy = pending[row.id];
         const confidence = Number(row.confidence ?? 0);
         return (
           <article
             key={row.id}
             className={cn(
               "rounded-lg border bg-surface p-4 transition",
-              d === "accept"
+              d?.action === "promoted" || d?.action === "merged"
                 ? "border-[#BFE4C0]"
-                : d === "reject"
+                : d?.action === "discarded"
                   ? "border-[#F1C9B6]"
                   : "border-subtle",
             )}
@@ -61,41 +134,65 @@ export function VariantQueue({ rows }: { rows: VariantReviewRow[] }) {
                 </p>
               </div>
             </div>
-            <div className="mt-3 flex items-center justify-end gap-2">
+            {errors[row.id] ? (
+              <div className="mt-3 rounded-md border border-complexity-high-bg bg-complexity-high-bg/40 px-3 py-2 text-[12px] text-complexity-high-ink">
+                {errors[row.id]}
+              </div>
+            ) : null}
+            <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
               {d ? (
                 <span className="text-[12px] text-ink-muted">
-                  Marked {d === "accept" ? "accepted" : "rejected"} ·{" "}
-                  <button
-                    onClick={() =>
-                      setDecisions((prev) => {
-                        const next = { ...prev };
-                        delete next[row.id];
-                        return next;
-                      })
-                    }
-                    className="underline-offset-2 hover:underline"
-                  >
-                    Undo
-                  </button>
+                  {d.action === "promoted"
+                    ? "Promoted to tracked process"
+                    : d.action === "merged"
+                      ? `Merged into ${d.detail}`
+                      : "Discarded from queue"}
                 </span>
               ) : (
                 <>
+                  {mergeTargets.length > 0 ? (
+                    <label className="flex items-center gap-1.5 text-[12px] text-ink-muted">
+                      Merge into
+                      <select
+                        value={targets[row.id] ?? mergeTargets[0]?.id ?? ""}
+                        onChange={(event) =>
+                          setTargets((prev) => ({
+                            ...prev,
+                            [row.id]: event.target.value,
+                          }))
+                        }
+                        className="h-8 max-w-[220px] rounded-md border border-subtle bg-canvas px-2 text-[12px] text-ink outline-none focus:border-ink-muted"
+                      >
+                        {mergeTargets.map((target) => (
+                          <option key={target.id} value={target.id}>
+                            {target.name} ({target.status})
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : null}
                   <Button
                     variant="secondary"
                     size="sm"
-                    onClick={() =>
-                      setDecisions((prev) => ({ ...prev, [row.id]: "reject" }))
-                    }
+                    onClick={() => mutateCandidate(row, "discard")}
+                    disabled={Boolean(busy)}
                   >
-                    Reject
+                    {busy === "discard" ? "Discarding" : "Discard"}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => mutateCandidate(row, "merge")}
+                    disabled={Boolean(busy) || mergeTargets.length === 0}
+                  >
+                    {busy === "merge" ? "Merging" : "Merge"}
                   </Button>
                   <Button
                     size="sm"
-                    onClick={() =>
-                      setDecisions((prev) => ({ ...prev, [row.id]: "accept" }))
-                    }
+                    onClick={() => mutateCandidate(row, "promote")}
+                    disabled={Boolean(busy)}
                   >
-                    Mark reviewed
+                    {busy === "promote" ? "Promoting" : "Promote to tracked process"}
                   </Button>
                 </>
               )}

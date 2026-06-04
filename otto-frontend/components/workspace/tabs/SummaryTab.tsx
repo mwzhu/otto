@@ -2,6 +2,7 @@
 
 import type { ProcessGraph } from "@/lib/types";
 import type { ProcessFollowUpTask } from "@/lib/processes/follow-up-queries";
+import { followUpDescriptionForDisplay } from "@/lib/processes/follow-up-presentation";
 
 export function SummaryTab({
   processId,
@@ -90,6 +91,7 @@ function SummaryMetric({ label, value }: { label: string; value: number }) {
 }
 
 function FollowUpSummaryItem({ task }: { task: ProcessFollowUpTask }) {
+  const description = followUpDescriptionForDisplay(task);
   return (
     <div className="rounded-md border border-subtle bg-canvas px-3 py-2">
       <div className="flex items-start justify-between gap-3">
@@ -97,9 +99,9 @@ function FollowUpSummaryItem({ task }: { task: ProcessFollowUpTask }) {
           <div className="truncate text-[12.5px] font-medium text-ink">
             {task.title}
           </div>
-          {task.description && (
+          {description && (
             <p className="mt-1 line-clamp-2 text-[11.5px] leading-snug text-ink-muted">
-              {task.description}
+              {description}
             </p>
           )}
         </div>

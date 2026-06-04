@@ -4,6 +4,7 @@ import { getDb, setOrgContext } from "@/lib/db/client";
 import {
   auditLog,
   captureSessions,
+  followUpTasks,
   redactions,
   screenEvents,
   transcriptSegments,
@@ -191,9 +192,21 @@ export async function POST(
 
     const redactionId = (result.body as { redaction?: { id?: string } }).redaction?.id;
     if (result.shouldSendEvent && redactionId) {
-      await inngest.send({
-        name: operatorRedactionRequestedEventName,
-        data: {
+      try {
+        await inngest.send({
+          name: operatorRedactionRequestedEventName,
+          data: {
+            orgId: auth.orgId,
+            workspaceId: body.workspace_id,
+            processId,
+            captureSessionId,
+            redactionId,
+            userId: auth.userId,
+            idempotencyKey,
+          },
+        });
+      } catch {
+        await markRedactionEnqueueFailed({
           orgId: auth.orgId,
           workspaceId: body.workspace_id,
           processId,
@@ -201,12 +214,79 @@ export async function POST(
           redactionId,
           userId: auth.userId,
           idempotencyKey,
-        },
-      });
+          route,
+          requestHash: hash,
+        });
+        throw new ApiError(
+          503,
+          "server_error",
+          "Redaction failed; retry before using this capture.",
+        );
+      }
     }
 
     return apiJson(result.body, { status: result.statusCode });
   } catch (error) {
     return apiError(error);
   }
+}
+
+async function markRedactionEnqueueFailed(input: {
+  orgId: string;
+  workspaceId: string;
+  processId: string;
+  captureSessionId: string;
+  redactionId: string;
+  userId?: string;
+  idempotencyKey: string;
+  route: string;
+  requestHash: string;
+}) {
+  const message = "Redaction failed; retry before using this capture.";
+  await getDb().transaction(async (tx) => {
+    await setOrgContext(tx, input.orgId);
+    await tx
+      .update(redactions)
+      .set({
+        status: "failed",
+        failureReason: "redaction_enqueue_failed",
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(redactions.id, input.redactionId),
+          eq(redactions.orgId, input.orgId),
+          eq(redactions.workspaceId, input.workspaceId),
+          eq(redactions.captureSessionId, input.captureSessionId),
+        ),
+      );
+    await tx.insert(followUpTasks).values({
+      orgId: input.orgId,
+      workspaceId: input.workspaceId,
+      processId: input.processId,
+      captureSessionId: input.captureSessionId,
+      taskType: "redaction_failure",
+      title: "Operator capture redaction failed",
+      description:
+        "The redaction request was recorded, but the background redaction job could not be queued. Retry redaction before using this capture.",
+      targetType: "redaction",
+      targetId: input.redactionId,
+      priority: "1.0",
+      status: "open",
+      assignedToUserId: input.userId,
+      contextJson: {
+        redaction_id: input.redactionId,
+        failure_reason: "redaction_enqueue_failed",
+        idempotency_key: input.idempotencyKey,
+      },
+    });
+    await storeIdempotentResponse(tx, {
+      orgId: input.orgId,
+      key: input.idempotencyKey,
+      route: input.route,
+      requestHash: input.requestHash,
+      responseJson: { error: { code: "server_error", message } },
+      statusCode: 503,
+    });
+  });
 }

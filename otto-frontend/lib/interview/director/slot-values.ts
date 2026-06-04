@@ -27,6 +27,13 @@ function normalizeProcessBoundaryValue(value: unknown) {
   if (Array.isArray(value.processNames)) {
     return processBoundaryValue(value.processNames.filter(isString));
   }
+  const processName =
+    stringFromValue(value.process_name) ??
+    stringFromValue(value.process) ??
+    stringFromValue(value.name);
+  if (processName) {
+    return processBoundaryValue([processName]);
+  }
   if (typeof value.text === "string") {
     return processBoundaryValue([value.text]);
   }
@@ -40,6 +47,15 @@ function normalizeOwnershipRolesValue(value: unknown) {
       ...value,
       roles: uniqueStrings(value.roles.filter(isString)),
     };
+  }
+  const role =
+    stringFromValue(value.role) ??
+    stringFromValue(value.owner) ??
+    stringFromValue(value.owner_role) ??
+    stringFromValue(value.team) ??
+    stringFromValue(value.department);
+  if (role) {
+    return ownershipRolesValue([role]);
   }
   if (typeof value.text === "string") {
     return ownershipRolesValue([value.text]);
@@ -57,4 +73,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isString(value: unknown): value is string {
   return typeof value === "string";
+}
+
+function stringFromValue(value: unknown) {
+  return typeof value === "string" && value.trim() ? value : undefined;
 }

@@ -81,6 +81,15 @@ const SCREEN_FRAME_SAMPLE_INTERVAL_MS = 500;
 const SCREEN_FRAME_DUPLICATE_DIFF_THRESHOLD = 0.08;
 const SCREEN_RECORDING_VIDEO_BITS_PER_SECOND = 1_500_000;
 const SCREEN_RECORDING_AUDIO_BITS_PER_SECOND = 64_000;
+const DEFAULT_MEDIA_PERMISSION_TIMEOUT_MS = 20_000;
+const DEFAULT_STARTUP_REQUEST_TIMEOUT_MS = 20_000;
+
+declare global {
+  interface Window {
+    __OTTO_MEDIA_PERMISSION_TIMEOUT_MS__?: number;
+    __OTTO_STARTUP_REQUEST_TIMEOUT_MS__?: number;
+  }
+}
 
 export default function ScreenshareClient({
   workspaceId,
@@ -389,6 +398,11 @@ export default function ScreenshareClient({
             </span>
           )}
         </div>
+        {error && (
+          <p className="self-center rounded-md border border-danger/20 bg-danger/5 px-3 py-1.5 text-[11.5px] text-danger">
+            {error}
+          </p>
+        )}
         <div className="grid grid-cols-3 gap-2 text-[11px] text-ink-secondary">
           {captureHealthItems(captureHealth).map((item) => (
             <div
@@ -506,11 +520,7 @@ export default function ScreenshareClient({
               setRedactToast(true);
               setTimeout(() => setRedactToast(false), 3500);
             } catch (err) {
-              setRedactionError(
-                err instanceof Error
-                  ? err.message
-                  : "Could not redact capture.",
-              );
+              setRedactionError(redactionFailureMessage(err));
             }
           }}
         />
@@ -526,12 +536,17 @@ async function requestScreenPermission() {
     );
   }
   try {
-    const stream = await navigator.mediaDevices.getDisplayMedia({
-      video: true,
-      audio: false,
-    });
+    const stream = await withTimeout(
+      navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: false,
+      }),
+      mediaPermissionTimeoutMs(),
+      "Screen sharing permission did not finish. Choose a window or try again.",
+    );
     return stream;
-  } catch {
+  } catch (error) {
+    if (isTimeoutError(error)) throw error;
     throw new Error(
       "Screen sharing permission is required for the screenshare interview.",
     );
@@ -545,9 +560,14 @@ async function requestMicrophonePermission() {
     );
   }
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const stream = await withTimeout(
+      navigator.mediaDevices.getUserMedia({ audio: true }),
+      mediaPermissionTimeoutMs(),
+      "Microphone permission did not finish. Allow microphone access in the browser prompt, then try again.",
+    );
     return stream;
-  } catch {
+  } catch (error) {
+    if (isTimeoutError(error)) throw error;
     throw new Error(
       "Microphone permission is required for the screenshare interview.",
     );
@@ -555,14 +575,32 @@ async function requestMicrophonePermission() {
 }
 
 async function postJson<T>(url: string, body: unknown, idempotencyKey: string) {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "idempotency-key": idempotencyKey,
-    },
-    body: JSON.stringify(body),
-  });
+  const controller = new AbortController();
+  const timeout = window.setTimeout(
+    () => controller.abort(),
+    startupRequestTimeoutMs(),
+  );
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": idempotencyKey,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error(
+        "Screenshare setup timed out. Check your connection and try again.",
+      );
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+  }
   const payload = await response.json();
   if (!response.ok) {
     throw new Error(
@@ -570,6 +608,58 @@ async function postJson<T>(url: string, body: unknown, idempotencyKey: string) {
     );
   }
   return payload as T;
+}
+
+function mediaPermissionTimeoutMs() {
+  return windowTimeoutOverride(
+    "__OTTO_MEDIA_PERMISSION_TIMEOUT_MS__",
+    DEFAULT_MEDIA_PERMISSION_TIMEOUT_MS,
+  );
+}
+
+function startupRequestTimeoutMs() {
+  return windowTimeoutOverride(
+    "__OTTO_STARTUP_REQUEST_TIMEOUT_MS__",
+    DEFAULT_STARTUP_REQUEST_TIMEOUT_MS,
+  );
+}
+
+function windowTimeoutOverride(
+  key:
+    | "__OTTO_MEDIA_PERMISSION_TIMEOUT_MS__"
+    | "__OTTO_STARTUP_REQUEST_TIMEOUT_MS__",
+  fallback: number,
+) {
+  const value = window[key];
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : fallback;
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+) {
+  let timeoutId: number | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timeoutId = window.setTimeout(() => {
+          const error = new Error(message);
+          error.name = "TimeoutError";
+          reject(error);
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+  }
+}
+
+function isTimeoutError(error: unknown) {
+  return error instanceof Error && error.name === "TimeoutError";
 }
 
 async function completeOperatorCapture({
@@ -606,6 +696,28 @@ async function redactLastWindow({
     },
     `operator-capture-redact-last-30-${captureSessionId}-${Date.now()}`,
   );
+}
+
+function redactionFailureMessage(error: unknown) {
+  if (!(error instanceof Error)) return "Could not redact capture.";
+  if (
+    error.message === "Unexpected server error." ||
+    error.message === "Request failed (500)"
+  ) {
+    return "Redaction failed; retry before using this capture.";
+  }
+  return error.message;
+}
+
+function screenFrameFailureMessage(error: unknown) {
+  if (!(error instanceof Error)) return "Could not save a screenshare keyframe.";
+  if (
+    error.message === "Unexpected server error." ||
+    error.message === "Request failed (500)"
+  ) {
+    return "Could not save a screenshare keyframe. Keep the shared window visible and restart the interview if the count stays at 0.";
+  }
+  return error.message;
 }
 
 async function connectScreenshareRoom(input: {
@@ -1151,7 +1263,9 @@ function startScreenFrameSampler(input: {
       });
       if (!upload.ok)
         throw new Error(`Frame upload failed (${upload.status}).`);
-      await postJson(
+      const savedFrame = await postJson<{
+        warning?: { message?: string };
+      }>(
         `/api/processes/${input.session.processId}/operator-captures/${input.session.captureSessionId}/screen-frames`,
         {
           workspace_id: input.session.workspaceId,
@@ -1171,14 +1285,11 @@ function startScreenFrameSampler(input: {
         },
         `screen-frame-bind-${input.session.captureSessionId}-${currentFrame}`,
       );
+      if (savedFrame.warning?.message) input.onError(savedFrame.warning.message);
       input.onFrameCaptured();
       firstFrameSaved = true;
     } catch (error) {
-      input.onError(
-        error instanceof Error
-          ? error.message
-          : "Could not save a screenshare keyframe.",
-      );
+      input.onError(screenFrameFailureMessage(error));
     } finally {
       uploadInFlight = false;
     }

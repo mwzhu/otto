@@ -21,6 +21,8 @@ export const MODEL_PRICING_CENTS_PER_MTOK = {
   },
 } as const;
 
+export const FAST_VOICE_MODEL = "claude-haiku-4-5-20251001";
+
 type AnthropicPricing = (typeof MODEL_PRICING_CENTS_PER_MTOK)[
   keyof typeof MODEL_PRICING_CENTS_PER_MTOK
 ];
@@ -30,14 +32,20 @@ export function anthropicInterviewModel(env: Pick<ServerEnv, "ANTHROPIC_MODEL">)
 }
 
 export function anthropicModelForPrompt(
-  env: Pick<
-    ServerEnv,
-    | "ANTHROPIC_MODEL"
-    | "DIRECTOR_BRAIN_MODEL"
-    | "DIRECTOR_VOICE_MODEL"
-    | "OPERATOR_BRAIN_MODEL"
-    | "OPERATOR_WORKFLOW_MODEL"
-    | "SYNTHESIS_PLANNER_MODEL"
+  env: Partial<
+    Pick<
+      ServerEnv,
+      | "ANTHROPIC_MODEL"
+      | "DIRECTOR_BRAIN_MODEL"
+      | "DIRECTOR_VOICE_MODEL"
+      | "OPERATOR_BRAIN_MODEL"
+      | "OPERATOR_VOICE_MODEL"
+      | "OPERATOR_WORKFLOW_MODEL"
+      | "SYNTHESIS_PLANNER_MODEL"
+      | "OPPORTUNITY_MODEL"
+      | "ANTHROPIC_OPUS_MODEL"
+      | "ANTHROPIC_API_KEY"
+    >
   >,
   promptTemplateId: string,
 ) {
@@ -48,13 +56,13 @@ export function anthropicModelForPrompt(
     return env.DIRECTOR_BRAIN_MODEL ?? env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6";
   }
   if (promptTemplateId.startsWith("director.voice.")) {
-    return env.DIRECTOR_VOICE_MODEL ?? env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6";
+    return env.DIRECTOR_VOICE_MODEL ?? FAST_VOICE_MODEL;
   }
   if (promptTemplateId.startsWith("operator.turn.plan")) {
     return env.OPERATOR_BRAIN_MODEL ?? env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6";
   }
   if (promptTemplateId.startsWith("operator.voice.")) {
-    return env.OPERATOR_BRAIN_MODEL ?? env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6";
+    return env.OPERATOR_VOICE_MODEL ?? FAST_VOICE_MODEL;
   }
   if (isOperatorWorkflowPrompt(promptTemplateId)) {
     return (
@@ -62,6 +70,14 @@ export function anthropicModelForPrompt(
       env.OPERATOR_BRAIN_MODEL ??
       env.ANTHROPIC_MODEL ??
       "claude-sonnet-4-6"
+    );
+  }
+  if (promptTemplateId.startsWith("synthesis.opportunities")) {
+    return (
+      env.OPPORTUNITY_MODEL ??
+      env.SYNTHESIS_PLANNER_MODEL ??
+      env.ANTHROPIC_MODEL ??
+      providerDefaultOpusModel(env)
     );
   }
   if (promptTemplateId.startsWith("synthesis.")) {
@@ -78,7 +94,18 @@ export function anthropicMaxTokensForPrompt(promptTemplateId: string) {
   if (promptTemplateId.startsWith("operator.turn.plan")) return 700;
   if (promptTemplateId.startsWith("operator.voice.")) return 200;
   if (isOperatorWorkflowPrompt(promptTemplateId)) return 16000;
+  if (promptTemplateId.startsWith("synthesis.opportunities")) return 4000;
   return 1200;
+}
+
+export function providerDefaultOpusModel(
+  env: Partial<Pick<ServerEnv, "ANTHROPIC_OPUS_MODEL" | "ANTHROPIC_API_KEY">>,
+) {
+  if (env.ANTHROPIC_OPUS_MODEL) return env.ANTHROPIC_OPUS_MODEL;
+  if (!env.ANTHROPIC_API_KEY) return "deterministic-local-llm";
+  throw new Error(
+    "OPPORTUNITY_MODEL, SYNTHESIS_PLANNER_MODEL, ANTHROPIC_MODEL, or ANTHROPIC_OPUS_MODEL must be configured before running opportunity synthesis.",
+  );
 }
 
 function isOperatorWorkflowPrompt(promptTemplateId: string) {

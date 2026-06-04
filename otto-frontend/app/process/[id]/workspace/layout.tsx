@@ -29,7 +29,11 @@ export default async function WorkspaceLayout({
           { label: process.name },
         ]}
       />
-      <WorkspaceTopNav processId={id} processName={process.name} />
+      <WorkspaceTopNav
+        processId={id}
+        processName={process.name}
+        processStatus={process.process_status}
+      />
       <div className="flex-1">{children}</div>
     </div>
   );

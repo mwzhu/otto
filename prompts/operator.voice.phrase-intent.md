@@ -1,7 +1,7 @@
 ---
 template_id: operator.voice.phrase-intent
 template_version: "1"
-model_role: OPERATOR_BRAIN_MODEL
+model_role: OPERATOR_VOICE_MODEL
 max_output_tokens: 200
 ---
 

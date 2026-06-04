@@ -40,6 +40,14 @@ import type {
   WorkflowSemanticModel,
 } from "@/lib/workflow/semantic-model";
 import { computeSemanticEvidencePackHash } from "@/lib/workflow/semantic-model";
+import { buildOpportunityEvidencePack } from "@/lib/processes/opportunity-evidence";
+import { extractAutomationOpportunities } from "@/lib/processes/opportunity-extractor";
+import { groundOpportunities } from "@/lib/processes/opportunity-grounding";
+import {
+  loadCompletedAutomationOpportunitySetForEvidencePack,
+  persistCompletedAutomationOpportunityStage,
+} from "@/lib/processes/opportunity-persistence";
+import { getWorkspaceRoiPrices } from "@/lib/workspaces/roi-prices";
 
 export type OperatorProcessSynthesisInput = {
   orgId: string;
@@ -156,6 +164,7 @@ const operatorProcessStageVersions = {
   "stage-6-complexity-and-coverage": 1,
   "stage-7-narrative": 1,
   "stage-8-publish-draft": 1,
+  "stage-9-opportunity-synthesis": 1,
 } as const;
 
 export async function runOperatorProcessSynthesis(
@@ -606,6 +615,16 @@ export async function runOperatorProcessSynthesis(
       graphBuild,
       userId: input.userId ?? null,
     });
+    await runOpportunitySynthesisStage({
+      input,
+      synthesisRunId: runResult.synthesisRunId,
+      evidencePack,
+      versionId: draft.versionId,
+      graph: draft.graph,
+      complexity,
+      narrative,
+      userId: input.userId ?? null,
+    });
     await completeOperatorSynthesisRun({
       orgId: input.orgId,
       workspaceId: input.workspaceId,
@@ -653,6 +672,111 @@ type MaterializedProcessVersionClaim = {
   id: string;
   field: "summary" | "steps" | "evidence_coverage";
 };
+
+async function runOpportunitySynthesisStage(input: {
+  input: OperatorProcessSynthesisInput;
+  synthesisRunId: string;
+  evidencePack: OperatorEvidencePack;
+  versionId: string;
+  graph: ProcessGraph;
+  complexity: ReturnType<typeof computeOperatorGraphComplexity>;
+  narrative: ReturnType<typeof buildOperatorDraftNarrative>;
+  userId?: string | null;
+}) {
+  const env = getServerEnv();
+  const stageName = "stage-9-opportunity-synthesis";
+  if (!env.OPPORTUNITY_AGENT_ENABLED) {
+    await recordOperatorStage({
+      orgId: input.input.orgId,
+      workspaceId: input.input.workspaceId,
+      synthesisRunId: input.synthesisRunId,
+      stageName,
+      inputRowRefs: [{ table: "process_versions", id: input.versionId }],
+      outputRowRefs: [],
+      status: "skipped",
+    });
+    return;
+  }
+
+  try {
+    const promptTemplateId = "synthesis.opportunities";
+    const promptTemplateVersion = "1";
+    const modelId = anthropicModelForPrompt(env, promptTemplateId);
+    const opportunityPack = buildOpportunityEvidencePack({
+      evidencePack: input.evidencePack,
+      versionId: input.versionId,
+      graph: input.graph,
+      complexity: input.complexity,
+      narrative: input.narrative,
+      promptTemplateId,
+      promptTemplateVersion,
+      modelId,
+    });
+    const reusableSet = await loadCompletedAutomationOpportunitySetForEvidencePack({
+      orgId: input.input.orgId,
+      workspaceId: input.input.workspaceId,
+      processId: input.input.processId,
+      versionId: input.versionId,
+      evidencePackHash: opportunityPack.evidencePackHash,
+    });
+    if (reusableSet) {
+      await recordOperatorStage({
+        orgId: input.input.orgId,
+        workspaceId: input.input.workspaceId,
+        synthesisRunId: input.synthesisRunId,
+        stageName,
+        inputRowRefs: [{ table: "process_versions", id: input.versionId }],
+        outputRowRefs: [
+          { table: "automation_opportunity_sets", id: reusableSet.id },
+        ],
+        status: "skipped",
+        errorJson: { reason: "unchanged_evidence_pack" },
+      });
+      return;
+    }
+    const extraction = await extractAutomationOpportunities({
+      pack: opportunityPack,
+    });
+    const priceConstants = await getWorkspaceRoiPrices(
+      input.input.orgId,
+      input.input.workspaceId,
+    );
+    const grounded = groundOpportunities(extraction.proposals, {
+      graph: input.graph,
+      allowedEvidenceIds: opportunityPack.allowedEvidenceIds,
+      priceConstants,
+    });
+    await persistCompletedAutomationOpportunityStage({
+      orgId: input.input.orgId,
+      workspaceId: input.input.workspaceId,
+      processId: input.input.processId,
+      versionId: input.versionId,
+      synthesisRunId: input.synthesisRunId,
+      userId: input.userId,
+      extraction,
+      grounded: grounded.opportunities,
+      diagnostics: grounded.diagnostics,
+      generator: "agent",
+      inputRowRefs: [{ table: "process_versions", id: input.versionId }],
+    });
+  } catch (error) {
+    await recordOperatorStage({
+      orgId: input.input.orgId,
+      workspaceId: input.input.workspaceId,
+      synthesisRunId: input.synthesisRunId,
+      stageName,
+      inputRowRefs: [{ table: "process_versions", id: input.versionId }],
+      outputRowRefs: [],
+      status: "failed",
+      errorJson: {
+        message:
+          error instanceof Error
+            ? error.message
+            : "Opportunity synthesis failed.",
+      },
+    });
+  }
+}
 
 async function materializeProcessVersionClaims(input: {
   orgId: string;
@@ -3287,6 +3411,7 @@ async function recordOperatorStage(input: {
   inputRowRefs: Array<{ table: string; id: string }>;
   outputRowRefs: Array<{ table: string; id: string }>;
   status: "queued" | "running" | "completed" | "skipped" | "failed";
+  errorJson?: unknown;
 }) {
   await getDb().transaction(async (tx) => {
     await setOrgContext(tx, input.orgId);
@@ -3298,6 +3423,7 @@ async function recordOperatorStage(input: {
       inputRowRefs: input.inputRowRefs,
       outputRowRefs: input.outputRowRefs,
       status: input.status,
+      errorJson: input.errorJson,
     });
   });
 }

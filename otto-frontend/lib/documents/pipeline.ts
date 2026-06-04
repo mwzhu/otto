@@ -495,7 +495,7 @@ function normalizeDocumentCandidates(extraction: DocumentInventoryExtraction) {
   return extraction.candidate_processes
     .map((candidate) => ({
       processName: normalizeProcessName(candidate.proposed_name),
-      ownerRole: normalizeRoleName(candidate.roles[0] ?? candidate.proposed_function),
+      ownerRole: normalizeRoleName(candidate.proposed_function ?? candidate.roles[0]),
       frequency: normalizeSignalText(candidate.frequency),
       systems: uniqueNormalized(candidate.systems ?? [], normalizeSystemName),
       painPoints: uniqueNormalized(candidate.pain_points ?? [], normalizeSignalText),

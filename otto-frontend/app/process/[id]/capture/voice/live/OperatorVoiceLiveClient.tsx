@@ -68,6 +68,7 @@ export function OperatorVoiceLiveClient({
   const [elapsed, setElapsed] = useState(0);
   const [completing, setCompleting] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [turnWaitMessage, setTurnWaitMessage] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [messages, setMessages] = useState<CaptureConversationMessage[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -76,14 +77,21 @@ export function OperatorVoiceLiveClient({
   const audioElsRef = useRef<HTMLMediaElement[]>([]);
 
   useEffect(() => {
-    const raw = window.localStorage.getItem(OPERATOR_SESSION_KEY);
-    if (!raw) return;
-    try {
-      const parsed = JSON.parse(raw) as OperatorSession;
-      if (parsed.processId === processId) setSession(parsed);
-    } catch {
-      window.localStorage.removeItem(OPERATOR_SESSION_KEY);
-    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      const raw = window.localStorage.getItem(OPERATOR_SESSION_KEY);
+      if (!raw || cancelled) return;
+      try {
+        const parsed = JSON.parse(raw) as OperatorSession;
+        if (!cancelled && parsed.processId === processId) setSession(parsed);
+      } catch {
+        window.localStorage.removeItem(OPERATOR_SESSION_KEY);
+      }
+    }, 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, [processId]);
 
   useEffect(() => {
@@ -217,6 +225,12 @@ export function OperatorVoiceLiveClient({
               setSubmitting(true);
               setDraft("");
               setError(null);
+              setTurnWaitMessage(null);
+              const waitTimer = window.setTimeout(() => {
+                setTurnWaitMessage(
+                  "Operator notes are still updating. Your step is saved locally and Otto will continue once the turn response returns.",
+                );
+              }, 6000);
               setMessages((current) => [
                 ...current,
                 {
@@ -244,6 +258,8 @@ export function OperatorVoiceLiveClient({
                     : "Could not submit operator turn.",
                 );
               } finally {
+                window.clearTimeout(waitTimer);
+                setTurnWaitMessage(null);
                 setSubmitting(false);
               }
             }}
@@ -264,6 +280,11 @@ export function OperatorVoiceLiveClient({
               {submitting ? "Sending" : "Send"}
             </Button>
           </form>
+          {turnWaitMessage && (
+            <div className="border-t border-subtle bg-muted px-4 py-2 text-[12px] leading-relaxed text-ink-muted">
+              {turnWaitMessage}
+            </div>
+          )}
         </section>
 
         <div className="mt-8 flex items-center justify-end gap-2">

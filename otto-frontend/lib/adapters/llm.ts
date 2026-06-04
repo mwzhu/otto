@@ -42,7 +42,8 @@ export type Generation = {
   stop_reason?: string;
 };
 
-const PROMPT_CACHE_MIN_STATIC_CHARS = 4096;
+export const PROMPT_CACHE_MIN_STATIC_CHARS = 4096;
+const anthropicModelPreflightCache = new Set<string>();
 
 export class StructuredOutputError extends Error {
   constructor(
@@ -79,6 +80,34 @@ export async function generate(opts: GenerateOpts): Promise<Generation> {
       mocked: true,
     };
   }, opts.retry);
+}
+
+export async function preflightAnthropicModelForPrompt(
+  promptTemplateId: string,
+): Promise<string> {
+  const env = getServerEnv();
+  const model = anthropicModelForPrompt(env, promptTemplateId);
+  if (!env.ANTHROPIC_API_KEY || anthropicModelPreflightCache.has(model)) {
+    return model;
+  }
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 1,
+      messages: [{ role: "user", content: "OK" }],
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`Anthropic model preflight failed for ${model}: ${response.status}`);
+  }
+  anthropicModelPreflightCache.add(model);
+  return model;
 }
 
 export type StructuredGeneration<T> = {

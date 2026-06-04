@@ -86,6 +86,29 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(buildDocumentExtractionStaticInput()).not.toContain("Document inventory JSON schema");
   });
 
+  test("observability dashboard avoids sparse-data and fan-out alert noise", () => {
+    const observability = read("lib/admin/observability-queries.ts");
+
+    expect(observability).toContain("inactiveMetric({");
+    expect(observability).toContain("No cache-observed decisions");
+    expect(observability).toContain("No synthesis runs");
+    expect(observability).toContain("WITH stage_counts AS");
+    expect(observability).toContain("stage_runs AS");
+    expect(observability).toContain("run_costs AS");
+    expect(observability).not.toContain("LEFT JOIN agent_decision_log adl");
+    expect(observability).toContain("stage_name IN ('director.turn', 'operator.turn')");
+    expect(observability).toContain(
+      "AND stage_name IN ('director.extraction', 'operator.extraction')",
+    );
+    expect(observability).not.toContain("stage_name ILIKE '%extract%'");
+    expect(observability).toContain("extraction_observed");
+    expect(observability).toContain(
+      "stage_name = 're_extract_degraded_turns.recovered'",
+    );
+    expect(observability).toContain("recovered.source_decision_log_id IS NULL");
+    expect(observability).toContain("now() - interval '7 days'");
+  });
+
   test("streaming planner waits for the complete planned utterance string", () => {
     const partial =
       '{"chosen_intent":{"intent":"discover_processes"},"planned_agent_utterance":"Thanks, wh';
@@ -109,14 +132,14 @@ describe("Week 3 director brain and document pipeline", () => {
     );
   });
 
-  test("director planner SSE route flushes before waiting on Anthropic", () => {
-    const route = read("app/api/internal/director-turns/plan/route.ts");
-    const readyIndex = route.indexOf('send("ready", { status: "planning" })');
-    const planIndex = route.indexOf("await planDirectorTurnStreamed");
+  test("director respond SSE route flushes before phrasing", () => {
+    const route = read("app/api/internal/director-turns/respond/route.ts");
+    const readyIndex = route.indexOf('send?.("ready", { status: "responding" })');
+    const phraseIndex = route.indexOf("await phraseDirectorSteeringTurn");
 
     expect(readyIndex).toBeGreaterThan(-1);
-    expect(planIndex).toBeGreaterThan(-1);
-    expect(readyIndex).toBeLessThan(planIndex);
+    expect(phraseIndex).toBeGreaterThan(-1);
+    expect(readyIndex).toBeLessThan(phraseIndex);
   });
 
   test("director plan prompt carries live voice quality guidance", () => {
@@ -1143,8 +1166,8 @@ describe("Week 3 director brain and document pipeline", () => {
     const internalComplete = read("app/api/internal/director-turns/complete/route.ts");
     const internalOpening = read("app/api/internal/director-turns/opening/route.ts");
     const internalNotice = read("app/api/internal/director-turns/notice/route.ts");
-    const plan = read("app/api/internal/director-turns/plan/route.ts");
-    const dispatch = read("app/api/internal/director-turns/dispatch/route.ts");
+    const respond = read("app/api/internal/director-turns/respond/route.ts");
+    const extract = read("app/api/internal/director-turns/extract/route.ts");
     const delivery = read("app/api/internal/director-turns/[turnIndex]/delivery/route.ts");
     const complete = read("app/api/director-interviews/[captureSessionId]/complete/route.ts");
     const userTurns = read("app/api/director-interviews/[captureSessionId]/turns/route.ts");
@@ -1169,28 +1192,25 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(ingest).toContain("tx,");
     expect(ingest).toContain("storeIdempotentResponse");
     expect(ingest).not.toContain("clearPendingIdempotentRequest");
-    expect(plan).toContain("requireLiveKitAgentService(request)");
-    expect(plan).toContain("requireIdempotencyKey(request)");
-    expect(plan).toContain("reserveIdempotentRequest");
-    expect(plan).toContain("clearPendingIdempotentRequest");
-    expect(plan).toContain("storeIdempotentResponse");
-    expect(plan).toContain("phrasePlannedDirectorTurnDetailed");
-    expect(plan).toContain("voice_metadata: phrased.metadata");
-    expect(dispatch).toContain("requireLiveKitAgentService(request)");
-    expect(dispatch).toContain("requireIdempotencyKey(request)");
-    expect(dispatch).toContain("reserveIdempotentRequest");
-    expect(dispatch).toContain("storeIdempotentResponse");
-    expect(dispatch).toContain("tx,");
-    expect(dispatch).toContain("voice_metadata");
-    expect(dispatch).toContain("voiceMetadata");
-    expect(dispatch).toContain("streaming: z.boolean().optional()");
-    expect(dispatch).toContain('stream_cutoff: z.enum(["first_question", "message_stop"]).optional()');
-    expect(dispatch).toContain("voice_timeout_fallback: z.boolean().optional()");
-    expect(dispatch).toContain("voice_degraded: z.boolean().optional()");
-    expect(dispatch).toContain("voice_timeout_ms: z.number().int().min(0).optional()");
-    expect(dispatch).toContain("attempted_model: z.string().optional()");
-    expect(dispatch).toContain("cache_read_input_tokens");
-    expect(dispatch).toContain("cache_creation_input_tokens");
+    expect(respond).toContain("requireLiveKitAgentService(request)");
+    expect(respond).toContain("requireIdempotencyKey(request)");
+    expect(respond).toContain("reserveIdempotentRequest");
+    expect(respond).toContain("clearPendingIdempotentRequest");
+    expect(respond).toContain("storeIdempotentResponse");
+    expect(respond).toContain("phraseDirectorSteeringTurn");
+    expect(respond).toContain("voice_metadata: phrased.metadata");
+    expect(extract).toContain("requireLiveKitAgentService(request)");
+    expect(extract).toContain("requireIdempotencyKey(request)");
+    expect(extract).toContain("reserveIdempotentRequest");
+    expect(extract).toContain("storeIdempotentResponse");
+    expect(extract).toContain("tx,");
+    expect(extract).toContain("voiceMetadata");
+    expect(brain).toContain("streaming?: boolean");
+    expect(brain).toContain('stream_cutoff?: "first_question" | "message_stop"');
+    expect(brain).toContain("cache_read_input_tokens");
+    expect(brain).toContain("cache_creation_input_tokens");
+    expect(transaction).toContain("voice_timeout_fallback");
+    expect(transaction).toContain("voice_degraded");
     expect(delivery).toContain("requireLiveKitAgentService(request)");
     expect(delivery).toContain("requireIdempotencyKey(request)");
     expect(delivery).toContain("reserveIdempotentRequest");
@@ -1436,19 +1456,19 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(transaction).toContain("unknown_delivery_turns");
     expect(transaction).toContain("terminal_delivery_turns");
     expect(transaction).toContain("terminalDeliveryTurns === decisionTurns");
-    expect(plan).toContain("planDirectorTurn");
-    expect(plan).toContain("phrasePlannedDirectorTurnDetailed");
-    expect(plan).toContain("assertDirectorTurnReferences");
-    expect(plan.indexOf("await assertDirectorTurnReferences")).toBeLessThan(
-      plan.indexOf("await planDirectorTurn"),
+    expect(respond).toContain("buildDirectorSteeringPlan");
+    expect(respond).toContain("phraseDirectorSteeringTurn");
+    expect(respond).toContain("assertDirectorTurnReferences");
+    expect(respond.indexOf("await assertDirectorTurnReferences")).toBeLessThan(
+      respond.indexOf("await buildDirectorSteeringPlan"),
     );
-    expect(plan).toContain("voiceMetadataDegrades(phrased.metadata)");
-    expect(plan).toContain("planDirectorTurnStreamed");
-    expect(dispatch).toContain("assertDirectorTurnReferences");
-    expect(dispatch.indexOf("await assertDirectorTurnReferences")).toBeLessThan(
-      dispatch.indexOf("await dispatchDirectorTurnPlan"),
+    expect(respond).toContain("voiceMetadataDegrades(phrased.metadata)");
+    expect(respond).toContain("upsertDirectorExtractionWindow");
+    expect(extract).toContain("assertDirectorTurnReferences");
+    expect(extract.indexOf("await assertDirectorTurnReferences")).toBeLessThan(
+      extract.indexOf("await extractDirectorTurn"),
     );
-    expect(dispatch).toContain("dispatchDirectorTurnPlan");
+    expect(extract).toContain("dispatchDirectorTurnPlan");
     expect(read("lib/db/client.ts")).toContain("export function getServiceDb()");
     expect(read("lib/db/client.ts")).toContain("requireEnv(\"DATABASE_SERVICE_URL\")");
     expect(transaction).toContain("getServiceDb()");
@@ -1458,7 +1478,7 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(brain).toContain("coverage_slots");
     expect(brain).toContain("readCoverageSnapshot");
     expect(brain).toContain("degradedQuality = llmResult.metadata.mocked");
-    expect(brain).toContain("degradedQuality: planned.degraded_quality || voiceMetadataDegrades");
+    expect(brain).toContain("degradedQuality: planned.degraded_quality");
     expect(brain).toContain("preflightDirectorPlanEvidence");
     expect(brain).toContain("Director assertions must cite evidence ids from the current turn");
     expect(brain).toContain("selectActiveCandidateProcessId");
@@ -1496,7 +1516,7 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(delivery).toContain("updateDirectorTurnDelivery");
     expect(brain).toContain("planned_utterance");
     expect(brain).toContain("brain_metadata: metadata");
-    expect(brain).toContain("voiceMetadata: phrased.metadata");
+    expect(respond).toContain("voiceMetadata: phrased.metadata");
     expect(brain).toContain("voice_metadata: input.voiceMetadata ?? null");
     expect(brain).toContain(".onConflictDoNothing()");
     expect(directorTools).toContain("pg_advisory_xact_lock");
@@ -1938,7 +1958,7 @@ describe("Week 3 director brain and document pipeline", () => {
     const inngestFunctions = read("lib/inngest/functions.ts");
     const brain = read("lib/interview/director/brain.ts");
 
-    expect(inngestFunctions).toContain("planDirectorTurn");
+    expect(inngestFunctions).toContain("extractDirectorTurn");
     expect(inngestFunctions).toContain("dispatchDirectorTurnPlan");
     expect(inngestFunctions).not.toContain("runDirectorTurn");
     expect(inngestFunctions).toContain(
@@ -2072,7 +2092,7 @@ describe("Week 3 director brain and document pipeline", () => {
         },
         "director.voice.phrase-intent",
       ),
-    ).toBe("claude-sonnet-4-6");
+    ).toBe("claude-haiku-4-5-20251001");
     expect(
       anthropicModelForPrompt(
         {

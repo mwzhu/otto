@@ -12,11 +12,9 @@ import httpx
 from director_agent.schemas import (
     CheckedTurnResponse,
     DeliveryUpdateResponse,
-    DispatchedTurnResponse,
     ExtractionTurnResponse,
     IngestedTurnResponse,
     OpeningTurnResponse,
-    PlannedTurnResponse,
     PlanningContextResponse,
     RespondedTurnResponse,
     VerificationResponse,
@@ -39,18 +37,6 @@ class IngestedTurn:
 
 
 @dataclass(frozen=True)
-class PlannedTurn:
-    plan: dict[str, Any]
-    planned_agent_utterance: str
-    metadata: dict[str, Any] | None
-    voice_metadata: dict[str, Any] | None
-    degraded_quality: bool
-    raw: dict[str, Any]
-    degraded_reasons: list[str] = field(default_factory=list)
-    local_turn_correlation_id: str | None = None
-
-
-@dataclass(frozen=True)
 class RespondedTurn:
     plan: dict[str, Any]
     planned_agent_utterance: str
@@ -65,7 +51,7 @@ class RespondedTurn:
 
 
 @dataclass(frozen=True)
-class DispatchedTurn:
+class RecordedAgentTurn:
     next_prompt: str
     decision_log_id: str
     raw: dict[str, Any]
@@ -134,42 +120,6 @@ class OttoApiClient:
             evidence_ids=parsed.evidence_ids,
             turn_index=parsed.turn_index,
             raw=body,
-        )
-
-    async def plan_turn(
-        self,
-        *,
-        capture_session_id: str,
-        turn: IngestedTurn,
-        idempotency_key: str,
-        on_planned_agent_utterance: Any | None = None,
-        local_turn_correlation_id: str | None = None,
-    ) -> PlannedTurn:
-        payload = {
-            "capture_session_id": capture_session_id,
-            "latest_utterance": turn.latest_utterance,
-            "transcript_segment_ids": turn.transcript_segment_ids,
-            "evidence_ids": turn.evidence_ids,
-            "turn_index": turn.turn_index,
-        }
-        if on_planned_agent_utterance is not None:
-            return await self._stream_plan_turn(
-                payload=payload,
-                idempotency_key=idempotency_key,
-                on_planned_agent_utterance=on_planned_agent_utterance,
-                local_turn_correlation_id=local_turn_correlation_id,
-            )
-        body = await self._post("/api/internal/director-turns/plan", payload, idempotency_key)
-        parsed = PlannedTurnResponse.model_validate(body)
-        return PlannedTurn(
-            plan=parsed.plan,
-            planned_agent_utterance=parsed.planned_agent_utterance,
-            metadata=parsed.metadata,
-            voice_metadata=parsed.voice_metadata,
-            degraded_quality=parsed.degraded_quality,
-            degraded_reasons=parsed.degraded_reasons,
-            raw=body,
-            local_turn_correlation_id=local_turn_correlation_id,
         )
 
     async def respond_turn(
@@ -287,67 +237,6 @@ class OttoApiClient:
             or local_turn_correlation_id,
         )
 
-    async def _stream_plan_turn(
-        self,
-        *,
-        payload: dict[str, Any],
-        idempotency_key: str,
-        on_planned_agent_utterance: Any,
-        local_turn_correlation_id: str | None,
-    ) -> PlannedTurn:
-        final_body: dict[str, Any] | None = None
-        async with self._client.stream(
-            "POST",
-            f"{self._base_url}/api/internal/director-turns/plan",
-            headers={
-                **self._headers,
-                "accept": "text/event-stream",
-                "idempotency-key": idempotency_key,
-            },
-            json=payload,
-        ) as response:
-            response.raise_for_status()
-            event_name: str | None = None
-            data_lines: list[str] = []
-            async for line in response.aiter_lines():
-                if line.startswith("event:"):
-                    event_name = line[len("event:") :].strip()
-                    continue
-                if line.startswith("data:"):
-                    data_lines.append(line[len("data:") :].strip())
-                    continue
-                if line.strip():
-                    continue
-                if not event_name:
-                    data_lines = []
-                    continue
-                data = json.loads("\n".join(data_lines) or "{}")
-                if event_name == "planned_agent_utterance":
-                    utterance = str(data.get("utterance") or "").strip()
-                    if utterance:
-                        maybe_awaitable = on_planned_agent_utterance(utterance)
-                        if asyncio.iscoroutine(maybe_awaitable):
-                            await maybe_awaitable
-                elif event_name == "final":
-                    final_body = data
-                elif event_name == "error":
-                    raise RuntimeError(str(data.get("message") or "Planner stream failed."))
-                event_name = None
-                data_lines = []
-        if final_body is None:
-            raise RuntimeError("Planner stream ended without a final plan.")
-        parsed = PlannedTurnResponse.model_validate(final_body)
-        return PlannedTurn(
-            plan=parsed.plan,
-            planned_agent_utterance=parsed.planned_agent_utterance,
-            metadata=parsed.metadata,
-            voice_metadata=parsed.voice_metadata,
-            degraded_quality=parsed.degraded_quality,
-            degraded_reasons=parsed.degraded_reasons,
-            raw=final_body,
-            local_turn_correlation_id=local_turn_correlation_id,
-        )
-
     async def planning_context(
         self,
         *,
@@ -380,7 +269,7 @@ class OttoApiClient:
         capture_session_id: str,
         planned_agent_utterance: str,
         idempotency_key: str,
-    ) -> DispatchedTurn:
+    ) -> RecordedAgentTurn:
         body = await self._post(
             "/api/internal/director-turns/opening",
             {
@@ -390,7 +279,7 @@ class OttoApiClient:
             idempotency_key,
         )
         parsed = OpeningTurnResponse.model_validate(body)
-        return DispatchedTurn(
+        return RecordedAgentTurn(
             next_prompt=parsed.next_prompt,
             decision_log_id=parsed.decision_log_id,
             raw=body,
@@ -406,38 +295,6 @@ class OttoApiClient:
             "/api/internal/director-turns/complete",
             {"capture_session_id": capture_session_id},
             idempotency_key,
-        )
-
-    async def dispatch_turn(
-        self,
-        *,
-        capture_session_id: str,
-        turn: IngestedTurn,
-        planned: PlannedTurn,
-        idempotency_key: str,
-        local_turn_correlation_id: str | None = None,
-    ) -> DispatchedTurn:
-        payload = {
-            "capture_session_id": capture_session_id,
-            "latest_utterance": turn.latest_utterance,
-            "transcript_segment_ids": turn.transcript_segment_ids,
-            "evidence_ids": turn.evidence_ids,
-            "turn_index": turn.turn_index,
-            "plan": planned.plan,
-            "planned_agent_utterance": planned.planned_agent_utterance,
-            "metadata": planned.metadata,
-            "voice_metadata": planned.voice_metadata or planned.raw.get("voice_metadata"),
-            "degraded_quality": planned.degraded_quality,
-            "degraded_reasons": planned.degraded_reasons,
-        }
-        if local_turn_correlation_id:
-            payload["local_turn_correlation_id"] = local_turn_correlation_id
-        body = await self._post("/api/internal/director-turns/dispatch", payload, idempotency_key)
-        parsed = DispatchedTurnResponse.model_validate(body)
-        return DispatchedTurn(
-            next_prompt=parsed.next_prompt,
-            decision_log_id=parsed.decision_log_id,
-            raw=body,
         )
 
     async def extract_turn(

@@ -27,7 +27,7 @@ class DirectorAgentConfig:
     cartesia_voice_id: str
     use_livekit_inference: bool
     livekit_agent_name: str
-    voice_runtime: str = "planned_cascade"
+    voice_runtime: str = "steered_cascade"
     use_semantic_turn_detector: bool = False
     livekit_url: str | None = None
     livekit_api_key: str | None = None
@@ -186,7 +186,7 @@ def float_env(name: str, default: float) -> float:
 
 
 def voice_runtime(value: str | None) -> str:
-    normalized = (value or "planned_cascade").strip().lower()
-    if normalized in {"planned_cascade", "steered_cascade", "steered_realtime"}:
-        return normalized
-    return "planned_cascade"
+    normalized = (value or "steered_cascade").strip().lower()
+    if normalized != "steered_cascade":
+        raise RuntimeError("OTTO_DIRECTOR_VOICE_RUNTIME must be steered_cascade.")
+    return normalized

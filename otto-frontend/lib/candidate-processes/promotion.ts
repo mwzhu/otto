@@ -455,6 +455,18 @@ export async function mergeCandidateProcess(
 ) {
   return getDb().transaction(async (tx) => {
     await setOrgContext(tx, context.orgId);
+    const target = await tx.execute<{ id: string }>(sql`
+      SELECT id
+      FROM processes
+      WHERE org_id = ${context.orgId}
+        AND workspace_id = ${context.workspaceId}
+        AND id = ${targetProcessId}
+        AND status IN ('draft', 'approved')
+      LIMIT 1
+    `);
+    if (!target.rows[0]) {
+      throw new ApiError(404, "not_found", "Target process not found.");
+    }
     const result = await tx.execute<{ id: string; capture_session_id: string }>(sql`
       UPDATE candidate_processes
       SET status = 'merged',
@@ -487,6 +499,176 @@ export async function mergeCandidateProcess(
         'enriched',
         0.72
       )
+      ON CONFLICT DO NOTHING
+    `);
+    await tx.execute(sql`
+      INSERT INTO claims (
+        org_id,
+        workspace_id,
+        subject_type,
+        subject_id,
+        field,
+        value,
+        confidence,
+        metadata_json
+      )
+      SELECT
+        cc.org_id,
+        cc.workspace_id,
+        'process',
+        ${targetProcessId},
+        cc.field,
+        cc.value,
+        cc.confidence,
+        cc.metadata_json || jsonb_build_object(
+          'source', 'candidate_process_merge',
+          'copied_from_candidate_process_id', cc.subject_id,
+          'copied_from_candidate_claim_id', cc.id
+        )
+      FROM claims cc
+      WHERE cc.org_id = ${context.orgId}
+        AND cc.workspace_id = ${context.workspaceId}
+        AND cc.subject_type = 'candidate_process'
+        AND cc.subject_id = ${candidateProcessId}
+        AND cc.status = 'active'
+        AND cc.superseded_by_claim_id IS NULL
+        AND NOT EXISTS (
+          SELECT 1
+          FROM claims existing
+          WHERE existing.org_id = ${context.orgId}
+            AND existing.workspace_id = ${context.workspaceId}
+            AND existing.subject_type = 'process'
+            AND existing.subject_id = ${targetProcessId}
+            AND existing.field = cc.field
+            AND existing.status = 'active'
+            AND existing.superseded_by_claim_id IS NULL
+        )
+    `);
+    await tx.execute(sql`
+      INSERT INTO claim_evidence (claim_id, evidence_id)
+      SELECT process_claim.id, candidate_evidence.evidence_id
+      FROM claims process_claim
+      JOIN claim_evidence candidate_evidence
+        ON candidate_evidence.claim_id = (process_claim.metadata_json->>'copied_from_candidate_claim_id')::uuid
+      WHERE process_claim.org_id = ${context.orgId}
+        AND process_claim.workspace_id = ${context.workspaceId}
+        AND process_claim.subject_type = 'process'
+        AND process_claim.subject_id = ${targetProcessId}
+        AND process_claim.metadata_json->>'source' = 'candidate_process_merge'
+        AND process_claim.metadata_json ? 'copied_from_candidate_claim_id'
+      ON CONFLICT DO NOTHING
+    `);
+    await tx.execute(sql`
+      INSERT INTO claim_evidence (claim_id, evidence_id)
+      SELECT existing.id, candidate_evidence.evidence_id
+      FROM claims candidate_claim
+      JOIN claim_evidence candidate_evidence
+        ON candidate_evidence.claim_id = candidate_claim.id
+      JOIN claims existing
+        ON existing.org_id = ${context.orgId}
+       AND existing.workspace_id = ${context.workspaceId}
+       AND existing.subject_type = 'process'
+       AND existing.subject_id = ${targetProcessId}
+       AND existing.field = candidate_claim.field
+       AND existing.status = 'active'
+       AND existing.superseded_by_claim_id IS NULL
+      WHERE candidate_claim.org_id = ${context.orgId}
+        AND candidate_claim.workspace_id = ${context.workspaceId}
+        AND candidate_claim.subject_type = 'candidate_process'
+        AND candidate_claim.subject_id = ${candidateProcessId}
+        AND candidate_claim.status = 'active'
+        AND candidate_claim.superseded_by_claim_id IS NULL
+      ON CONFLICT DO NOTHING
+    `);
+    await tx.execute(sql`
+      WITH candidate AS (
+        SELECT *
+        FROM candidate_processes
+        WHERE org_id = ${context.orgId}
+          AND workspace_id = ${context.workspaceId}
+          AND id = ${candidateProcessId}
+      ),
+      column_values AS (
+        SELECT
+          candidate.id,
+          candidate.evidence_ids,
+          column_rows.field,
+          column_rows.value
+        FROM candidate
+        CROSS JOIN LATERAL (
+          VALUES
+            ('frequency', candidate.frequency),
+            ('complexity_hint', candidate.complexity_hint)
+        ) AS column_rows(field, value)
+        WHERE column_rows.value IS NOT NULL
+      )
+      INSERT INTO claims (
+        org_id,
+        workspace_id,
+        subject_type,
+        subject_id,
+        field,
+        value,
+        confidence,
+        metadata_json
+      )
+      SELECT
+        ${context.orgId},
+        ${context.workspaceId},
+        'process',
+        ${targetProcessId},
+        column_values.field,
+        to_jsonb(column_values.value),
+        0.72,
+        jsonb_build_object(
+          'source', 'candidate_process_merge_column',
+          'copied_from_candidate_process_id', column_values.id
+        )
+      FROM column_values
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM claims existing
+        WHERE existing.org_id = ${context.orgId}
+          AND existing.workspace_id = ${context.workspaceId}
+          AND existing.subject_type = 'process'
+          AND existing.subject_id = ${targetProcessId}
+          AND existing.field = column_values.field
+          AND existing.status = 'active'
+          AND existing.superseded_by_claim_id IS NULL
+      )
+    `);
+    await tx.execute(sql`
+      WITH candidate AS (
+        SELECT *
+        FROM candidate_processes
+        WHERE org_id = ${context.orgId}
+          AND workspace_id = ${context.workspaceId}
+          AND id = ${candidateProcessId}
+      ),
+      column_values AS (
+        SELECT
+          candidate.evidence_ids,
+          column_rows.field
+        FROM candidate
+        CROSS JOIN LATERAL (
+          VALUES
+            ('frequency', candidate.frequency),
+            ('complexity_hint', candidate.complexity_hint)
+        ) AS column_rows(field, value)
+        WHERE column_rows.value IS NOT NULL
+      )
+      INSERT INTO claim_evidence (claim_id, evidence_id)
+      SELECT target_claim.id, candidate_evidence.evidence_id
+      FROM column_values
+      JOIN claims target_claim
+        ON target_claim.org_id = ${context.orgId}
+       AND target_claim.workspace_id = ${context.workspaceId}
+       AND target_claim.subject_type = 'process'
+       AND target_claim.subject_id = ${targetProcessId}
+       AND target_claim.field = column_values.field
+       AND target_claim.status = 'active'
+       AND target_claim.superseded_by_claim_id IS NULL
+      CROSS JOIN unnest(column_values.evidence_ids) AS candidate_evidence(evidence_id)
       ON CONFLICT DO NOTHING
     `);
     await tx.execute(sql`

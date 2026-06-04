@@ -5,6 +5,7 @@ import { cn } from "@/lib/cn";
 const NAV = [
   { href: "/admin", label: "Overview" },
   { href: "/admin/coverage", label: "Coverage scorecard" },
+  { href: "/admin/observability", label: "Observability" },
   { href: "/admin/variants", label: "Variant queue" },
   { href: "/admin/evidence", label: "Evidence inventory" },
   { href: "/admin/seeding", label: "Hypothesis seeding" },

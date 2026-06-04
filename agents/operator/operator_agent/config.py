@@ -22,6 +22,11 @@ class OperatorAgentConfig:
     cartesia_voice_id: str
     use_livekit_inference: bool
     livekit_agent_name: str
+    voice_runtime: str = "planned_cascade"
+    endpointing_mode: str = "dynamic"
+    endpointing_min_delay: float = 1.2
+    endpointing_max_delay: float = 6.0
+    endpointing_alpha: float = 0.8
     strict_preflight: bool = False
     vendor_privacy_ack: bool = False
     deepgram_no_store_ack: bool = False
@@ -79,6 +84,23 @@ class OperatorAgentConfig:
                 "LIVEKIT_OPERATOR_AGENT_NAME",
                 os.getenv("LIVEKIT_AGENT_NAME", "otto-operator"),
             ),
+            voice_runtime=voice_runtime(os.getenv("OTTO_OPERATOR_VOICE_RUNTIME")),
+            endpointing_mode=os.getenv(
+                "OTTO_OPERATOR_ENDPOINTING_MODE",
+                os.getenv("OTTO_DIRECTOR_ENDPOINTING_MODE", "dynamic"),
+            ),
+            endpointing_min_delay=float_env(
+                "OTTO_OPERATOR_ENDPOINTING_MIN_DELAY",
+                float_env("OTTO_DIRECTOR_ENDPOINTING_MIN_DELAY", 1.2),
+            ),
+            endpointing_max_delay=float_env(
+                "OTTO_OPERATOR_ENDPOINTING_MAX_DELAY",
+                float_env("OTTO_DIRECTOR_ENDPOINTING_MAX_DELAY", 6.0),
+            ),
+            endpointing_alpha=float_env(
+                "OTTO_OPERATOR_ENDPOINTING_ALPHA",
+                float_env("OTTO_DIRECTOR_ENDPOINTING_ALPHA", 0.8),
+            ),
             strict_preflight=strict_preflight,
             vendor_privacy_ack=privacy_acks["OTTO_VENDOR_PRIVACY_ACK"],
             deepgram_no_store_ack=privacy_acks["OTTO_DEEPGRAM_NO_STORE_ACK"],
@@ -91,6 +113,25 @@ class OperatorAgentConfig:
 
 def bool_env(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes"}
+
+
+def float_env(name: str, default: float) -> float:
+    value = env_value(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def voice_runtime(value: str | None) -> str:
+    normalized = (value or "planned_cascade").strip().lower()
+    if normalized not in {"planned_cascade", "steered_cascade"}:
+        raise RuntimeError(
+            "OTTO_OPERATOR_VOICE_RUNTIME must be planned_cascade or steered_cascade."
+        )
+    return normalized
 
 
 def required_env(name: str) -> str:

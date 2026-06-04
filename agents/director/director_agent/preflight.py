@@ -278,10 +278,8 @@ def bool_from_env(env: Mapping[str, str | None], name: str) -> bool:
 
 
 def voice_runtime_from_env(env: Mapping[str, str | None]) -> str:
-    value = str(env.get("OTTO_DIRECTOR_VOICE_RUNTIME", "planned_cascade")).strip().lower()
-    if value in {"planned_cascade", "steered_cascade", "steered_realtime"}:
-        return value
-    return "planned_cascade"
+    value = str(env.get("OTTO_DIRECTOR_VOICE_RUNTIME", "steered_cascade")).strip().lower()
+    return value if value == "steered_cascade" else "invalid"
 
 
 def int_env(env: Mapping[str, str | None], name: str, default: int) -> int:

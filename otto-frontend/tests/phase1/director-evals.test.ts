@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { deterministicTurnPlan } from "@/lib/interview/director/brain";
 import { phraseDirectorTurn } from "@/lib/interview/director/voice";
 import type { DirectorInterviewPhase } from "@/lib/schemas/phase1";
+import { averageMetric, ratio, reportEvalScores } from "../evals/report";
 
 type EvalCase = {
   id: string;
@@ -124,4 +125,136 @@ describe("director conversational smoke evals", () => {
       }
     });
   }
+
+  test("reports aggregate scored metrics", async () => {
+    const priorAnthropic = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    try {
+      const scores: Array<Record<string, number>> = [];
+      for (const evalCase of fixture.cases) {
+        const plan = deterministicTurnPlan({
+          latestUtterance: evalCase.utterance,
+          evidenceIds: ["00000000-0000-0000-0000-000000000001"],
+          currentSlots: new Map(Object.entries(evalCase.current_slots ?? {})),
+          currentPhase: evalCase.current_phase,
+          candidateProcessNames: evalCase.candidate_process_names ?? [],
+          priorIntent: evalCase.prior_intent,
+          lowInfoTurnCount: evalCase.low_info_turn_count,
+          lastNewSlotTurnIndex: evalCase.last_new_slot_turn_index,
+          turnIndex: evalCase.turn_index,
+        });
+        const phrase = await phraseDirectorTurn({
+          plan,
+          recentTurns: [evalCase.utterance],
+          coverageSummary: "eval coverage",
+          focusProcessName: plan.chosen_intent.target_process,
+        });
+        const processes = plan.tool_calls
+          .filter((tool) => tool.name === "recordProcess")
+          .map((tool) => tool.arguments.name);
+        const slotPaths = plan.slot_updates.map((slot) => slot.slot_path);
+        const statusEntries = Object.entries(
+          evalCase.expected.required_slot_statuses ?? {},
+        );
+        const claimFields = plan.tool_calls
+          .filter((tool) => tool.name === "recordCandidateProcessClaim")
+          .map((tool) => tool.arguments.field);
+        const systems = plan.tool_calls
+          .filter((tool) => tool.name === "recordSystem")
+          .map((tool) => tool.arguments.name);
+        const normalizedPhrase = phrase.toLowerCase();
+        const contradictionMatched = evalCase.expected.required_contradiction_signal
+          ? plan.contradiction_signals
+              .join("\n")
+              .toLowerCase()
+              .includes(
+                evalCase.expected.required_contradiction_signal.toLowerCase(),
+              )
+          : true;
+        scores.push({
+          inventory_recall: ratio(
+            (evalCase.expected.required_processes ?? []).filter((item) =>
+              processes.includes(item),
+            ).length,
+            evalCase.expected.required_processes?.length ?? 0,
+          ),
+          system_recall: ratio(
+            (evalCase.expected.required_systems ?? []).filter((item) =>
+              systems.includes(item),
+            ).length,
+            evalCase.expected.required_systems?.length ?? 0,
+          ),
+          slot_recall: ratio(
+            (evalCase.expected.required_slot_updates ?? []).filter((item) =>
+              slotPaths.includes(item),
+            ).length,
+            evalCase.expected.required_slot_updates?.length ?? 0,
+          ),
+          slot_status_accuracy: ratio(
+            statusEntries.filter(
+              ([slotPath, status]) =>
+                plan.slot_updates.find((slot) => slot.slot_path === slotPath)
+                  ?.status === status,
+            ).length,
+            statusEntries.length,
+          ),
+          claim_field_recall: ratio(
+            (evalCase.expected.required_claim_fields ?? []).filter((item) =>
+              claimFields.includes(item),
+            ).length,
+            evalCase.expected.required_claim_fields?.length ?? 0,
+          ),
+          prioritization_agreement:
+            !evalCase.expected.chosen_intent ||
+            plan.chosen_intent.intent === evalCase.expected.chosen_intent
+              ? 1
+              : 0,
+          phase_agreement:
+            !evalCase.expected.proposed_next_phase ||
+            plan.proposed_next_phase === evalCase.expected.proposed_next_phase
+              ? 1
+              : 0,
+          contradiction_coverage: contradictionMatched ? 1 : 0,
+          phrase_recall: ratio(
+            (evalCase.expected.required_phrase_fragments ?? []).filter((fragment) =>
+              normalizedPhrase.includes(fragment.toLowerCase()),
+            ).length,
+            evalCase.expected.required_phrase_fragments?.length ?? 0,
+          ),
+          forbidden_phrase_precision: (evalCase.expected.forbidden_phrase_fragments ?? [])
+            .every((fragment) => !normalizedPhrase.includes(fragment.toLowerCase()))
+            ? 1
+            : 0,
+        });
+      }
+
+      const metrics = [
+        "inventory_recall",
+        "system_recall",
+        "slot_recall",
+        "slot_status_accuracy",
+        "claim_field_recall",
+        "prioritization_agreement",
+        "phase_agreement",
+        "contradiction_coverage",
+        "phrase_recall",
+        "forbidden_phrase_precision",
+      ].map((name) => ({
+        name,
+        score: averageMetric(scores, name),
+        minimum: 1,
+      }));
+      reportEvalScores({
+        suite: "director.conversational-smoke",
+        fixture: "../evals/director/conversational-smoke.json",
+        cases: fixture.cases.length,
+        metrics,
+      });
+      for (const metric of metrics) {
+        expect(metric.score, metric.name).toBeGreaterThanOrEqual(metric.minimum);
+      }
+    } finally {
+      if (priorAnthropic) process.env.ANTHROPIC_API_KEY = priorAnthropic;
+    }
+  });
 });

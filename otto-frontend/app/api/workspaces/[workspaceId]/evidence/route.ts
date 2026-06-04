@@ -40,6 +40,19 @@ const bodySchema = z.object({
   summary: z.string().optional(),
   observed_at: z.string().datetime().optional(),
   confidence: z.number().min(0).max(1).default(1),
+  correction_eval: z
+    .object({
+      target_agent: z.enum(["director", "operator", "synthesis", "opportunity"]),
+      target_metric: z.string().min(1).max(120),
+      expected_behavior: z.string().min(1).max(2000),
+      fixture_id: z.string().min(1).max(160).optional(),
+      prompt_template_id: z.string().min(1).max(160).optional(),
+      prompt_template_version: z.string().min(1).max(64).optional(),
+      affected_subject_type: z.string().min(1).max(80).optional(),
+      affected_subject_id: z.string().uuid().optional(),
+    })
+    .strict()
+    .optional(),
 });
 
 const querySchema = z.object({
@@ -153,6 +166,25 @@ export async function POST(
         subjectId: row.id,
         metadataJson: { idempotency_key: idempotencyKey },
       });
+      if (body.source_type === "user_correction" && body.correction_eval) {
+        await tx.insert(auditLog).values({
+          orgId: auth.orgId,
+          workspaceId,
+          userId: auth.userId,
+          eventType: "eval.correction_example.created",
+          subjectType: "evidence",
+          subjectId: row.id,
+          metadataJson: {
+            idempotency_key: idempotencyKey,
+            evidence_id: row.id,
+            source_type: body.source_type,
+            evidence_label: body.evidence_label,
+            quote: body.quote ?? null,
+            summary: body.summary ?? null,
+            correction_eval: body.correction_eval,
+          },
+        });
+      }
       const response = { evidence: row };
       await storeIdempotentResponse(tx, {
         orgId: auth.orgId,

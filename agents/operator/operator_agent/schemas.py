@@ -113,6 +113,7 @@ class PlannedTurnResponse(OttoApiModel):
     plan: dict[str, Any]
     planned_agent_utterance: str
     metadata: dict[str, Any]
+    voice_metadata: dict[str, Any] | None = None
     degraded_quality: bool = False
     degraded_reasons: list[str] = Field(default_factory=list)
 
@@ -121,6 +122,27 @@ class PlannedTurnResponse(OttoApiModel):
     def validate_plan_contract(cls, value: dict[str, Any]) -> dict[str, Any]:
         validated = OperatorTurnPlan.model_validate(value)
         return validated.model_dump(mode="json", exclude_none=True)
+
+
+class RespondedTurnResponse(PlannedTurnResponse):
+    decision_log_id: str
+    steering_context: dict[str, Any] | None = None
+    local_turn_correlation_id: str | None = None
+
+
+class ExtractionTurnResponse(OttoApiModel):
+    decision_log_id: str
+    planned_agent_utterance: str | None = None
+    extraction_status: str = "complete"
+    extraction_latency_ms: int | None = None
+
+
+class CheckedTurnResponse(OttoApiModel):
+    checker_status: str = "complete"
+    checker_violations: list[dict[str, Any]] = Field(default_factory=list)
+    checker_violation_count: int = 0
+    stale_question_count: int = 0
+    metadata: dict[str, Any] | None = None
 
 
 class DispatchedTurnResponse(OttoApiModel):

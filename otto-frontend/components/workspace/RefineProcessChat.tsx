@@ -18,7 +18,7 @@ export function RefineProcessChat() {
     {
       id: "m-0",
       role: "agent",
-      text: `Tell me what's off — a node, a step, a system, or an exception I missed. I'll capture it as a correction with high-priority evidence.`,
+      text: `Tell me what's off — a node, a step, a system, or an exception I missed. I'll stage it as a correction note for the next map regeneration.`,
     },
   ]);
   const [input, setInput] = useState("");
@@ -46,27 +46,25 @@ export function RefineProcessChat() {
         {
           id: `m-${Date.now() + 1}`,
           role: "agent",
-          text: `Captured. I've added that as a user_correction evidence row on the affected node and marked it on the canvas. It supersedes the prior synthesized claim and will be used when the map is regenerated.`,
+          text: `Captured as a draft correction note. I've marked the affected node locally and will use this when the map is regenerated; it is not a retained evidence row yet.`,
         },
       ]);
       setThinking(false);
     }, 900);
   }
 
+  if (!open) {
+    return null;
+  }
+
   return (
     <>
       <div
-        className={cn(
-          "fixed inset-0 z-40 bg-ink/10 transition-opacity",
-          open ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0",
-        )}
+        className="fixed inset-0 z-40 bg-ink/10"
         onClick={() => toggle(false)}
       />
       <aside
-        className={cn(
-          "fixed right-0 top-0 z-50 flex h-full w-[440px] flex-col border-l border-subtle bg-surface shadow-pop transition-transform",
-          open ? "translate-x-0" : "translate-x-full",
-        )}
+        className="fixed right-0 top-0 z-50 flex h-full w-[440px] flex-col border-l border-subtle bg-surface shadow-pop"
       >
         <header className="flex items-start justify-between border-b border-subtle px-5 py-4">
           <div>
@@ -139,7 +137,7 @@ export function RefineProcessChat() {
             </Button>
           </div>
           <div className="mt-1.5 text-[10.5px] text-ink-muted">
-            ↵ to send · ⇧ + ↵ for newline. Corrections create user_correction evidence rows with confidence 1.0.
+            Enter to send · Shift + Enter for newline. Corrections are staged locally until regeneration persists them.
           </div>
         </div>
       </aside>

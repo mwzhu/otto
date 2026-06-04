@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Pill } from "@/components/ui/Pill";
 import { cn } from "@/lib/cn";
@@ -225,7 +225,7 @@ export function NodeEvidenceDrawer({
   const key = useMemo(() => evidenceIds.join(","), [evidenceIds]);
   const rows = rowsByKey[key] ?? [];
 
-  async function loadEvidence() {
+  const loadEvidence = useCallback(async () => {
     if (!workspaceId || !processId || evidenceIds.length === 0 || rowsByKey[key]) {
       return;
     }
@@ -253,27 +253,26 @@ export function NodeEvidenceDrawer({
     } finally {
       setLoadingKey(null);
     }
-  }
+  }, [evidenceIds, key, processId, rowsByKey, versionId, workspaceId]);
 
   useEffect(() => {
     if (!open || !key || loadingKey === key || rowsByKey[key] || error) return;
-    void loadEvidence();
-  }, [open, key, loadingKey, rowsByKey, error]);
+    const timer = window.setTimeout(() => void loadEvidence(), 0);
+    return () => window.clearTimeout(timer);
+  }, [error, key, loadEvidence, loadingKey, open, rowsByKey]);
+
+  if (!open) {
+    return null;
+  }
 
   return (
     <>
       <div
-        className={cn(
-          "fixed inset-0 z-40 bg-ink/10 transition-opacity",
-          open ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0",
-        )}
+        className="fixed inset-0 z-40 bg-ink/10"
         onClick={onClose}
       />
       <aside
-        className={cn(
-          "fixed right-0 top-0 z-50 flex h-full w-[440px] flex-col border-l border-subtle bg-surface shadow-pop transition-transform",
-          open ? "translate-x-0" : "translate-x-full",
-        )}
+        className="fixed right-0 top-0 z-50 flex h-full w-[440px] flex-col border-l border-subtle bg-surface shadow-pop"
       >
         <header className="flex items-start justify-between gap-3 border-b border-subtle px-5 py-4">
           <div>

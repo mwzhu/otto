@@ -8,7 +8,12 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run tests/phase0 tests/phase1",
-    "eval:director:smoke": "vitest run tests/phase1/director-evals.test.ts tests/phase1/week3-director-document.test.ts tests/phase1/livekit-adapter.test.ts tests/phase1/service-auth.test.ts && cd ../agents/director && UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/otto-uv-cache} uv run --no-sync python -m director_agent.schema_contract && UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/otto-uv-cache} uv run --no-sync python -m unittest discover -s tests",
+    "eval:director:smoke": "OTTO_EVAL_REPORT_PATH=eval-reports/director.jsonl vitest run tests/phase1/director-evals.test.ts tests/phase1/week3-director-document.test.ts tests/phase1/livekit-adapter.test.ts tests/phase1/service-auth.test.ts && cd ../agents/director && UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/otto-uv-cache} uv run --no-sync python -m director_agent.schema_contract && UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/otto-uv-cache} uv run --no-sync python -m unittest discover -s tests",
+    "eval:operator": "OTTO_EVAL_REPORT_PATH=eval-reports/operator.jsonl vitest run tests/phase2/operator-graph-validation.test.ts tests/phase2/operator-workflow-eval.test.ts tests/phase2/operator-semantic-workflow-eval.test.ts tests/phase2/operator-conversation-quality.test.ts tests/phase2/opportunity-agent.test.ts",
+    "eval:corrections": "OTTO_EVAL_REPORT_PATH=eval-reports/corrections.jsonl vitest run tests/phase1/correction-eval-fixtures.test.ts",
+    "eval:cache:live": "OTTO_RUN_LIVE_CACHE_TEST=true vitest run tests/phase1/prompt-cache-live.test.ts",
+    "verify:voice-telemetry": "node scripts/verify-voice-phrase-telemetry.cjs",
+    "eval:all": "npm run eval:director:smoke && npm run eval:operator && npm run eval:corrections",
     "eval:director:container": "cd .. && docker build -f agents/director/Dockerfile -t otto-director-agent .",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate"

@@ -12,6 +12,12 @@ export type VariantReviewRow = {
   created_at: string;
 };
 
+export type ProcessMergeTarget = {
+  id: string;
+  name: string;
+  status: string;
+};
+
 export async function getVariantReviewQueue(orgId: string, workspaceId: string) {
   return getDb().transaction(async (tx) => {
     await setOrgContext(tx, orgId);
@@ -28,6 +34,21 @@ export async function getVariantReviewQueue(orgId: string, workspaceId: string) 
         AND workspace_id = ${workspaceId}
         AND status = 'pending'
       ORDER BY created_at DESC
+      LIMIT 100
+    `);
+  }).then((result) => result.rows);
+}
+
+export async function getProcessMergeTargets(orgId: string, workspaceId: string) {
+  return getDb().transaction(async (tx) => {
+    await setOrgContext(tx, orgId);
+    return tx.execute<ProcessMergeTarget>(sql`
+      SELECT id, name, status::text
+      FROM processes
+      WHERE org_id = ${orgId}
+        AND workspace_id = ${workspaceId}
+        AND status IN ('draft', 'approved')
+      ORDER BY name ASC
       LIMIT 100
     `);
   }).then((result) => result.rows);

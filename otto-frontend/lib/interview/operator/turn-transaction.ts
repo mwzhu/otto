@@ -203,6 +203,8 @@ export async function assertOperatorTurnReferences(input: {
   transcriptSegmentIds: string[];
   evidenceIds: string[];
   expectedTurnIndex?: number;
+  expectedTurnIndexes?: number[];
+  allowMultipleTurnIndexes?: boolean;
   tx?: TransactionHandle;
 }) {
   const transcriptSegmentIds = [...new Set(input.transcriptSegmentIds)];
@@ -233,7 +235,25 @@ export async function assertOperatorTurnReferences(input: {
         "All transcript_segment_ids must belong to this operator capture session.",
       );
     }
-    if (input.expectedTurnIndex !== undefined) {
+    const expectedTurnIndexes = input.expectedTurnIndexes?.length
+      ? new Set(input.expectedTurnIndexes)
+      : undefined;
+    if (expectedTurnIndexes) {
+      const turnIndexes = new Set(segmentRows.map((row) => row.turnIndex));
+      const unexpected = [...turnIndexes].filter(
+        (turnIndex) => turnIndex === null || !expectedTurnIndexes.has(turnIndex),
+      );
+      if (
+        unexpected.length > 0 ||
+        (!input.allowMultipleTurnIndexes && turnIndexes.size > 1)
+      ) {
+        throw new ApiError(
+          400,
+          "bad_request",
+          "Operator transcript segment turn_index values must match the extraction window.",
+        );
+      }
+    } else if (input.expectedTurnIndex !== undefined) {
       const turnIndexes = new Set(segmentRows.map((row) => row.turnIndex));
       if (turnIndexes.size !== 1 || !turnIndexes.has(input.expectedTurnIndex)) {
         throw new ApiError(

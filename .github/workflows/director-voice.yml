@@ -63,6 +63,14 @@ jobs:
         working-directory: otto-frontend
         run: npm run eval:director:smoke
 
+      - name: Run operator eval gates
+        working-directory: otto-frontend
+        run: npm run eval:operator
+
+      - name: Run correction eval fixture gate
+        working-directory: otto-frontend
+        run: npm run eval:corrections
+
       - name: Build director worker container
         working-directory: otto-frontend
         run: npm run eval:director:container

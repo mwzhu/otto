@@ -13,6 +13,7 @@ import {
   getProcessGraphVersions,
 } from "@/lib/processes/graph-queries";
 import { getProcessFollowUps } from "@/lib/processes/follow-up-queries";
+import { getProcessOpportunities } from "@/lib/processes/opportunity-queries";
 import WorkspaceClient from "./WorkspaceClient";
 import type { WorkspaceTab } from "@/lib/store/workspace";
 
@@ -50,9 +51,15 @@ export default async function WorkspacePage({
   if (!process) notFound();
   const semanticFollowUps = followUps.filter(isSemanticWorkflowFollowUp);
   if (graph) {
+    const opportunitiesResult = await getProcessOpportunities({
+      orgId: auth.orgId,
+      workspaceId: workspace.id,
+      processId: id,
+      graph,
+    });
     const counts: Partial<Record<WorkspaceTab, number>> = {
       steps: graph.nodes.filter((node) => node.type === "task").length,
-      impact: 0,
+      impact: opportunitiesResult.opportunities.length,
       insights: graph.summary ? 1 : graph.nodes.length > 0 ? 6 : 0,
       risk:
         graph.nodes.filter((node) => node.type === "exception").length +
@@ -65,6 +72,8 @@ export default async function WorkspacePage({
         graph={graph}
         graphVersions={graphVersions}
         followUps={followUps}
+        impactOpportunities={opportunitiesResult.opportunities}
+        opportunitySource={opportunitiesResult.source}
         initialTab="summary"
         counts={counts}
         canApproveDraft={canApproveDraft}

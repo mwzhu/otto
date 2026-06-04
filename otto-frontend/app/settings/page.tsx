@@ -1,8 +1,19 @@
 import { BreadcrumbHeader } from "@/components/layout/BreadcrumbHeader";
 import { Pill } from "@/components/ui/Pill";
-import { Button } from "@/components/ui/Button";
+import { WorkspaceRoiPricesPanel } from "@/components/workspace/WorkspaceRoiPricesPanel";
+import { requirePageAuth } from "@/lib/auth/session";
+import { getWorkspaceRoiPrices } from "@/lib/workspaces/roi-prices";
+import { getCurrentWorkspace } from "@/lib/workspaces/current";
 
-export default function SettingsPage() {
+export default async function SettingsPage() {
+  const auth = await requirePageAuth();
+  const workspace = await getCurrentWorkspace(auth);
+  const roiPrices = workspace
+    ? await getWorkspaceRoiPrices(auth.orgId, workspace.id)
+    : null;
+  const canEditFinance =
+    auth.orgRole === "org_admin" || auth.orgRole === "fde";
+
   return (
     <div className="flex min-h-screen flex-col">
       <BreadcrumbHeader
@@ -27,6 +38,16 @@ export default function SettingsPage() {
             <Retention label="Vendor traces (Langfuse)" current="14 days · sanitized" options={["7 days", "14 days", "30 days"]} />
           </div>
         </Section>
+
+        {workspace && roiPrices && (
+          <Section title="Finance assumptions">
+            <WorkspaceRoiPricesPanel
+              workspaceId={workspace.id}
+              initialPrices={roiPrices}
+              canEdit={canEditFinance}
+            />
+          </Section>
+        )}
 
         <Section title="Members &amp; roles">
           <table className="w-full border-collapse text-[12.5px]">

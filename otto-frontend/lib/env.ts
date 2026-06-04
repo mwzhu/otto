@@ -16,7 +16,7 @@ const directorPlannerRuntimeEnv = z.preprocess(
 
 const directorVoiceRuntimeEnv = z.preprocess(
   (value) => (typeof value === "string" ? value.trim().toLowerCase() : value),
-  z.enum(["planned_cascade", "steered_cascade", "steered_realtime"]).optional(),
+  z.enum(["steered_cascade"]).optional(),
 );
 
 export const serverEnvSchema = z.object({
@@ -77,11 +77,15 @@ export const serverEnvSchema = z.object({
   INNGEST_SIGNING_KEY: z.string().optional(),
   ANTHROPIC_API_KEY: z.string().optional(),
   ANTHROPIC_MODEL: z.string().optional(),
+  ANTHROPIC_OPUS_MODEL: z.string().optional(),
   DIRECTOR_BRAIN_MODEL: z.string().optional(),
   DIRECTOR_VOICE_MODEL: z.string().optional(),
   OPERATOR_BRAIN_MODEL: z.string().optional(),
+  OPERATOR_VOICE_MODEL: z.string().optional(),
   OPERATOR_WORKFLOW_MODEL: z.string().optional(),
   SYNTHESIS_PLANNER_MODEL: z.string().optional(),
+  OPPORTUNITY_MODEL: z.string().optional(),
+  OPPORTUNITY_AGENT_ENABLED: boolEnv,
   LLAMAPARSE_API_KEY: z.string().optional(),
   LLAMAPARSE_API_URL: z.string().url().optional(),
   UNSTRUCTURED_API_KEY: z.string().optional(),

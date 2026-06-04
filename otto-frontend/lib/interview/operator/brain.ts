@@ -1,6 +1,7 @@
 import "server-only";
 
 import { and, desc, eq, sql } from "drizzle-orm";
+import { z } from "zod";
 import {
   generate,
   structured,
@@ -12,14 +13,17 @@ import {
 import { getDb, setOrgContext } from "@/lib/db/client";
 import { getServerEnv } from "@/lib/env";
 import {
+  agentDecisionLog,
   documentChunks,
   followUpTasks,
   interviewState,
+  operatorExtractionWindows,
   redactions,
   screenEvents,
   slotStates,
   transcriptSegments,
 } from "@/lib/db/schema";
+import { writeClaimInTransaction } from "@/lib/db/write-claim";
 import { writeAgentDecisionInTransaction } from "@/lib/db/write-agent-decision";
 import { inngest, operatorRedactionRequestedEventName } from "@/lib/inngest/client";
 import { limitToSingleQuestion } from "@/lib/interview/_core/utterance";
@@ -57,6 +61,23 @@ export type OperatorTurnPlanResult = {
   started_at: Date;
 };
 
+export type OperatorSteeringPlanResult = OperatorTurnPlanResult & {
+  input: OperatorTurnInput;
+  planning_context: OperatorPlanningContext;
+  live_reconciliation_signals: LiveReconciliationSignal[];
+  steering_context: {
+    next_objective: string;
+    target_slots: string[];
+    do_not_ask: string[];
+    required_style: string;
+    recent_screen_events: OperatorPlanningContext["recentScreenEvents"];
+    live_reconciliation_signals: string[];
+    pending_extraction_turns?: number[];
+    pending_slot_paths?: string[];
+    last_spoken_intent?: string;
+  };
+};
+
 export type OperatorPlanMetadata = {
   model: string;
   prompt_template_id: string;
@@ -78,6 +99,52 @@ export type OperatorPlanMetadata = {
   voice_phrase_fallback?: boolean;
   voice_phrase_metadata?: Record<string, unknown>;
 };
+
+export type OperatorOutputCheckViolation = {
+  type:
+    | "asked_do_not_ask"
+    | "unsupported_claim"
+    | "multiple_questions"
+    | "too_verbose"
+    | "internal_mechanics"
+    | "contradicted_reconciliation";
+  severity: "low" | "medium" | "high";
+  message: string;
+};
+
+export type OperatorOutputCheckResult = {
+  checker_status: "complete" | "failed";
+  violations: OperatorOutputCheckViolation[];
+  checker_violation_count: number;
+  stale_question_count: number;
+  metadata: Generation;
+};
+
+const operatorOutputCheckSchema = z
+  .object({
+    checker_status: z.enum(["complete", "failed"]).default("complete"),
+    violations: z
+      .array(
+        z
+          .object({
+            type: z.enum([
+              "asked_do_not_ask",
+              "unsupported_claim",
+              "multiple_questions",
+              "too_verbose",
+              "internal_mechanics",
+              "contradicted_reconciliation",
+            ]),
+            severity: z.enum(["low", "medium", "high"]),
+            message: z.string().min(1),
+          })
+          .strict(),
+      )
+      .default([]),
+    checker_violation_count: z.number().int().min(0).default(0),
+    stale_question_count: z.number().int().min(0).default(0),
+  })
+  .strict();
 
 export type OperatorTurnPlanStreamEvent = {
   type: "planned_agent_utterance";
@@ -104,9 +171,103 @@ export async function runOperatorTurn(input: OperatorTurnInput) {
 export async function planOperatorTurn(
   input: OperatorTurnInput,
 ): Promise<OperatorTurnPlanResult> {
-  return planOperatorTurnWithPlanner(input, (opts) =>
-    structured<OperatorTurnPlan>(opts),
+  return planOperatorTurnWithPlanner(input, (opts) => structured<OperatorTurnPlan>(opts));
+}
+
+export async function extractOperatorTurn(
+  input: OperatorTurnInput,
+): Promise<OperatorTurnPlanResult> {
+  return planOperatorTurnWithPlanner(
+    input,
+    (opts) => structured<OperatorTurnPlan>(opts),
+    { phrase: false, source: "operator_extraction_llm" },
   );
+}
+
+export async function buildOperatorSteeringPlan(
+  input: OperatorTurnInput & {
+    pendingExtractionTurns?: number[];
+    pendingSlotPaths?: string[];
+    lastSpokenIntent?: string;
+  },
+): Promise<OperatorSteeringPlanResult> {
+  const startedAt = new Date();
+  const planningContext = await readOperatorPlanningContext(input);
+  let plan = operatorTurnPlanSchema.parse(
+    deterministicOperatorTurnPlan({
+      ...input,
+      currentPhase: planningContext.currentPhase,
+    }),
+  );
+  const liveReconciliationSignals = detectLiveReconciliationSignals(planningContext);
+  plan = applyLiveReconciliationSignals(plan, liveReconciliationSignals);
+  const normalized = normalizeOperatorPlan(plan, plan, input.evidenceIds);
+  plan = normalized.plan;
+  const targetSlots = uniqueStrings([
+    plan.chosen_intent.target_slot,
+    ...plan.ranked_intents.slice(0, 3).map((intent) => intent.target_slot),
+  ].filter((slot): slot is string => Boolean(slot)));
+  const filledSlots = planningContext.currentSlots
+    .filter((slot) => ["filled", "asked_unknown"].includes(slot.status))
+    .map((slot) => slot.slotPath);
+  const metadata = deterministicPlannerMetadata(startedAt, input, plan, {
+    source: "deterministic_operator_steering",
+    utteranceSource: "fast_steering_phrase_pending",
+    llmCallElided: true,
+  });
+  return {
+    plan,
+    planned_agent_utterance:
+      plan.planned_agent_utterance ?? deterministicOperatorUtterance(plan.chosen_intent),
+    metadata: {
+      ...metadata,
+      model: "deterministic-steering",
+      prompt_template_id: "operator.turn.steering",
+    },
+    degraded_quality: normalized.degradedReasons.length > 0,
+    degraded_reasons: normalized.degradedReasons,
+    started_at: startedAt,
+    input,
+    planning_context: planningContext,
+    live_reconciliation_signals: liveReconciliationSignals,
+    steering_context: {
+      next_objective: plan.chosen_intent.reason,
+      target_slots: targetSlots,
+      do_not_ask: uniqueStrings([...filledSlots, ...(input.pendingSlotPaths ?? [])]),
+      required_style:
+        "Acknowledge briefly, ask one concrete workflow follow-up, and keep the response short enough for voice.",
+      recent_screen_events: planningContext.recentScreenEvents,
+      live_reconciliation_signals: liveReconciliationSignals.map((item) => item.signal),
+      pending_extraction_turns: input.pendingExtractionTurns ?? [],
+      pending_slot_paths: input.pendingSlotPaths ?? [],
+      last_spoken_intent: input.lastSpokenIntent,
+    },
+  };
+}
+
+export async function phraseOperatorSteeringTurn(
+  steering: OperatorSteeringPlanResult,
+): Promise<OperatorVoicePhraseResult> {
+  return phraseOperatorTurnWithSeparateVoice({
+    input: steering.input,
+    plan: steering.plan,
+    planningContext: steering.planning_context,
+    liveReconciliationSignals: steering.live_reconciliation_signals,
+    fallbackUtterance: steering.planned_agent_utterance,
+    fallbackUtteranceSource: "deterministic_operator_steering",
+  });
+}
+
+export function nonAuthoritativeOperatorSteeringPlan(
+  plan: OperatorTurnPlan,
+): OperatorTurnPlan {
+  return {
+    ...plan,
+    step_updates: [],
+    slot_updates: [],
+    claims: [],
+    tool_calls: [],
+  };
 }
 
 export async function planOperatorTurnStreamed(
@@ -138,6 +299,7 @@ export async function planOperatorTurnStreamed(
 async function planOperatorTurnWithPlanner(
   input: OperatorTurnInput,
   planner: OperatorPlanner,
+  options: { phrase?: boolean; source?: string } = {},
 ): Promise<OperatorTurnPlanResult> {
   const startedAt = new Date();
   const planningContext = await readOperatorPlanningContext(input);
@@ -153,6 +315,7 @@ async function planOperatorTurnWithPlanner(
     latestUtterance: input.latestUtterance,
     evidenceIds: input.evidenceIds,
     currentSlots: planningContext.currentSlots,
+    workspaceMemory: planningContext.workspaceMemory,
     recentTurns: planningContext.recentTurns,
     recentScreenEvents: planningContext.recentScreenEvents,
     sopChunks: planningContext.sopChunks,
@@ -217,7 +380,7 @@ async function planOperatorTurnWithPlanner(
   let voicePhraseMetadata: Record<string, unknown> | undefined;
   let voicePhraseFallback = false;
 
-  if (shouldUseSeparateOperatorVoiceLlm()) {
+  if (options.phrase !== false && shouldUseSeparateOperatorVoiceLlm()) {
     const phrased = await phraseOperatorTurnWithSeparateVoice({
       input,
       plan,
@@ -247,7 +410,7 @@ async function planOperatorTurnWithPlanner(
         voicePhraseMetadata,
       })
     : deterministicPlannerMetadata(startedAt, input, plan, {
-        source: "deterministic_operator_planner",
+        source: options.source ?? "deterministic_operator_planner",
         utteranceSource,
         reason: utteranceReason ?? "structured_operator_plan_failed",
         llmCallElided: utteranceSource !== "separate_voice_llm",
@@ -270,9 +433,13 @@ export async function dispatchOperatorTurnPlan(
     OperatorTurnPlanResult & {
       localTurnCorrelationId?: string;
       deliveryStatus?: "pending" | "completed";
+      decisionStageName?: string;
+      advanceConversationState?: boolean;
+      deliveryJsonOverrides?: Record<string, unknown>;
+      tx?: OperatorBrainTx;
     },
 ) {
-  const result = await getDb().transaction(async (tx) => {
+  const commit = async (tx: OperatorBrainTx) => {
     await setOrgContext(tx, input.orgId);
     const insertedSteps = [];
     for (const [index, step] of input.plan.step_updates.entries()) {
@@ -333,27 +500,30 @@ export async function dispatchOperatorTurnPlan(
       primaryStepId,
       tx,
     });
-    await writeOperatorInterviewState(
-      input,
-      {
-        currentPhase: input.plan.proposed_next_phase,
-        priorIntent: input.plan.chosen_intent.intent,
-        phaseTransition: input.plan.phase_transition_ready
-          ? {
-              from: input.plan.current_phase,
-              to: input.plan.proposed_next_phase,
-              turn_index: input.turnIndex,
-            }
-          : undefined,
-      },
-      tx,
-    );
+    const claimWrites = await dispatchOperatorPlanClaims(input, tx);
+    if (input.advanceConversationState ?? true) {
+      await writeOperatorInterviewState(
+        input,
+        {
+          currentPhase: input.plan.proposed_next_phase,
+          priorIntent: input.plan.chosen_intent.intent,
+          phaseTransition: input.plan.phase_transition_ready
+            ? {
+                from: input.plan.current_phase,
+                to: input.plan.proposed_next_phase,
+                turn_index: input.turnIndex,
+              }
+            : undefined,
+        },
+        tx,
+      );
+    }
     const decision = await writeAgentDecisionInTransaction(tx, {
       orgId: input.orgId,
       workspaceId: input.workspaceId,
       captureSessionId: input.captureSessionId,
       turnIndex: input.turnIndex,
-      stageName: "operator.turn",
+      stageName: input.decisionStageName ?? "operator.turn",
       tsStart: input.started_at,
       tsEnd: new Date(),
       transcriptSegmentIds: input.transcriptSegmentIds,
@@ -371,6 +541,8 @@ export async function dispatchOperatorTurnPlan(
         voice_metadata: input.metadata,
         provisional_step_ids: insertedSteps.map((step) => step.id),
         tool_executions: toolExecutions,
+        claim_write_count: claimWrites.length,
+        ...input.deliveryJsonOverrides,
       },
       model: input.metadata.model,
       tokenCountInput: input.metadata.token_count_input,
@@ -390,10 +562,174 @@ export async function dispatchOperatorTurnPlan(
       decision_log_id: decision.id,
       provisional_steps: insertedSteps,
       tool_executions: toolExecutions,
+      claim_writes: claimWrites,
     };
-  });
+  };
+  const result = input.tx ? await commit(input.tx) : await getDb().transaction(commit);
   await sendOperatorToolEvents(input, result.tool_executions);
   return result;
+}
+
+export async function checkOperatorSpokenOutput(input: {
+  spokenAgentUtterance: string;
+  steeringContext: Record<string, unknown>;
+}): Promise<OperatorOutputCheckResult> {
+  const started = new Date();
+  const heuristic = heuristicOperatorOutputCheck(input);
+  try {
+    const result = await structured({
+      prompt_template_id: "operator.voice.output-checker",
+      prompt_template_version: "1",
+      schema_name: "operator-output-check",
+      schema: operatorOutputCheckSchema,
+      static_input: [
+        "You are checking one spoken Otto operator-interview utterance after it was already delivered.",
+        "Return JSON only. Do not rewrite the utterance.",
+        "Flag unsupported factual claims, stale questions, ignored workflow steering, multiple questions, verbosity, internal mechanics, and contradictions with live reconciliation signals.",
+      ].join("\n"),
+      dynamic_input: JSON.stringify(
+        {
+          spoken_agent_utterance: input.spokenAgentUtterance,
+          steering_context: input.steeringContext,
+        },
+        null,
+        2,
+      ),
+      input:
+        "Return checker_status, violations, checker_violation_count, and stale_question_count.",
+      mock: heuristic,
+    });
+    return normalizeOperatorOutputCheck(result.value, result.metadata);
+  } catch {
+    return normalizeOperatorOutputCheck(
+      {
+        ...heuristic,
+        checker_status: "failed",
+      },
+      operatorCheckerFallbackMetadata(started),
+    );
+  }
+}
+
+export async function recordOperatorOutputCheck(input: {
+  context: OperatorSessionContext;
+  turnIndex: number;
+  decisionLogId: string;
+  check: OperatorOutputCheckResult;
+  localTurnCorrelationId?: string;
+}) {
+  const patch = {
+    checker_status: input.check.checker_status,
+    checker_violations: input.check.violations,
+    checker_violation_count: input.check.checker_violation_count,
+    stale_question_count: input.check.stale_question_count,
+    checker_metadata: input.check.metadata,
+    ...(input.localTurnCorrelationId
+      ? { local_turn_correlation_id: input.localTurnCorrelationId }
+      : {}),
+  };
+  return getDb().transaction(async (tx) => {
+    await setOrgContext(tx, input.context.orgId);
+    const hasCheckerIssue =
+      input.check.checker_status === "failed" ||
+      input.check.checker_violation_count > 0;
+    const updated = await tx
+      .update(agentDecisionLog)
+      .set({
+        deliveryJson: sql`coalesce(${agentDecisionLog.deliveryJson}, '{}'::jsonb) || ${JSON.stringify(
+          patch,
+        )}::jsonb`,
+        ...(hasCheckerIssue
+          ? {
+              degradedQuality: true,
+              degradedReasons:
+                input.check.checker_status === "failed"
+                  ? ["operator_output_checker_failed"]
+                  : ["operator_output_checker_violation"],
+            }
+          : {}),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(agentDecisionLog.id, input.decisionLogId),
+          eq(agentDecisionLog.orgId, input.context.orgId),
+          eq(agentDecisionLog.workspaceId, input.context.workspaceId),
+          eq(agentDecisionLog.captureSessionId, input.context.captureSessionId),
+          eq(agentDecisionLog.turnIndex, input.turnIndex),
+          eq(agentDecisionLog.stageName, "operator.turn"),
+        ),
+      )
+      .returning();
+    if (hasCheckerIssue) {
+      await tx.insert(followUpTasks).values({
+        orgId: input.context.orgId,
+        workspaceId: input.context.workspaceId,
+        processId: input.context.processId,
+        captureSessionId: input.context.captureSessionId,
+        taskType: "low_confidence_claim",
+        title: "Review operator spoken-output checker result",
+        description:
+          input.check.violations[0]?.message ??
+          "The async operator spoken-output checker failed or found a steering violation.",
+        targetType: "capture_session",
+        targetId: input.context.captureSessionId,
+        priority: "0.75",
+        status: "open",
+        assignedToUserId: input.context.userId,
+        contextJson: patch,
+      });
+    }
+    return updated;
+  });
+}
+
+async function dispatchOperatorPlanClaims(
+  input: OperatorTurnInput & OperatorTurnPlanResult,
+  tx: OperatorBrainTx,
+) {
+  const writes = [];
+  for (const claim of input.plan.claims) {
+    const subjectType = claim.subject_type;
+    if (!isOperatorWritableClaimSubject(subjectType)) continue;
+    const request = {
+      subject_type: subjectType,
+      subject_id: claim.subject_id,
+      field: claim.field,
+      value: claim.value,
+      evidence_ids: claim.evidence_ids,
+      confidence: claim.confidence,
+      metadata: claim.metadata,
+    };
+    writes.push(
+      await writeClaimInTransaction(tx, {
+        orgId: input.orgId,
+        workspaceId: input.workspaceId,
+        userId: input.userId,
+        subject: {
+          type: subjectType,
+          id: claim.subject_id,
+        },
+        field: claim.field,
+        value: claim.value,
+        evidenceIds: claim.evidence_ids,
+        confidence: claim.confidence,
+        idempotencyKey: `operator-plan-claim:${hash(request)}`,
+        requestHash: hash(request),
+        route: "operator-plan-claim",
+        metadata: claim.metadata,
+      }),
+    );
+  }
+  return writes;
+}
+
+function isOperatorWritableClaimSubject(
+  value: string,
+): value is "process" | "process_version" | "candidate_process" | "system" | "role" | "person" {
+  return ["process", "process_version", "candidate_process", "system", "role", "person"].includes(
+    value,
+  );
 }
 
 async function writeOperatorInterviewState(
@@ -495,6 +831,111 @@ async function writeOperatorInterviewState(
       },
     });
   }
+}
+
+export async function updateOperatorExtractionStatus(input: {
+  context: OperatorSessionContext;
+  turnIndex: number;
+  extractionStatus: "pending" | "complete" | "failed";
+  extractionDecisionLogId?: string;
+  extractionLatencyMs?: number;
+  errorMessage?: string;
+  localTurnCorrelationId?: string;
+  extractionWindowId?: string;
+  tx?: OperatorBrainTx;
+}) {
+  const patch = {
+    extraction_status: input.extractionStatus,
+    ...(input.extractionDecisionLogId
+      ? { extraction_decision_log_id: input.extractionDecisionLogId }
+      : {}),
+    ...(typeof input.extractionLatencyMs === "number"
+      ? { extraction_latency_ms: input.extractionLatencyMs }
+      : {}),
+    ...(input.errorMessage ? { extraction_error_message: input.errorMessage } : {}),
+    ...(input.localTurnCorrelationId
+      ? { local_turn_correlation_id: input.localTurnCorrelationId }
+      : {}),
+    ...(input.extractionWindowId ? { extraction_window_id: input.extractionWindowId } : {}),
+  };
+  const update = (tx: OperatorBrainTx) =>
+    tx
+      .update(agentDecisionLog)
+      .set({
+        deliveryJson: sql`coalesce(${agentDecisionLog.deliveryJson}, '{}'::jsonb) || ${JSON.stringify(
+          patch,
+        )}::jsonb`,
+        ...(input.extractionStatus === "failed"
+          ? {
+              degradedQuality: true,
+              degradedReasons: ["operator_extraction_failed"],
+            }
+          : {}),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(agentDecisionLog.captureSessionId, input.context.captureSessionId),
+          eq(agentDecisionLog.turnIndex, input.turnIndex),
+          eq(agentDecisionLog.stageName, "operator.turn"),
+        ),
+      )
+      .returning();
+  if (input.tx) return update(input.tx);
+  return getDb().transaction(async (tx) => {
+    await setOrgContext(tx, input.context.orgId);
+    return update(tx);
+  });
+}
+
+export async function upsertOperatorExtractionWindow(input: {
+  context: OperatorSessionContext;
+  extractionWindowId: string;
+  turnIndex: number;
+  transcriptSegmentIds: string[];
+  openedAt?: Date;
+  closedAt?: Date;
+  closedBy?: "assistant_spoke" | "silence" | "manual_end";
+  status?: "pending" | "complete" | "failed";
+  metadataJson?: Record<string, unknown>;
+  tx?: OperatorBrainTx;
+}) {
+  const now = new Date();
+  const upsert = async (tx: OperatorBrainTx) =>
+    (
+      await tx
+        .insert(operatorExtractionWindows)
+        .values({
+          extractionWindowId: input.extractionWindowId,
+          orgId: input.context.orgId,
+          workspaceId: input.context.workspaceId,
+          captureSessionId: input.context.captureSessionId,
+          turnIndex: input.turnIndex,
+          transcriptSegmentIds: input.transcriptSegmentIds,
+          openedAt: input.openedAt ?? now,
+          closedAt: input.closedAt ?? now,
+          closedBy: input.closedBy ?? "assistant_spoke",
+          status: input.status ?? "pending",
+          metadataJson: input.metadataJson ?? {},
+        })
+        .onConflictDoUpdate({
+          target: [operatorExtractionWindows.extractionWindowId],
+          set: {
+            transcriptSegmentIds: input.transcriptSegmentIds,
+            closedAt: input.closedAt ?? now,
+            closedBy: input.closedBy ?? "assistant_spoke",
+            status: input.status ?? "pending",
+            metadataJson: input.metadataJson ?? {},
+            updatedAt: now,
+          },
+        })
+        .returning()
+    )[0];
+  if (input.tx) return upsert(input.tx);
+  return getDb().transaction(async (tx) => {
+    await setOrgContext(tx, input.context.orgId);
+    return upsert(tx);
+  });
 }
 
 type OperatorToolExecution = {
@@ -848,6 +1289,14 @@ type OperatorPlanningContext = {
     provisionalStepId: string | null;
     value: unknown;
   }>;
+  workspaceMemory: {
+    candidateProcesses: string[];
+    systems: string[];
+    roles: string[];
+    people: string[];
+    vocabulary: string[];
+    claims: string[];
+  };
   recentTurns: string[];
   recentScreenEvents: Array<{
     tsMs: number;
@@ -919,6 +1368,8 @@ async function phraseOperatorTurnWithSeparateVoice(input: {
         ...(input.planningContext.recentTurns.length
           ? input.planningContext.recentTurns.slice(-4).map((turn) => `- ${turn}`)
           : ["- none"]),
+        "Known workspace context:",
+        ...formatWorkspaceMemory(input.planningContext.workspaceMemory),
         "Live reconciliation signals:",
         ...(input.liveReconciliationSignals.length
           ? input.liveReconciliationSignals.map((item) => `- ${item.signal}`)
@@ -1043,9 +1494,11 @@ async function readOperatorPlanningContext(
       )
       .orderBy(documentChunks.ordinal)
       .limit(5);
+    const workspaceMemory = await readOperatorWorkspaceMemory(tx, input);
     return {
       currentPhase: operatorPhase(stateRows[0]?.currentPhase),
       currentSlots,
+      workspaceMemory,
       recentTurns: recentTurnRows
         .reverse()
         .map((turn) => `${turn.speaker}: ${turn.text}`),
@@ -1055,11 +1508,165 @@ async function readOperatorPlanningContext(
   });
 }
 
-function buildOperatorPromptCacheBlocks(input: {
+async function readOperatorWorkspaceMemory(
+  tx: OperatorBrainTx,
+  input: OperatorTurnInput,
+): Promise<OperatorPlanningContext["workspaceMemory"]> {
+  const candidateRows = await tx.execute<{
+    proposed_name: string;
+    proposed_function: string | null;
+    owner_role: string | null;
+  }>(sql`
+    SELECT cp.proposed_name, cp.proposed_function, r.name AS owner_role
+    FROM candidate_processes cp
+    LEFT JOIN roles r
+      ON r.id = cp.proposed_owner_role_id
+     AND r.org_id = cp.org_id
+    WHERE cp.org_id = ${input.orgId}
+      AND cp.workspace_id = ${input.workspaceId}
+      AND cp.status IN ('pending', 'promoted')
+    ORDER BY cp.updated_at DESC, cp.created_at DESC
+    LIMIT 8
+  `);
+  const systemRows = await tx.execute<{ name: string }>(sql`
+    SELECT DISTINCT s.name
+    FROM systems s
+    WHERE s.org_id = ${input.orgId}
+      AND (
+        EXISTS (
+          SELECT 1
+          FROM claims c
+          WHERE c.org_id = ${input.orgId}
+            AND c.workspace_id = ${input.workspaceId}
+            AND c.subject_type = 'system'
+            AND c.subject_id = s.id
+            AND c.status = 'active'
+            AND c.superseded_by_claim_id IS NULL
+            AND c.redacted_at IS NULL
+            AND c.tombstoned_at IS NULL
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM process_systems ps
+          WHERE ps.org_id = ${input.orgId}
+            AND ps.workspace_id = ${input.workspaceId}
+            AND ps.system_id = s.id
+        )
+      )
+    ORDER BY s.name
+    LIMIT 12
+  `);
+  const roleRows = await tx.execute<{ name: string }>(sql`
+    SELECT DISTINCT r.name
+    FROM roles r
+    WHERE r.org_id = ${input.orgId}
+      AND (
+        EXISTS (
+          SELECT 1
+          FROM candidate_processes cp
+          WHERE cp.org_id = ${input.orgId}
+            AND cp.workspace_id = ${input.workspaceId}
+            AND cp.proposed_owner_role_id = r.id
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM claims c
+          WHERE c.org_id = ${input.orgId}
+            AND c.workspace_id = ${input.workspaceId}
+            AND c.subject_type = 'role'
+            AND c.subject_id = r.id
+            AND c.status = 'active'
+            AND c.superseded_by_claim_id IS NULL
+            AND c.redacted_at IS NULL
+            AND c.tombstoned_at IS NULL
+        )
+      )
+    ORDER BY r.name
+    LIMIT 12
+  `);
+  const peopleRows = await tx.execute<{ name: string; title: string | null }>(sql`
+    SELECT DISTINCT p.name, p.title
+    FROM people p
+    WHERE p.org_id = ${input.orgId}
+      AND EXISTS (
+        SELECT 1
+        FROM claims c
+        WHERE c.org_id = ${input.orgId}
+          AND c.workspace_id = ${input.workspaceId}
+          AND c.subject_type = 'person'
+          AND c.subject_id = p.id
+          AND c.status = 'active'
+          AND c.superseded_by_claim_id IS NULL
+          AND c.redacted_at IS NULL
+          AND c.tombstoned_at IS NULL
+      )
+    ORDER BY p.name
+    LIMIT 8
+  `);
+  const vocabularyRows = await tx.execute<{
+    term: string;
+    type: string;
+    aliases: string[] | null;
+  }>(sql`
+    SELECT term, type::text, aliases
+    FROM ontology_terms
+    WHERE org_id = ${input.orgId}
+    ORDER BY updated_at DESC, created_at DESC
+    LIMIT 12
+  `);
+  const claimRows = await tx.execute<{
+    subject_type: string;
+    field: string;
+    value: unknown;
+  }>(sql`
+    SELECT subject_type, field, value
+    FROM claims
+    WHERE org_id = ${input.orgId}
+      AND workspace_id = ${input.workspaceId}
+      AND status = 'active'
+      AND superseded_by_claim_id IS NULL
+      AND redacted_at IS NULL
+      AND tombstoned_at IS NULL
+      AND subject_type IN ('candidate_process', 'system', 'role', 'person')
+    ORDER BY updated_at DESC, created_at DESC
+    LIMIT 12
+  `);
+  return {
+    candidateProcesses: candidateRows.rows.map((row) =>
+      [
+        row.proposed_name,
+        row.proposed_function ? `function=${row.proposed_function}` : "",
+        row.owner_role ? `owner=${row.owner_role}` : "",
+      ]
+        .filter(Boolean)
+        .join(" "),
+    ),
+    systems: systemRows.rows.map((row) => row.name),
+    roles: roleRows.rows.map((row) => row.name),
+    people: peopleRows.rows.map((row) =>
+      [row.name, row.title ? `(${row.title})` : ""].filter(Boolean).join(" "),
+    ),
+    vocabulary: vocabularyRows.rows.map((row) =>
+      [
+        `${row.term} [${row.type}]`,
+        row.aliases?.length ? `aliases=${row.aliases.join(", ")}` : "",
+      ]
+        .filter(Boolean)
+        .join(" "),
+    ),
+    claims: claimRows.rows.map(
+      (row) =>
+        `${row.subject_type}.${row.field}=${trimText(JSON.stringify(row.value), 140)}`,
+    ),
+  };
+}
+
+export function buildOperatorPromptCacheBlocks(input: {
   latestUtterance: string;
   evidenceIds: string[];
   currentPhase: OperatorPlanningContext["currentPhase"];
   currentSlots: OperatorPlanningContext["currentSlots"];
+  workspaceMemory: OperatorPlanningContext["workspaceMemory"];
   recentTurns: string[];
   recentScreenEvents: OperatorPlanningContext["recentScreenEvents"];
   sopChunks: OperatorPlanningContext["sopChunks"];
@@ -1090,6 +1697,8 @@ function buildOperatorPromptCacheBlocks(input: {
               `- ${slot.slotPath}${slot.provisionalStepId ? ` step=${slot.provisionalStepId}` : ""}: ${slot.status} (${slot.confidence ?? 0}) value=${JSON.stringify(slot.value ?? null)}`,
           )
         : ["- none"]),
+      "Director-established workspace memory:",
+      ...formatWorkspaceMemory(input.workspaceMemory),
       "Recent turns:",
       ...(input.recentTurns.length
         ? input.recentTurns.slice(-6).map((turn) => `- ${turn}`)
@@ -1122,6 +1731,25 @@ function buildOperatorPromptCacheBlocks(input: {
       `Latest operator utterance: ${input.latestUtterance}`,
     ].join("\n"),
   };
+}
+
+function formatWorkspaceMemory(
+  memory: OperatorPlanningContext["workspaceMemory"],
+) {
+  const lines = [
+    ...formatMemoryGroup("candidate processes", memory.candidateProcesses),
+    ...formatMemoryGroup("systems", memory.systems),
+    ...formatMemoryGroup("roles", memory.roles),
+    ...formatMemoryGroup("people", memory.people),
+    ...formatMemoryGroup("vocabulary", memory.vocabulary),
+    ...formatMemoryGroup("active claims", memory.claims),
+  ];
+  return lines.length ? lines : ["- none"];
+}
+
+function formatMemoryGroup(label: string, values: string[]) {
+  if (!values.length) return [];
+  return [`- ${label}: ${values.map((value) => trimText(value, 100)).join("; ")}`];
 }
 
 const operatorExtractionStaticContract = `
@@ -1471,6 +2099,115 @@ function voicePhraseMetadataFromGeneration(
   };
 }
 
+function heuristicOperatorOutputCheck(input: {
+  spokenAgentUtterance: string;
+  steeringContext: Record<string, unknown>;
+}) {
+  const utterance = input.spokenAgentUtterance.trim();
+  const lower = utterance.toLowerCase();
+  const violations: OperatorOutputCheckViolation[] = [];
+  const questionCount = (utterance.match(/\?/g) ?? []).length;
+  if (questionCount > 1) {
+    violations.push({
+      type: "multiple_questions",
+      severity: "medium",
+      message: "The spoken response asked more than one question.",
+    });
+  }
+  const wordCount = utterance.split(/\s+/).filter(Boolean).length;
+  if (wordCount > 50) {
+    violations.push({
+      type: "too_verbose",
+      severity: "low",
+      message: "The spoken response exceeded the expected concise operator-interview length.",
+    });
+  }
+  if (/\b(slot|schema|ranked intent|tool call|extraction|json)\b/i.test(utterance)) {
+    violations.push({
+      type: "internal_mechanics",
+      severity: "high",
+      message: "The spoken response exposed internal planning or extraction mechanics.",
+    });
+  }
+  const doNotAsk = arrayOfStrings(input.steeringContext.do_not_ask);
+  const staleQuestions = doNotAsk.filter((slotPath) =>
+    slotPathQuestionTerms(slotPath).some((term) => lower.includes(term)),
+  );
+  for (const slotPath of staleQuestions.slice(0, 3)) {
+    violations.push({
+      type: "asked_do_not_ask",
+      severity: "medium",
+      message: `The spoken response may have re-asked covered or pending slot ${slotPath}.`,
+    });
+  }
+  const reconciliationSignals = arrayOfStrings(
+    input.steeringContext.live_reconciliation_signals,
+  );
+  if (
+    reconciliationSignals.length > 0 &&
+    !/(sop|screen|workaround|manual|expected|normal|different|contradict|saw|noticed)/i.test(
+      utterance,
+    )
+  ) {
+    violations.push({
+      type: "contradicted_reconciliation",
+      severity: "medium",
+      message:
+        "The spoken response ignored active live reconciliation signals that should steer the next question.",
+    });
+  }
+  return {
+    checker_status: "complete" as const,
+    violations,
+    checker_violation_count: violations.length,
+    stale_question_count: staleQuestions.length,
+  };
+}
+
+function normalizeOperatorOutputCheck(
+  value: z.infer<typeof operatorOutputCheckSchema>,
+  metadata: Generation,
+): OperatorOutputCheckResult {
+  const violations = value.violations ?? [];
+  return {
+    checker_status: value.checker_status ?? "complete",
+    violations,
+    checker_violation_count: value.checker_violation_count ?? violations.length,
+    stale_question_count: value.stale_question_count ?? 0,
+    metadata,
+  };
+}
+
+function operatorCheckerFallbackMetadata(startedAt: Date): Generation {
+  return {
+    text: "",
+    model: "deterministic-operator-output-checker",
+    prompt_template_id: "operator.voice.output-checker",
+    prompt_template_version: "1",
+    token_count_input: 0,
+    token_count_output: 0,
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+    cost_cents: 0,
+    latency_ms: Date.now() - startedAt.getTime(),
+    cache_hit: false,
+    mocked: true,
+  };
+}
+
+function arrayOfStrings(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function slotPathQuestionTerms(slotPath: string) {
+  return slotPath
+    .split(/[._-]+/)
+    .map((part) => part.trim().toLowerCase())
+    .filter((part) => part.length >= 4);
+}
+
 export function deterministicOperatorTurnPlan(
   input: OperatorTurnInput & { currentPhase?: OperatorInterviewPhase },
 ): OperatorTurnPlan {
@@ -1650,6 +2387,19 @@ function uniqueStrings(values: string[]) {
   return [...new Set(values.filter(Boolean))];
 }
 
+export function voiceMetadataDegrades(
+  metadata: { mocked?: unknown; utterance_source?: unknown } | undefined,
+) {
+  return (
+    metadata?.mocked === true ||
+    metadata?.utterance_source === "deterministic_phrase_fallback"
+  );
+}
+
 function normalizeKey(value: string) {
   return value.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function hash(value: unknown) {
+  return Buffer.from(JSON.stringify(value)).toString("base64url").slice(0, 80);
 }

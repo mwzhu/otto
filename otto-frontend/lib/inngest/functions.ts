@@ -30,10 +30,24 @@ import { processOperatorScreenFrame } from "@/lib/vision/operator-screen-frame";
 import { runOperatorRedaction } from "@/lib/redactions/operator-redaction";
 import {
   dispatchDirectorTurnPlan,
-  planDirectorTurn,
+  extractDirectorTurn,
 } from "@/lib/interview/director/brain";
 import { runInventorySynthesis } from "@/lib/synthesis/inventory";
 import { runOperatorProcessSynthesis } from "@/lib/synthesis/operator-process";
+
+const synthesisConcurrency: [
+  { limit: number; key: string },
+  { limit: number },
+] = [
+  { limit: 1, key: "event.data.orgId" },
+  { limit: 8 },
+];
+
+const synthesisOrgThrottle = {
+  limit: 12,
+  period: "1m",
+  key: "event.data.orgId",
+} as const;
 
 export const artifactUploaded = inngest.createFunction(
   {
@@ -169,6 +183,8 @@ export const directorInterviewCompleted = inngest.createFunction(
 export const inventorySynthesis = inngest.createFunction(
   {
     id: "inventory-synthesis-phase1-v1",
+    concurrency: synthesisConcurrency,
+    throttle: synthesisOrgThrottle,
     triggers: [{ event: inventorySynthesisRequestedEventName }],
   },
   async ({ event, step }) => {
@@ -298,6 +314,8 @@ export const operatorCaptureReady = inngest.createFunction(
 export const operatorProcessSynthesis = inngest.createFunction(
   {
     id: "operator-process-synthesis-v1",
+    concurrency: synthesisConcurrency,
+    throttle: synthesisOrgThrottle,
     triggers: [{ event: operatorProcessSynthesisRequestedEventName }],
   },
   async ({ event, step }) => {
@@ -568,7 +586,7 @@ async function recoverDegradedDirectorTurn(row: RecoverableDegradedTurn) {
     evidenceIds: payload.evidenceIds,
     turnIndex: row.turnIndex ?? 0,
   };
-  const planned = await planDirectorTurn(turnInput);
+  const planned = await extractDirectorTurn(turnInput);
   if (planned.degraded_quality) {
     await writeSkippedDegradedRecovery(row, started, "rerun_still_degraded");
     return { ok: false as const };

@@ -18,25 +18,22 @@ class IngestedTurnResponse(OttoApiModel):
     turn_index: int
 
 
-class PlannedTurnResponse(OttoApiModel):
+class RespondedTurnResponse(OttoApiModel):
     plan: dict[str, Any]
     planned_agent_utterance: str
+    decision_log_id: str
     metadata: dict[str, Any] | None = None
     voice_metadata: dict[str, Any] | None = None
+    steering_context: dict[str, Any] | None = None
     degraded_quality: bool = False
     degraded_reasons: list[str] = Field(default_factory=list)
+    local_turn_correlation_id: str | None = None
 
     @field_validator("plan")
     @classmethod
     def validate_plan_contract(cls, value: dict[str, Any]) -> dict[str, Any]:
         validated = DirectorTurnPlan.model_validate(value)
         return validated.model_dump(mode="json", exclude_none=True)
-
-
-class RespondedTurnResponse(PlannedTurnResponse):
-    decision_log_id: str
-    steering_context: dict[str, Any] | None = None
-    local_turn_correlation_id: str | None = None
 
 
 class ExtractionTurnResponse(OttoApiModel):
@@ -60,11 +57,6 @@ class PlanningContextResponse(OttoApiModel):
 
 class VerificationResponse(OttoApiModel):
     verification: dict[str, Any]
-
-
-class DispatchedTurnResponse(OttoApiModel):
-    next_prompt: str
-    decision_log_id: str
 
 
 class OpeningTurnResponse(OttoApiModel):

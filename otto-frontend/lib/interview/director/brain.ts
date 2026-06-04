@@ -12,7 +12,7 @@ import {
   probeFirings,
   slotStates,
 } from "@/lib/db/schema";
-import { StructuredOutputError, structured, structuredStream } from "@/lib/adapters/llm";
+import { StructuredOutputError, structured } from "@/lib/adapters/llm";
 import { writeAgentDecisionInTransaction } from "@/lib/db/write-agent-decision";
 import {
   directorSlotDefinitions,
@@ -229,11 +229,6 @@ export type DirectorSteeringPlanResult = {
   };
 };
 
-export type DirectorTurnPlanStreamEvent = {
-  type: "planned_agent_utterance";
-  utterance: string;
-};
-
 export type DirectorOutputCheckViolation = {
   type:
     | "asked_do_not_ask"
@@ -275,58 +270,31 @@ const directorOutputCheckSchema = z.object({
 export async function runDirectorTurn(
   input: DirectorTurnInput,
 ): Promise<DirectorTurnResult> {
-  const planned = await planDirectorTurn(input);
-  const phrased = await phrasePlannedDirectorTurnDetailed({
-    ...input,
-    plan: planned.plan,
-  });
+  const planned = await extractDirectorTurn(input);
+  const plannedUtterance = planned.plan.planned_agent_utterance ?? "";
   return dispatchDirectorTurnPlan({
     ...input,
     plan: planned.plan,
-    plannedAgentUtterance: phrased.utterance,
+    plannedAgentUtterance: plannedUtterance,
     metadata: planned.metadata,
-    voiceMetadata: phrased.metadata,
-    degradedQuality: planned.degraded_quality || voiceMetadataDegrades(phrased.metadata),
-    degradedReasons: uniqueStrings([
-      ...planned.degraded_reasons,
-      ...(voiceMetadataDegrades(phrased.metadata) ? ["voice_phrase_fallback"] : []),
-    ]),
+    voiceMetadata: {
+      ...planned.metadata,
+      utterance_source: "extraction_planned_utterance",
+      llm_call_elided: true,
+    },
+    degradedQuality: planned.degraded_quality,
+    degradedReasons: planned.degraded_reasons,
     startedAt: planned.started_at,
     deliveryStatus: "completed",
-    deliveredAgentUtterance: phrased.utterance,
+    deliveredAgentUtterance: plannedUtterance,
     spokenFraction: 1,
   });
-}
-
-export async function planDirectorTurn(
-  input: DirectorTurnInput,
-): Promise<DirectorTurnPlanResult> {
-  return planDirectorTurnWithPlanner(input, structured);
 }
 
 export async function extractDirectorTurn(
   input: DirectorTurnInput,
 ): Promise<DirectorTurnPlanResult> {
   return planDirectorTurnWithExtractionPlanner(input, structured);
-}
-
-export async function planDirectorTurnStreamed(
-  input: DirectorTurnInput,
-  onEvent?: (event: DirectorTurnPlanStreamEvent) => void,
-): Promise<DirectorTurnPlanResult> {
-  let emitted = false;
-  return planDirectorTurnWithPlanner(input, (opts) =>
-    structuredStream({
-      ...opts,
-      onFieldComplete: (field, value) => {
-        if (field !== "planned_agent_utterance" || emitted) return;
-        const utterance = limitToSingleQuestion(value.trim());
-        if (!utterance) return;
-        emitted = true;
-        onEvent?.({ type: "planned_agent_utterance", utterance });
-      },
-    }),
-  );
 }
 
 export async function buildDirectorSteeringPlan(
@@ -449,134 +417,6 @@ export async function phraseDirectorSteeringTurn(
   });
 }
 
-async function planDirectorTurnWithPlanner(
-  input: DirectorTurnInput,
-  planner: typeof structured<DirectorTurnPlan>,
-): Promise<DirectorTurnPlanResult> {
-  const started = new Date();
-  const context: DirectorToolContext = {
-    orgId: input.orgId,
-    workspaceId: input.workspaceId,
-    captureSessionId: input.captureSessionId,
-    userId: input.userId,
-  };
-  const statePromise = readInterviewState(context);
-  const recentTurnsPromise = readRecentTurns(context);
-  const candidateSummariesPromise = readCandidateSummaries(context);
-  const state = await statePromise;
-  const [currentSlots, recentTurns, candidateSummaries] = await Promise.all([
-    readCurrentSlots(context, {
-      candidateProcessId: state.focusCandidateProcessId,
-    }),
-    recentTurnsPromise,
-    candidateSummariesPromise,
-  ]);
-  const promptBlocks = buildPromptCacheBlocks({
-    currentSlots,
-    recentTurns,
-    latestUtterance: input.latestUtterance,
-    evidenceIds: input.evidenceIds,
-    currentPhase: state.currentPhase,
-    lowInfoTurnCount: state.lowInfoTurnCount,
-    lastNewSlotTurnIndex: state.lastNewSlotTurnIndex,
-    candidateProcesses: candidateSummaries,
-  });
-
-  const deterministicPlan = deterministicTurnPlan({
-    latestUtterance: input.latestUtterance,
-    evidenceIds: input.evidenceIds,
-    currentSlots,
-    currentPhase: state.currentPhase,
-    candidateProcessNames: candidateSummaries.map((candidate) => candidate.proposedName),
-    priorIntent: state.priorIntent,
-    lowInfoTurnCount: state.lowInfoTurnCount,
-    lastNewSlotTurnIndex: state.lastNewSlotTurnIndex,
-    turnIndex: input.turnIndex,
-  });
-  let plan: DirectorTurnPlan = deterministicPlan;
-  let degradedQuality = false;
-  const degradedReasons: string[] = [];
-  let llmResult:
-    | Awaited<ReturnType<typeof structured<DirectorTurnPlan>>>
-    | undefined;
-  try {
-    llmResult = await planner({
-      prompt_template_id: "director.turn.plan",
-      prompt_template_version: "1",
-      schema_name: "director-turn-plan",
-      schema: directorTurnPlanSchema,
-      input: "",
-      static_input: promptBlocks.staticBlock,
-      dynamic_input: promptBlocks.dynamicBlock,
-      anthropic_tool: {
-        name: "emit_director_turn_plan",
-        description:
-          "Emit the validated director interview turn plan, including extracted facts, slot updates, claims, phase, and next intent.",
-        input_schema: directorTurnPlanAnthropicToolSchema(),
-      },
-      mock: plan,
-    });
-    degradedQuality = llmResult.metadata.mocked;
-    if (llmResult.metadata.mocked) {
-      degradedReasons.push("llm_mocked");
-    }
-    plan = applyDeterministicFallbackForMockedResult(
-      llmResult.value,
-      deterministicPlan,
-      llmResult.metadata,
-    );
-  } catch (error) {
-    degradedQuality = true;
-    degradedReasons.push(structuredExtractionFailureReason(error));
-    plan = {
-      utterance_type: "partial_answer",
-      slot_updates: input.evidenceIds.map((evidenceId) => ({
-        slot_path: "scope.boundaries",
-        status: "pending_re_extract" as const,
-        confidence: 0,
-        evidence_ids: [evidenceId],
-        priority: slotPriority("scope.boundaries"),
-      })),
-      claims: [],
-      tool_calls: [],
-      contradiction_signals: [
-        error instanceof Error ? error.message : "structured_extraction_failed",
-      ],
-      current_phase: state.currentPhase,
-      proposed_next_phase: state.currentPhase,
-      phase_transition_ready: false,
-      ranked_intents: [
-        intent("discover_function", "function.name", 100, "Structured extraction failed."),
-      ],
-      chosen_intent: intent(
-        "discover_function",
-        "function.name",
-        100,
-        "Structured extraction failed.",
-        undefined,
-        "degraded",
-      ),
-      planned_agent_utterance: deterministicPlan.planned_agent_utterance,
-    };
-  }
-
-  plan = await applyDirectorController(
-    context,
-    plan,
-    input.turnIndex,
-    state,
-    input.evidenceIds,
-  );
-  const metadata = llmResult?.metadata ?? fallbackMetadata("director.turn.plan", started);
-  return {
-    plan,
-    degraded_quality: degradedQuality,
-    degraded_reasons: uniqueStrings(degradedReasons),
-    metadata,
-    started_at: started,
-  };
-}
-
 async function planDirectorTurnWithExtractionPlanner(
   input: DirectorTurnInput,
   planner: typeof structured<LooseSlotExtraction>,
@@ -680,6 +520,7 @@ async function planDirectorTurnWithExtractionPlanner(
     };
   }
 
+  plan = mergeDeterministicExtractions(plan, deterministicPlan);
   const metadata = llmResult?.metadata ?? fallbackMetadata("director.turn.extract", started);
   return {
     plan,
@@ -881,7 +722,7 @@ export function mergeDeterministicExtractions(
       const hasInvalidEvidence = existing.evidence_ids.some(
         (evidenceId) => !deterministicEvidenceIds.has(evidenceId),
       );
-      if (hasInvalidEvidence) {
+      if (hasInvalidEvidence || shouldPreferDeterministicSlot(slotUpdate)) {
         mergedSlotUpdates[existingIndex] = slotUpdate;
       }
       continue;
@@ -917,6 +758,25 @@ export function mergeDeterministicExtractions(
     slot_updates: mergedSlotUpdates,
     tool_calls: mergedToolCalls,
   };
+}
+
+function shouldPreferDeterministicSlot(
+  slotUpdate: DirectorTurnPlan["slot_updates"][number],
+) {
+  if (
+    slotUpdate.slot_path !== "scope.boundaries" &&
+    slotUpdate.slot_path !== "ownership.roles"
+  ) {
+    return false;
+  }
+  if (slotUpdate.status !== "filled") return false;
+  const value = slotUpdate.value;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (slotUpdate.slot_path === "scope.boundaries") {
+    return Array.isArray(record.process_names) && record.process_names.length > 0;
+  }
+  return Array.isArray(record.roles) && record.roles.length > 0;
 }
 
 function deterministicSlotExtraction(plan: DirectorTurnPlan): LooseSlotExtraction {
@@ -1196,7 +1056,7 @@ export async function dispatchDirectorTurnPlan(
       const candidate = await recordProcess(
         context,
         {
-          name: processName,
+          name: normalizeProcessName(processName),
           proposedFunction: stringArg(args.proposedFunction),
           frequency: stringArg(args.frequency),
           complexityHint: stringArg(args.complexityHint),
@@ -5069,6 +4929,16 @@ function titleCase(value: string) {
 }
 
 function toolCallIdentity(toolCall: DirectorTurnPlan["tool_calls"][number]) {
+  if (toolCall.name === "recordCandidateProcessClaim") {
+    const target =
+      stringArg(toolCall.arguments.targetProcess) ??
+      stringArg(toolCall.arguments.candidateProcessName) ??
+      stringArg(toolCall.arguments.processName) ??
+      stringArg(toolCall.arguments.candidateProcessId) ??
+      "";
+    const field = stringArg(toolCall.arguments.field) ?? "";
+    return `${toolCall.name}:${target.toLowerCase()}:${field.toLowerCase()}:${stableStringify(toolCall.arguments.value ?? toolCall.arguments.text ?? toolCall.arguments.name ?? "")}`;
+  }
   const name = stringArg(toolCall.arguments.name)?.toLowerCase() ?? "";
   return `${toolCall.name}:${name}`;
 }

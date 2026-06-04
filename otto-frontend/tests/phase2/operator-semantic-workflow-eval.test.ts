@@ -7,6 +7,7 @@ import type { ProcessGraph } from "@/lib/types/graph";
 import type { WorkflowSemanticModel } from "@/lib/workflow/semantic-model";
 import { validateWorkflowSemanticModel } from "@/lib/workflow/semantic-validation";
 import { workflowSemanticModelToGraph } from "@/lib/workflow/semantic-to-graph";
+import { reportEvalScores } from "../evals/report";
 
 type BusinessWorkflowFixture = {
   minimums: {
@@ -57,6 +58,48 @@ describe("operator semantic workflow business-map evals", () => {
       });
 
     const average = averageScores(scores);
+    reportEvalScores({
+      suite: "operator.semantic-workflow",
+      fixture: "../evals/operator/business-workflow-fixtures.json",
+      cases: scores.length,
+      metrics: [
+        {
+          name: "business_step_recall",
+          score: average.business_step_recall,
+          minimum: fixture.minimums.business_step_recall,
+        },
+        {
+          name: "decision_recall",
+          score: average.decision_recall,
+          minimum: fixture.minimums.decision_recall,
+        },
+        {
+          name: "wait_recall",
+          score: average.wait_recall,
+          minimum: fixture.minimums.wait_recall,
+        },
+        {
+          name: "exception_loop_recall",
+          score: average.exception_loop_recall,
+          minimum: fixture.minimums.exception_loop_recall,
+        },
+        {
+          name: "technical_artifact_leakage_rate",
+          score: average.technical_artifact_leakage_rate,
+          minimum: fixture.minimums.technical_artifact_leakage_rate,
+        },
+        {
+          name: "hallucinated_evidence_id_count",
+          score: average.hallucinated_evidence_id_count,
+          minimum: fixture.minimums.hallucinated_evidence_id_count,
+        },
+        {
+          name: "unresolved_topology_target_count",
+          score: average.unresolved_topology_target_count,
+          minimum: fixture.minimums.unresolved_topology_target_count,
+        },
+      ],
+    });
     expect(average.business_step_recall).toBeGreaterThanOrEqual(
       fixture.minimums.business_step_recall,
     );

@@ -10,6 +10,7 @@ import {
   redactions,
 } from "@/lib/db/schema";
 import { deleteArtifactObject } from "@/lib/adapters/storage";
+import { REDACTION_FAILURE_FOLLOW_UP_DESCRIPTION } from "@/lib/processes/follow-up-presentation";
 import { sanitizeForLogs } from "@/lib/security/sanitize";
 
 export type OperatorRedactionInput = {
@@ -367,7 +368,7 @@ async function markOperatorRedactionFailed(
   input: OperatorRedactionInput,
   error: unknown,
 ) {
-  const message = sanitizeForLogs(
+  const internalMessage = sanitizeForLogs(
     error instanceof Error ? error.message : "Unknown redaction error",
   );
   await getDb().transaction(async (tx) => {
@@ -376,7 +377,7 @@ async function markOperatorRedactionFailed(
       .update(redactions)
       .set({
         status: "failed",
-        failureReason: message,
+        failureReason: internalMessage,
         updatedAt: new Date(),
       })
       .where(
@@ -392,7 +393,7 @@ async function markOperatorRedactionFailed(
       captureSessionId: input.captureSessionId,
       taskType: "redaction_failure",
       title: "Operator capture redaction failed",
-      description: message,
+      description: REDACTION_FAILURE_FOLLOW_UP_DESCRIPTION,
       targetType: "redaction",
       targetId: input.redactionId,
       priority: "1.0",
@@ -400,6 +401,8 @@ async function markOperatorRedactionFailed(
       assignedToUserId: input.userId,
       contextJson: {
         redaction_id: input.redactionId,
+        reason: "redaction_failed",
+        internal_failure_detail: internalMessage,
         idempotency_key: input.idempotencyKey,
       },
     });

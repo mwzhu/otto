@@ -336,6 +336,11 @@ describe("Phase 2 operator capture contract", () => {
     expect(completeRoute).toContain("tool_calls->>'artifact_id'");
     expect(completeRoute).toContain("artifact_id = ${input.artifactId}");
     expect(completeRoute).toContain("metadata_json->>'artifact_id'");
+    expect(completeRoute).toContain("assertAllOperatorExtractionTerminal");
+    expect(completeRoute).toContain("operator_extraction_windows");
+    expect(completeRoute).toContain("stage_name = 'operator.turn'");
+    expect(completeRoute).toContain("extraction_pending");
+    expect(completeRoute).toContain("extraction_failed");
     expect(completeRoute).toContain(
       'eq(captureSessions.captureType, "operator_interview")',
     );
@@ -376,6 +381,14 @@ describe("Phase 2 operator capture contract", () => {
     expect(redactionsRoute).toContain("shouldSendEvent: true");
     expect(redactionsRoute).toContain("transcriptSegments");
     expect(redactionsRoute).toContain("screenEvents");
+    expect(redactionsRoute).toContain(
+      "Redaction failed; retry before using this capture.",
+    );
+    expect(redactionsRoute).toContain("markRedactionEnqueueFailed");
+    expect(redactionsRoute).toContain("followUpTasks");
+    expect(redactionsRoute).toContain('taskType: "redaction_failure"');
+    expect(redactionsRoute).toContain('"redaction_enqueue_failed"');
+    expect(redactionsRoute).toContain("statusCode: 503");
     expect(redactionsRoute).toContain("deletedAt: new Date()");
     expect(redactionsRoute).toContain("capture.operator.redacted");
     expect(redactionsRoute).toContain("last_seconds");
@@ -410,6 +423,9 @@ describe("Phase 2 operator capture contract", () => {
     const operatorRedaction = read("lib/redactions/operator-redaction.ts");
     const storage = read("lib/adapters/storage.ts");
     const localUpload = read("lib/adapters/local-upload.ts");
+    const screenFrameRoute = read(
+      "app/api/processes/[processId]/operator-captures/[captureSessionId]/screen-frames/route.ts",
+    );
     const screenFrameVision = read("lib/vision/operator-screen-frame.ts");
     const visionAdapter = read("lib/adapters/vision.ts");
 
@@ -672,6 +688,11 @@ describe("Phase 2 operator capture contract", () => {
     expect(operatorRedaction).toContain("UPDATE process_versions");
     expect(operatorRedaction).toContain("stripEvidenceIdsFromJson");
     expect(operatorRedaction).toContain("capture.operator.redaction_completed");
+    expect(operatorRedaction).toContain(
+      "REDACTION_FAILURE_FOLLOW_UP_DESCRIPTION",
+    );
+    expect(operatorRedaction).toContain('reason: "redaction_failed"');
+    expect(operatorRedaction).toContain("internal_failure_detail");
     expect(storage).toContain("DeleteObjectCommand");
     expect(storage).toContain("deleteArtifactObject");
     expect(localUpload).toContain("deleteLocalUpload");
@@ -685,6 +706,8 @@ describe("Phase 2 operator capture contract", () => {
     expect(screenFrameVision).toContain(
       "capture.operator.screen_frame_vision_processed",
     );
+    expect(screenFrameRoute).toContain("Screen keyframe was saved");
+    expect(screenFrameRoute).toContain("warning: backgroundWarning");
     expect(visionAdapter).toContain("analyzeScreenFrame");
     expect(visionAdapter).toContain("deriveScreenSignalTags");
     expect(visionAdapter).toContain("deterministic-screen-vision");
@@ -701,6 +724,9 @@ describe("Phase 2 operator capture contract", () => {
     const summaryTab = read("components/workspace/tabs/SummaryTab.tsx");
     const insightsTab = read("components/workspace/tabs/InsightsTab.tsx");
     const riskTab = read("components/workspace/tabs/RiskTab.tsx");
+    const followUpPresentation = read(
+      "lib/processes/follow-up-presentation.ts",
+    );
     const graphTypes = read("lib/types/graph.ts");
     const graphQueries = read("lib/processes/graph-queries.ts");
     const processQueries = read("lib/processes/queries.ts");
@@ -757,6 +783,7 @@ describe("Phase 2 operator capture contract", () => {
     expect(summaryTab).toContain("Draft warnings");
     expect(summaryTab).toContain("Open follow-ups");
     expect(summaryTab).toContain("FollowUpSummaryItem");
+    expect(summaryTab).toContain("followUpDescriptionForDisplay");
     expect(insightsTab).toContain("Generated narrative");
     expect(insightsTab).toContain("buildInsights");
     expect(insightsTab).toContain("Systems touched");
@@ -765,6 +792,12 @@ describe("Phase 2 operator capture contract", () => {
     expect(riskTab).toContain("Risk follow-ups");
     expect(riskTab).toContain("redaction_failure");
     expect(riskTab).toContain("contradiction|gap|low_confidence|redaction");
+    expect(riskTab).toContain("followUpDescriptionForDisplay");
+    expect(followUpPresentation).toContain(
+      "REDACTION_FAILURE_FOLLOW_UP_DESCRIPTION",
+    );
+    expect(followUpPresentation).toContain("failed query");
+    expect(followUpPresentation).toContain("params:");
     expect(graphTypes).toContain("summary?: string | null");
     expect(graphQueries).toContain("version_id: version.version_id");
     expect(graphQueries).toContain(
@@ -968,7 +1001,8 @@ describe("Phase 2 operator capture contract", () => {
     expect(brain).toContain("clarify_observed_workaround");
     expect(brain).toContain("stream_cutoff");
     expect(brain).toContain("deterministicOperatorTurnPlan");
-    expect(brain).toContain('stageName: "operator.turn"');
+    expect(brain).toContain("decisionStageName?: string");
+    expect(brain).toContain('stageName: input.decisionStageName ?? "operator.turn"');
     expect(brain).toContain("planned_agent_utterance");
     expect(brain).toContain("llm_call_elided: options.llmCallElided ?? true");
     expect(brain).toContain("OTTO_OPERATOR_USE_SEPARATE_VOICE_LLM");
@@ -977,6 +1011,7 @@ describe("Phase 2 operator capture contract", () => {
     expect(brain).toContain("@/lib/interview/_core/utterance");
     expect(realtimeCore).toContain("limitToSingleQuestion");
     expect(aiModels).toContain("OPERATOR_BRAIN_MODEL");
+    expect(aiModels).toContain("OPERATOR_VOICE_MODEL");
     expect(aiModels).toContain("OPERATOR_WORKFLOW_MODEL");
     expect(aiModels).toContain(
       'promptTemplateId.startsWith("operator.workflow_")',
@@ -992,8 +1027,10 @@ describe("Phase 2 operator capture contract", () => {
       "OTTO_OPERATOR_ALLOW_DETERMINISTIC_WORKFLOW_FALLBACK",
     );
     expect(env).toContain("OPERATOR_BRAIN_MODEL");
+    expect(env).toContain("OPERATOR_VOICE_MODEL");
     expect(env).toContain("OPERATOR_WORKFLOW_MODEL");
     expect(frontendEnvExample).toContain("OPERATOR_BRAIN_MODEL");
+    expect(frontendEnvExample).toContain("OPERATOR_VOICE_MODEL");
     expect(frontendEnvExample).toContain("OPERATOR_WORKFLOW_MODEL");
     expect(frontendEnvExample).toContain(
       'OTTO_OPERATOR_USE_SEPARATE_VOICE_LLM="false"',
@@ -1002,6 +1039,7 @@ describe("Phase 2 operator capture contract", () => {
       'OTTO_OPERATOR_ALLOW_DETERMINISTIC_WORKFLOW_FALLBACK="false"',
     );
     expect(operatorEnvExample).toContain("OPERATOR_BRAIN_MODEL");
+    expect(operatorEnvExample).toContain("OPERATOR_VOICE_MODEL");
     expect(operatorEnvExample).toContain("OPERATOR_WORKFLOW_MODEL");
     expect(operatorEnvExample).toContain(
       'OTTO_OPERATOR_USE_SEPARATE_VOICE_LLM="false"',

@@ -15,6 +15,7 @@ import type { ProcessGraph } from "@/lib/types";
 import type { ProcessFollowUpTask } from "@/lib/processes/follow-up-queries";
 import type { ProcessGraphVersionSummary } from "@/lib/processes/graph-queries";
 import type { WorkspaceTab } from "@/lib/store/workspace";
+import type { ImpactOpportunity } from "@/components/workspace/tabs/ImpactTab";
 
 const ProcessCanvas = dynamic(
   () => import("@/components/canvas/ProcessCanvas").then((m) => m.ProcessCanvas),
@@ -27,6 +28,8 @@ export default function WorkspaceClient({
   graph,
   graphVersions,
   followUps = [],
+  impactOpportunities = [],
+  opportunitySource,
   initialTab,
   counts,
   canApproveDraft,
@@ -36,6 +39,8 @@ export default function WorkspaceClient({
   graph: ProcessGraph;
   graphVersions?: ProcessGraphVersionSummary[];
   followUps?: ProcessFollowUpTask[];
+  impactOpportunities?: ImpactOpportunity[];
+  opportunitySource?: "agent" | "heuristic";
   initialTab: WorkspaceTab;
   counts: Partial<Record<WorkspaceTab, number>>;
   canApproveDraft: boolean;
@@ -149,7 +154,13 @@ export default function WorkspaceClient({
           {active === "steps" && (
             <StepsTab workspaceId={workspaceId} processId={processId} graph={graph} />
           )}
-          {active === "impact" && <ImpactTab processId={processId} />}
+          {active === "impact" && (
+            <ImpactTab
+              processId={processId}
+              opportunities={impactOpportunities}
+              source={opportunitySource}
+            />
+          )}
           {active === "insights" && (
             <InsightsTab
               processId={processId}

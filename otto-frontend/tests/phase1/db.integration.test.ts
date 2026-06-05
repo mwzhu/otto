@@ -2018,7 +2018,7 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
           )
           VALUES
             (
-              'd4d4d4d4-d4d4-5d4d-8d4d-d4d4d4d4d4d4',
+              'e4e4e4e4-e4e4-5e4e-8e4e-e4e4e4e4e4e4',
               $1,
               $2,
               $3,
@@ -2031,7 +2031,7 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
               '{"planned_utterance":"Planned completed line.","delivered_utterance":"Delivered completed line.","delivery_status":"completed","spoken_fraction":1}'::jsonb
             ),
             (
-              'd5d5d5d5-d5d5-5d5d-8d5d-d5d5d5d5d5d5',
+              'e5e5e5e5-e5e5-5e5e-8e5e-e5e5e5e5e5e5',
               $1,
               $2,
               $3,
@@ -2044,7 +2044,7 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
               '{"planned_utterance":"Pending reload line.","delivery_status":"pending","spoken_fraction":0}'::jsonb
             ),
             (
-              'd6d6d6d6-d6d6-5d6d-8d6d-d6d6d6d6d6d6',
+              'e6e6e6e6-e6e6-5e6e-8e6e-e6e6e6e6e6e6',
               $1,
               $2,
               $3,
@@ -2057,7 +2057,7 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
               '{"planned_utterance":"Full interrupted reload line.","delivered_utterance":"","delivery_status":"truncated","spoken_fraction":0}'::jsonb
             ),
             (
-              'd7d7d7d7-d7d7-5d7d-8d7d-d7d7d7d7d7d7',
+              'e7e7e7e7-e7e7-5e7e-8e7e-e7e7e7e7e7e7',
               $1,
               $2,
               $3,
@@ -2099,8 +2099,10 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
       await appClient.query(
         `DELETE FROM agent_decision_log
           WHERE id IN (
-            'd4d4d4d4-d4d4-5d4d-8d4d-d4d4d4d4d4d4',
-            'd5d5d5d5-d5d5-5d5d-8d5d-d5d5d5d5d5d5'
+            'e4e4e4e4-e4e4-5e4e-8e4e-e4e4e4e4e4e4',
+            'e5e5e5e5-e5e5-5e5e-8e5e-e5e5e5e5e5e5',
+            'e6e6e6e6-e6e6-5e6e-8e6e-e6e6e6e6e6e6',
+            'e7e7e7e7-e7e7-5e7e-8e7e-e7e7e7e7e7e7'
           )`,
       );
 

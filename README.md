@@ -13,6 +13,12 @@ automation plan with ROI estimates.
 
 ---
 
+## Demo
+
+[coming soon]
+
+---
+
 ## Product Design
 
 Otto mirrors how a good consultant works: breadth first, then depth.

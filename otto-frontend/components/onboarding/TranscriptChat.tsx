@@ -768,6 +768,8 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
     return <NoActiveSession onStart={() => router.push("/onboarding/voice")} />;
   }
 
+  const telemetryPills = telemetryMetrics(lastTelemetry);
+
   return (
     <div className="mx-auto grid w-full max-w-[1040px] gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
       <section className="flex min-h-[620px] flex-col rounded-lg border border-subtle bg-surface shadow-card">
@@ -961,6 +963,18 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
               {turnWaitMessage}
             </p>
           )}
+          {telemetryPills.length > 0 && (
+            <div className="flex flex-wrap gap-2 text-[11px] text-ink-muted">
+              {telemetryPills.map((pill) => (
+                <span
+                  key={pill.label}
+                  className="rounded-md border border-subtle bg-muted px-2 py-1"
+                >
+                  {pill.label}: {pill.value}
+                </span>
+              ))}
+            </div>
+          )}
           <div className="flex flex-col gap-2 sm:flex-row">
             <Button
               type="button"
@@ -1084,6 +1098,25 @@ function NoActiveSession({ onStart }: { onStart: () => void }) {
       </Button>
     </div>
   );
+}
+
+function telemetryMetrics(telemetry: TurnTelemetry | null) {
+  if (!telemetry) return [];
+  const latency = telemetry.latency_ms ?? {};
+  const metrics = [
+    { label: "pre-TTS", value: latency.pre_tts_total_ms },
+    { label: "TTFA", value: latency.ttfa_ms },
+    { label: "speech", value: latency.speech_latency_ms },
+    { label: "extract", value: latency.extraction_latency_ms },
+  ];
+  return metrics
+    .filter((metric): metric is { label: string; value: number } =>
+      typeof metric.value === "number",
+    )
+    .map((metric) => ({
+      label: metric.label,
+      value: `${Math.round(metric.value)}ms`,
+    }));
 }
 
 function mergeTranscriptMessages(

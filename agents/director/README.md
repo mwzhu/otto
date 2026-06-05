@@ -44,7 +44,7 @@ uv run otto-director-agent download-files
 uv run --no-sync python -m director_agent.schema_contract
 ../../scripts/with-env.sh .env -- uv run --no-sync otto-director-preflight
 ../../scripts/with-env.sh .env -- uv run --no-sync otto-director-preflight --strict
-../../scripts/with-env.sh .env -- uv run --no-sync python -m director_agent.proof_readiness --app-env-file ../../.env.local --worker-env-file .env --allow-runtime-overrides
+../../scripts/with-env.sh .env -- uv run --no-sync python -m director_agent.proof_readiness --app-env-file ../../otto-frontend/.env.local --worker-env-file .env --allow-runtime-overrides
 OTTO_CAPTURE_SESSION_ID=<existing-director-capture-session-id> ../../scripts/with-env.sh .env -- uv run --no-sync otto-director-turn-smoke
 OTTO_CAPTURE_SESSION_ID=<completed-director-capture-session-id> ../../scripts/with-env.sh .env -- uv run --no-sync otto-director-session-verify
 ../../scripts/with-env.sh .env -- uv run --no-sync otto-director-agent start
@@ -179,7 +179,7 @@ path.
    ```bash
    cd agents/director
    ../../scripts/with-env.sh .env -- uv run --no-sync python -m director_agent.proof_readiness \
-     --app-env-file ../../.env.local \
+     --app-env-file ../../otto-frontend/.env.local \
      --worker-env-file .env \
      --allow-runtime-overrides
    ```
@@ -213,7 +213,7 @@ path.
    OTTO_CAPTURE_SESSION_ID=<completed-director-capture-session-id> \
      ../../scripts/with-env.sh .env -- uv run --no-sync otto-director-session-verify \
        --env-file .env \
-       --app-env-file ../../.env.local \
+      --app-env-file ../../otto-frontend/.env.local \
        --strict-voice-env
    ```
 
@@ -280,5 +280,5 @@ structured preflight bundle naming the missing env vars instead of raising a tra
 For the final production proof, run it with `--strict-voice-env`; that mode also requires the full
 LiveKit/provider/privacy configuration before reading the persisted session evidence, so a passing
 verification cannot accidentally skip the provider setup gate. Use the wrapper with
-`--env-file .env` and `--app-env-file ../../.env.local`, as shown in the production proof runbook,
+`--env-file .env` and `--app-env-file ../../otto-frontend/.env.local`, as shown in the production proof runbook,
 so the verifier sees both shared root config and director overrides.

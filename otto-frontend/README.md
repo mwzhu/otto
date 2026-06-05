@@ -48,7 +48,7 @@ cd ../agents/director
 OTTO_CAPTURE_SESSION_ID=<completed-director-capture-session-id> \
   ../../scripts/with-env.sh .env -- uv run --no-sync otto-director-session-verify \
     --env-file .env \
-    --app-env-file ../../.env.local \
+    --app-env-file ../../otto-frontend/.env.local \
     --strict-voice-env
 ```
 

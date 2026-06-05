@@ -909,7 +909,7 @@ class WorkerContractTests(unittest.TestCase):
         )
 
     def test_internal_api_client_allows_long_planner_streams(self) -> None:
-        source = Path("agents/director/director_agent/otto_api.py").read_text()
+        source = (Path(__file__).resolve().parents[1] / "director_agent/otto_api.py").read_text()
 
         self.assertIn("INTERNAL_API_TIMEOUT_SECONDS = 120.0", source)
         self.assertIn("httpx.Timeout(", source)

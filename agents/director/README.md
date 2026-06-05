@@ -44,10 +44,12 @@ uv run otto-director-agent download-files
 uv run --no-sync python -m director_agent.schema_contract
 ../../scripts/with-env.sh .env -- uv run --no-sync otto-director-preflight
 ../../scripts/with-env.sh .env -- uv run --no-sync otto-director-preflight --strict
+uv run --no-sync otto-director-preflight --env-file .env --strict
 ../../scripts/with-env.sh .env -- uv run --no-sync python -m director_agent.proof_readiness --app-env-file ../../otto-frontend/.env.local --worker-env-file .env --allow-runtime-overrides
 OTTO_CAPTURE_SESSION_ID=<existing-director-capture-session-id> ../../scripts/with-env.sh .env -- uv run --no-sync otto-director-turn-smoke
 OTTO_CAPTURE_SESSION_ID=<completed-director-capture-session-id> ../../scripts/with-env.sh .env -- uv run --no-sync otto-director-session-verify
 ../../scripts/with-env.sh .env -- uv run --no-sync otto-director-agent start
+uv run --no-sync otto-director-agent start --env-file .env
 ```
 
 `scripts/with-env.sh` loads the root `.env.local`, then the service `.env`, then restores any

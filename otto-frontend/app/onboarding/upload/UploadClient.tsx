@@ -19,6 +19,12 @@ type FileRow = {
 
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 const ACCEPTED_FILE_EXTENSIONS = [
+  ".txt",
+  ".text",
+  ".log",
+  ".json",
+  ".yaml",
+  ".yml",
   ".pdf",
   ".doc",
   ".docx",
@@ -33,6 +39,11 @@ const ACCEPTED_FILE_EXTENSIONS = [
   ".gif",
 ];
 const ACCEPTED_FILE_TYPES = [
+  "text/plain",
+  "application/json",
+  "text/yaml",
+  "application/yaml",
+  "application/x-yaml",
   "application/pdf",
   "application/msword",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -45,7 +56,6 @@ const ACCEPTED_FILE_TYPES = [
   "image/webp",
   "image/gif",
 ];
-
 const STAGE_LABEL: Record<Status, string> = {
   queued: "Queued",
   extracting: "Extracting claims",
@@ -121,9 +131,8 @@ export function UploadClient() {
           Upload the docs you already have
         </h1>
         <p className="mx-auto max-w-[520px] text-[13px] leading-relaxed text-ink-secondary">
-          PDF, DOCX, PPTX, XLSX, or images of org charts, SOPs, KPI docs, team
-          overviews, or meeting notes. We&apos;ll extract evidence-anchored
-          claims from each.
+          Upload org charts, SOPs, KPI docs, team overviews, meeting notes, or
+          structured files. We&apos;ll extract evidence-anchored claims from each.
         </p>
       </header>
 
@@ -151,10 +160,11 @@ export function UploadClient() {
           Max 50 MB per file. Org charts, SOPs, KPI docs, team overviews.
         </p>
         <input
+          key="director-document-upload-any-file-v2"
           ref={inputRef}
           type="file"
           multiple
-          accept={ACCEPTED_FILE_EXTENSIONS.join(",")}
+          accept="*/*"
           className="hidden"
           onChange={(e) => addFiles(Array.from(e.target.files ?? []))}
         />
@@ -274,7 +284,7 @@ function validateUploadFile(file: File) {
     return "Unsupported file: files must be 50 MB or smaller.";
   }
   if (!isAcceptedUploadFile(file)) {
-    return "Unsupported file type. Upload PDF, DOCX, PPTX, XLSX, or image files.";
+    return "Unsupported file type. Upload a supported document, structured file, or image.";
   }
   return null;
 }

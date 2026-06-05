@@ -11,13 +11,8 @@ export type CaptureConversationMessage = {
 
 export function ConversationPanel({
   messages = [],
-  runtimeStatus,
-  onRedactRequested,
 }: {
-  paused: boolean;
   messages?: CaptureConversationMessage[];
-  runtimeStatus?: string;
-  onRedactRequested: () => Promise<void> | void;
 }) {
   return (
     <div className="flex h-full flex-col">
@@ -25,13 +20,6 @@ export function ConversationPanel({
         <div className="text-[13px] font-semibold tracking-tight text-ink">
           Conversation
         </div>
-        <button
-          type="button"
-          onClick={onRedactRequested}
-          className="rounded-md border border-subtle bg-surface px-2 py-1 text-[10.5px] font-medium text-ink-secondary transition hover:border-ink-muted hover:text-ink"
-        >
-          Redact last 30s
-        </button>
       </header>
       <div className="flex-1 overflow-y-auto px-4 py-4">
         {messages.length === 0 ? (
@@ -47,11 +35,6 @@ export function ConversationPanel({
                 Operator transcript, Otto questions, and capture notices will
                 appear here as the live worker processes the session.
               </p>
-              {runtimeStatus && (
-                <p className="mt-3 font-mono text-[11px] text-ink-muted">
-                  {runtimeStatus}
-                </p>
-              )}
             </div>
           </div>
         ) : (

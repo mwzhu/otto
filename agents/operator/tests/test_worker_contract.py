@@ -14,6 +14,7 @@ from otto_realtime_core import (
     text_content,
 )
 from operator_agent.agent import OperatorWorkflowAgent
+from operator_agent.config import OperatorAgentConfig
 from operator_agent.otto_api import IngestedTurn, RespondedTurn
 from operator_agent.worker import operator_worker_http_port
 
@@ -33,6 +34,21 @@ class OperatorWorkerContractTests(unittest.TestCase):
             clear=True,
         ):
             self.assertEqual(operator_worker_http_port(), 8092)
+
+    def test_operator_endpointing_defaults_leave_longer_room_for_narration(self) -> None:
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "OTTO_INTERNAL_API_BASE_URL": "http://localhost:3000",
+                "LIVEKIT_AGENT_SERVICE_TOKEN": "service-token",
+                "OTTO_USE_LIVEKIT_INFERENCE": "true",
+            },
+            clear=True,
+        ):
+            config = OperatorAgentConfig.from_env()
+
+        self.assertEqual(config.endpointing_min_delay, 2.2)
+        self.assertEqual(config.endpointing_max_delay, 8.0)
 
     def test_shared_realtime_core_covers_operator_worker_primitives(self) -> None:
         self.assertEqual(text_content(SimpleNamespace(content=["Copy", "invoice"])), "Copy invoice")

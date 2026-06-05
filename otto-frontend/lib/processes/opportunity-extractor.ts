@@ -36,7 +36,7 @@ export async function extractAutomationOpportunities(input: {
   mock?: unknown;
 }): Promise<OpportunityExtraction> {
   const promptTemplateId = "synthesis.opportunities";
-  const promptTemplateVersion = "1";
+  const promptTemplateVersion = "2";
   const promptInput = opportunityEvidencePackToPrompt(input.pack);
   const staticInput = buildOpportunityStaticInput();
   const preflightModelId = await preflightAnthropicModelForPrompt(promptTemplateId);
@@ -76,6 +76,9 @@ function buildOpportunityStaticInput() {
   return [
     "You are Otto's automation strategist.",
     "Return the highest-ROI automation opportunities as structured data.",
+    "For each opportunity, write implementation_plan as the concrete automation-agent architecture for this process: triggers, inputs, systems, controls, exception handling, and human review.",
+    "For each opportunity, write expected_result as process-specific business impact using cycle-time, hours, error, exception, SLA, capacity, or working-capital metrics.",
+    "Avoid generic transformation text; tie the problem, implementation_plan, and expected_result to this department's process evidence.",
     "Never output dollars, prices, savings, gross_value, annual_*_value, or net_score.",
     "Estimate operational quantities only: annual volume, minutes saved per case, error rate, and exception rate.",
     "Each evidence-based operational quantity must cite evidence_ids present in the pack.",
@@ -129,6 +132,8 @@ const automationOpportunityAnthropicToolSchema = {
           title: { type: "string" },
           problem: { type: "string" },
           proposed_solution: { type: "string" },
+          implementation_plan: { type: "string" },
+          expected_result: { type: "string" },
           current_state: { type: "string" },
           target_state: { type: "string" },
           automation_type: {
@@ -168,6 +173,8 @@ const automationOpportunityAnthropicToolSchema = {
           "title",
           "problem",
           "proposed_solution",
+          "implementation_plan",
+          "expected_result",
           "current_state",
           "target_state",
           "automation_type",

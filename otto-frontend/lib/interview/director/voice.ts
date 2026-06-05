@@ -1,6 +1,6 @@
 import "server-only";
 
-import { generate, type Generation } from "@/lib/adapters/llm";
+import { generate, generateStream, type Generation } from "@/lib/adapters/llm";
 import { getServerEnv } from "@/lib/env";
 import { limitToSingleQuestion } from "@/lib/interview/_core/utterance";
 import { fallbackProbeForSlot, type ProbeIntent } from "@/lib/interview/director/probe-library";
@@ -36,6 +36,7 @@ export async function phraseDirectorTurnDetailed(input: {
   coverageSummary: string;
   focusProcessName?: string;
   forceSeparateVoiceLlm?: boolean;
+  onTextDelta?: (delta: string, textSoFar: string) => void | Promise<void>;
 }): Promise<PhrasedDirectorTurn> {
   const started = Date.now();
   const fallback = limitToSingleQuestion(deterministicPhrase(input.plan, input.focusProcessName));
@@ -71,7 +72,7 @@ export async function phraseDirectorTurnDetailed(input: {
   }
 
   try {
-    const result = await generate({
+    const commonInput = {
       prompt_template_id: "director.voice.phrase-intent",
       prompt_template_version: "1",
       static_input: [
@@ -93,7 +94,13 @@ export async function phraseDirectorTurnDetailed(input: {
         .filter(Boolean)
         .join("\n"),
       input: "Return only the next sentence(s) Otto should say. No JSON.",
-    });
+    };
+    const result = input.onTextDelta
+      ? await generateStream({
+          ...commonInput,
+          onTextDelta: input.onTextDelta,
+        })
+      : await generate(commonInput);
     const utterance = limitToSingleQuestion(result.text.trim() || fallback);
     return {
       utterance,

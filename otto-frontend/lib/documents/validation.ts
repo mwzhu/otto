@@ -11,6 +11,9 @@ const supportedDocumentTypes = new Map<string, string[]>([
   ["text/markdown", [".md", ".markdown"]],
   ["text/csv", [".csv"]],
   ["application/json", [".json"]],
+  ["text/yaml", [".yaml", ".yml"]],
+  ["application/yaml", [".yaml", ".yml"]],
+  ["application/x-yaml", [".yaml", ".yml"]],
   ["application/pdf", [".pdf"]],
   [
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -100,7 +103,7 @@ export function validateDocumentUploadMetadata(input: {
     throw new ApiError(
       400,
       "bad_request",
-      `${mimeType} requires configured document parsing and public artifact storage. Use TXT, Markdown, CSV, or JSON for local dev without vendor storage.`,
+      `${mimeType} requires configured document parsing and public artifact storage. Use TXT, Markdown, CSV, JSON, or YAML for local dev without vendor storage.`,
     );
   }
   return { mimeType };
@@ -112,6 +115,9 @@ export function isLocallyTextParsable(mimeType: string) {
     "text/markdown",
     "text/csv",
     "application/json",
+    "text/yaml",
+    "application/yaml",
+    "application/x-yaml",
   ].includes(mimeType.toLowerCase());
 }
 

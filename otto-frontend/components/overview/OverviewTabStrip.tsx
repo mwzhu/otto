@@ -2,7 +2,7 @@
 
 import { cn } from "@/lib/cn";
 
-export type OverviewTab = "overview" | "team";
+export type OverviewTab = "overview" | "automation";
 
 export function OverviewTabStrip({
   active,
@@ -13,7 +13,7 @@ export function OverviewTabStrip({
 }) {
   const tabs: { id: OverviewTab; label: string }[] = [
     { id: "overview", label: "Overview" },
-    { id: "team", label: "Team responsibilities" },
+    { id: "automation", label: "Automation" },
   ];
   return (
     <div className="flex items-center gap-1 border-b border-subtle">

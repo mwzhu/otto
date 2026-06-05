@@ -373,7 +373,7 @@ export async function buildDirectorSteeringPlan(
       ]),
       forbidden_claims: [
         "Do not invent systems, owners, frequencies, risks, metrics, or process names.",
-        "Do not claim structured notes are complete until extraction confirms them.",
+        "Do not claim Operations Notes are complete until extraction confirms them.",
       ],
       required_style:
         "Acknowledge briefly, ask one concrete follow-up, and keep the response under 45 words.",
@@ -401,6 +401,9 @@ export function nonAuthoritativeDirectorSteeringPlan(
 
 export async function phraseDirectorSteeringTurn(
   input: DirectorSteeringPlanResult,
+  options: {
+    onTextDelta?: (delta: string, textSoFar: string) => void | Promise<void>;
+  } = {},
 ) {
   return phraseDirectorTurnDetailed({
     plan: {
@@ -414,6 +417,7 @@ export async function phraseDirectorSteeringTurn(
     coverageSummary: input.coverage_summary,
     focusProcessName: input.focus_process_name,
     forceSeparateVoiceLlm: true,
+    onTextDelta: options.onTextDelta,
   });
 }
 

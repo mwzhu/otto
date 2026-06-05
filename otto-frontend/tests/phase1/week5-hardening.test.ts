@@ -242,6 +242,33 @@ describe("Week 5 hardening contracts", () => {
 
     expect(
       validateDocumentUploadMetadata({
+        filename: "notes.txt",
+        mimeType: "text/plain",
+        sizeBytes: 100,
+        artifactType: "document",
+      }),
+    ).toEqual({ mimeType: "text/plain" });
+
+    expect(
+      validateDocumentUploadMetadata({
+        filename: "process-context.json",
+        mimeType: "application/json",
+        sizeBytes: 100,
+        artifactType: "document",
+      }),
+    ).toEqual({ mimeType: "application/json" });
+
+    expect(
+      validateDocumentUploadMetadata({
+        filename: "process-context.yaml",
+        mimeType: "application/x-yaml",
+        sizeBytes: 100,
+        artifactType: "document",
+      }),
+    ).toEqual({ mimeType: "application/x-yaml" });
+
+    expect(
+      validateDocumentUploadMetadata({
         filename: "notes.md",
         mimeType: "",
         sizeBytes: 100,

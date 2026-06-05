@@ -12,7 +12,7 @@ Speech and extraction become separate systems:
 
 - The fast path decides what Otto should pursue next and phrases a natural response.
 - The extraction path reads transcript windows and updates slots, claims, coverage, and evidence.
-- The DB remains authoritative for structured notes.
+- The DB remains authoritative for Operations Notes.
 - The actually spoken utterance is preserved as spoken.
 - Sonnet extraction can advise future steering, but it does not rewrite history.
 
@@ -21,7 +21,7 @@ Speech and extraction become separate systems:
 - `director.turn.plan` max tokens stays `8000`.
 - No deterministic utterances in the golden path.
 - Deterministic utterances are fallback-only.
-- Fast model phrases naturally but is not authoritative for structured notes.
+- Fast model phrases naturally but is not authoritative for Operations Notes.
 - DB slot/evidence state remains authoritative.
 - Sonnet extraction must never overwrite the actually spoken utterance.
 - Steering intent/goal control is enough; verbatim wording control is not required.
@@ -131,7 +131,7 @@ Window shape:
 
 Extraction idempotency should use the window id or stable transcript segment set, not only a single `turn_index`.
 
-This is important because turn fragmentation should not fragment the structured notes.
+This is important because turn fragmentation should not fragment the Operations Notes.
 
 ## Step 4: Fast Respond Endpoint
 
@@ -199,7 +199,7 @@ Critical rule:
 Extraction must not overwrite spoken_agent_utterance.
 ```
 
-The spoken turn belongs to the fast response path. The extraction path owns structured notes.
+The spoken turn belongs to the fast response path. The extraction path owns Operations Notes.
 
 ## Step 6: Worker Flow
 

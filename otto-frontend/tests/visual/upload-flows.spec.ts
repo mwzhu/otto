@@ -25,7 +25,8 @@ test.describe("document and process upload flows", () => {
       presignCalls += 1;
       const body = await route.request().postDataJSON();
       expect(body).toMatchObject({
-        filename: "returns-sop.pdf",
+        filename: "director-notes.txt",
+        mime_type: "text/plain",
         artifact_type: "document",
       });
       await route.fulfill({
@@ -75,9 +76,9 @@ test.describe("document and process upload flows", () => {
 
     await gotoClean(page, "/onboarding/upload");
     await page.locator('input[type="file"]').setInputFiles({
-      name: "returns-sop.pdf",
-      mimeType: "application/pdf",
-      buffer: Buffer.from("%PDF-1.4\nreturns process\n%%EOF"),
+      name: "director-notes.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("Process: Returns\nOwner: Support Ops"),
     });
     await expect(page.getByText("Done")).toBeVisible();
     await expect(page.getByRole("button", { name: "Continue → Synthesize" })).toBeVisible();

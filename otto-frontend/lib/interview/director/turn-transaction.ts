@@ -606,12 +606,13 @@ function assertDirectorDeliveryUpdateMatchesPlan(input: {
       "Truncated director delivery with no spoken audio must have an empty delivered utterance.",
     );
   }
+  if (delivered === planned) return;
   const spokenPrefix = delivered.replace(/\.\.\.$/, "").trim();
   if (!spokenPrefix || !planned.startsWith(spokenPrefix)) {
     throw new ApiError(
       409,
       "conflict",
-      "Truncated director delivery must preserve the spoken prefix of the planned utterance.",
+      "Truncated director delivery must preserve the planned utterance or its spoken prefix.",
     );
   }
 }

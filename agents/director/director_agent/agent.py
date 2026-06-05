@@ -55,6 +55,7 @@ COMPLETION_DISCONNECT_GRACE_SECONDS = 0.75
 COMPLETION_EXTRACTION_WAIT_SECONDS = 120.0
 COMPLETION_CHECKER_WAIT_SECONDS = 15.0
 EXTRACTION_WINDOW_DEBOUNCE_SECONDS = 1.0
+OPENING_PARTICIPANT_WAIT_SECONDS = 10 * 60.0
 
 
 @dataclass(frozen=True)
@@ -120,6 +121,7 @@ class DirectorConsultantAgent(Agent):
         self._paused = False
         self._muted = False
         self._ended = False
+        self._start_requested = asyncio.Event()
         self._active_speech: Any | None = None
         self._active_turn_done: asyncio.Event | None = None
         self._turn_generation = 0
@@ -148,6 +150,9 @@ class DirectorConsultantAgent(Agent):
                     "message": None,
                 },
             )
+            return
+        await self._wait_for_director_participant()
+        if not await self._wait_for_director_start():
             return
         opening_decision_log_id: str | None = None
         opening_started = time.perf_counter()
@@ -348,6 +353,54 @@ class DirectorConsultantAgent(Agent):
                     error,
                 )
 
+    async def _wait_for_director_participant(self) -> None:
+        expected_identity = self._expected_control_participant_identity
+        if not expected_identity:
+            return
+        if not hasattr(self._room, "remote_participants"):
+            return
+        if room_has_participant(self._room, expected_identity):
+            return
+
+        joined = asyncio.Event()
+
+        def on_participant_connected(participant: Any) -> None:
+            if participant_identity(participant) == expected_identity:
+                joined.set()
+
+        self._room.on("participant_connected", on_participant_connected)
+        try:
+            await asyncio.wait_for(
+                joined.wait(),
+                timeout=OPENING_PARTICIPANT_WAIT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            LOGGER.warning(
+                "Director participant %s did not join before opening wait timed out",
+                expected_identity,
+            )
+        finally:
+            off = getattr(self._room, "off", None)
+            if callable(off):
+                off("participant_connected", on_participant_connected)
+
+    async def _wait_for_director_start(self) -> bool:
+        if not self._expected_control_participant_identity:
+            return True
+        if self._start_requested.is_set():
+            return True
+        try:
+            await asyncio.wait_for(
+                self._start_requested.wait(),
+                timeout=OPENING_PARTICIPANT_WAIT_SECONDS,
+            )
+            return True
+        except asyncio.TimeoutError:
+            LOGGER.warning(
+                "Director start control was not received before opening wait timed out"
+            )
+            return False
+
     async def on_user_turn_completed(
         self,
         turn_ctx: ChatContext,
@@ -455,10 +508,49 @@ class DirectorConsultantAgent(Agent):
         generation: int,
     ) -> None:
         early_utterance: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        speech_queue: asyncio.Queue[str | None] = asyncio.Queue()
+        streamed_spoken_text = ""
+        speech = None
+        speech_started_at = 0.0
+
+        async def streamed_speech():
+            while True:
+                chunk = await speech_queue.get()
+                if chunk is None:
+                    break
+                yield chunk
 
         def on_planned_agent_utterance(utterance: str) -> None:
             if not early_utterance.done() and utterance.strip():
                 early_utterance.set_result(utterance.strip())
+
+        async def on_agent_text_delta(
+            delta: str,
+            text_so_far: str,
+            _payload: dict[str, Any],
+        ) -> None:
+            nonlocal speech, speech_started_at, streamed_spoken_text
+            if self._is_turn_superseded(generation):
+                return
+            clean_delta = str(delta)
+            if not clean_delta:
+                return
+            streamed_spoken_text = str(text_so_far or streamed_spoken_text + clean_delta)
+            await self._publish_data(
+                "director.turn.agent_delta",
+                {
+                    "turn_index": ingest.turn_index,
+                    "stage_name": "director.turn",
+                    "agent_utterance_delta": clean_delta,
+                    "agent_utterance": streamed_spoken_text,
+                    "local_turn_correlation_id": local_turn_correlation_id,
+                },
+            )
+            if speech is None:
+                speech_started_at = time.perf_counter()
+                speech = self.session.say(streamed_speech(), allow_interruptions=True)
+                self._active_speech = speech
+            await speech_queue.put(clean_delta)
 
         respond_task = asyncio.create_task(
             self._planner.respond_turn(
@@ -470,6 +562,7 @@ class DirectorConsultantAgent(Agent):
                     ingest.turn_index,
                 ),
                 on_planned_agent_utterance=on_planned_agent_utterance,
+                on_agent_text_delta=on_agent_text_delta,
                 local_turn_correlation_id=local_turn_correlation_id,
                 extraction_window_id=extraction_window_id,
                 pending_extraction_turns=sorted(self._pending_extraction_turns),
@@ -482,18 +575,24 @@ class DirectorConsultantAgent(Agent):
             return_when=asyncio.FIRST_COMPLETED,
         )
         responded: RespondedTurn | None = None
-        speech = None
-        speech_started_at = 0.0
         spoken_utterance: str | None = None
-        if early_utterance in done and not self._is_turn_superseded(generation):
+        if (
+            early_utterance in done
+            and speech is None
+            and not self._is_turn_superseded(generation)
+        ):
             spoken_utterance = early_utterance.result()
             speech_started_at = time.perf_counter()
             speech = self.session.say(spoken_utterance, allow_interruptions=True)
             self._active_speech = speech
-        if respond_task in done:
-            responded = respond_task.result()
-        else:
-            responded = await respond_task
+        try:
+            if respond_task in done:
+                responded = respond_task.result()
+            else:
+                responded = await respond_task
+        finally:
+            if speech is not None:
+                await speech_queue.put(None)
         responded_at = time.perf_counter()
         if spoken_utterance is None:
             spoken_utterance = responded.planned_agent_utterance
@@ -1120,6 +1219,18 @@ class DirectorConsultantAgent(Agent):
         if not isinstance(payload, dict):
             return
         action = payload.get("action")
+        if action == "start":
+            self._paused = False
+            self._start_requested.set()
+            asyncio.create_task(
+                self._publish_control_update(
+                    "start",
+                    self._paused,
+                    self._muted,
+                    self._ended,
+                )
+            )
+            return
         if action == "pause":
             self._paused = True
             self._interrupt_active_speech()
@@ -1395,6 +1506,24 @@ def normalize_transcript_for_supersede(value: str) -> str:
     return " ".join(value.casefold().split())
 
 
+def room_has_participant(room: Any, identity: str) -> bool:
+    participants = getattr(room, "remote_participants", None)
+    if participants is None:
+        return False
+    if isinstance(participants, dict):
+        iterable = participants.values()
+    else:
+        iterable = participants
+    return any(
+        participant_identity(participant) == identity for participant in iterable
+    )
+
+
+def participant_identity(participant: Any) -> str | None:
+    value = getattr(participant, "identity", None)
+    return value if isinstance(value, str) else None
+
+
 def transcript_timing_from_message(
     message: ChatMessage,
     utterance: str,
@@ -1542,11 +1671,12 @@ def delivered_utterance_for_status(
     delivery_status: str,
     spoken_fraction: float,
 ) -> str:
+    if delivery_status == "truncated":
+        return utterance if spoken_fraction > 0 else ""
     delivered = core_delivered_utterance_for_status(
         utterance,
         delivery_status=delivery_status,
         spoken_fraction=spoken_fraction,
-        truncate_on_word_boundary=True,
     )
     return delivered or ""
 

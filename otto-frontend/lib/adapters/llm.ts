@@ -24,6 +24,10 @@ export type GenerateOpts = PromptedCall & {
   };
 };
 
+export type GenerateStreamOpts = GenerateOpts & {
+  onTextDelta?: (delta: string, textSoFar: string) => void | Promise<void>;
+};
+
 export type Generation = {
   text: string;
   model: string;
@@ -78,6 +82,37 @@ export async function generate(opts: GenerateOpts): Promise<Generation> {
       latency_ms: Math.max(1, Date.now() - started),
       cache_hit: false,
       mocked: true,
+    };
+  }, opts.retry);
+}
+
+export async function generateStream(opts: GenerateStreamOpts): Promise<Generation> {
+  const started = Date.now();
+  return withRetry(async () => {
+    const input = [opts.static_input, opts.dynamic_input, opts.input]
+      .filter(Boolean)
+      .join("\n");
+    const env = getServerEnv();
+    if (env.ANTHROPIC_API_KEY) {
+      return generateAnthropicTextStream(opts, started);
+    }
+    const text = `[mock:${opts.prompt_template_id}] ${input}`;
+    await opts.onTextDelta?.(text, text);
+    return {
+      text,
+      model: "deterministic-local-llm",
+      prompt_template_id: opts.prompt_template_id,
+      prompt_template_version: opts.prompt_template_version ?? "1",
+      token_count_input: estimateTokens(input),
+      token_count_output: estimateTokens(text),
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cost_cents: 0,
+      latency_ms: Math.max(1, Date.now() - started),
+      cache_hit: false,
+      mocked: true,
+      streaming: false,
+      stream_cutoff: "message_stop",
     };
   }, opts.retry);
 }
@@ -360,6 +395,80 @@ async function generateAnthropic(
   };
 }
 
+async function generateAnthropicTextStream(
+  opts: GenerateStreamOpts,
+  started: number,
+): Promise<Generation> {
+  const env = getServerEnv();
+  const model = anthropicModelForPrompt(env, opts.prompt_template_id);
+  const content = [
+    staticTextBlock(opts.static_input),
+    opts.dynamic_input ? { type: "text", text: opts.dynamic_input } : undefined,
+    opts.input ? { type: "text", text: opts.input } : undefined,
+  ].filter(Boolean);
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": env.ANTHROPIC_API_KEY!,
+      "anthropic-version": "2023-06-01",
+      "anthropic-beta": "prompt-caching-2024-07-31",
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: anthropicMaxTokensForPrompt(opts.prompt_template_id),
+      stream: true,
+      messages: [{ role: "user", content }],
+    }),
+  });
+  if (!response.ok || !response.body) {
+    throw new Error(`Anthropic streaming request failed: ${response.status}`);
+  }
+
+  let text = "";
+  let usage: AnthropicUsage = {};
+  let stopReason: string | undefined;
+  for await (const event of anthropicStreamEvents(response.body)) {
+    usage = mergeAnthropicUsage(usage, event);
+    stopReason = event.delta?.stop_reason ?? event.message?.stop_reason ?? stopReason;
+    if (event.delta?.type !== "text_delta" || typeof event.delta.text !== "string") {
+      continue;
+    }
+    text += event.delta.text;
+    await opts.onTextDelta?.(event.delta.text, text);
+  }
+
+  const inputTokens =
+    usage.input_tokens ??
+    estimateTokens([opts.static_input, opts.dynamic_input, opts.input].join("\n"));
+  const outputTokens = usage.output_tokens ?? estimateTokens(text);
+  const cacheReadTokens = usage.cache_read_input_tokens ?? 0;
+  const cacheCreationTokens = usage.cache_creation_input_tokens ?? 0;
+  return {
+    text: text.trim(),
+    model,
+    prompt_template_id: opts.prompt_template_id,
+    prompt_template_version: opts.prompt_template_version ?? "1",
+    token_count_input: inputTokens,
+    token_count_output: outputTokens,
+    cache_read_input_tokens: cacheReadTokens,
+    cache_creation_input_tokens: cacheCreationTokens,
+    cost_cents: estimateAnthropicCostCents({
+      model,
+      inputTokens,
+      outputTokens,
+      cacheReadTokens,
+      cacheCreationTokens,
+    }),
+    latency_ms: Math.max(1, Date.now() - started),
+    cache_hit: cacheReadTokens > 0,
+    mocked: false,
+    streaming: true,
+    stream_cutoff: "message_stop",
+    stop_reason: stopReason,
+  };
+}
+
 async function generateAnthropicToolStream(
   opts: GenerateOpts & {
     onFieldComplete?: (field: string, value: string) => void;
@@ -513,6 +622,7 @@ type AnthropicStreamEvent = {
   delta?: {
     type?: string;
     partial_json?: string;
+    text?: string;
     stop_reason?: string;
   };
   usage?: AnthropicUsage;

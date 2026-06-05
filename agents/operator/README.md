@@ -35,14 +35,20 @@ latency threshold is part of the rollout gate.
 
 ```bash
 cd agents/operator
+cp ../../.env.example ../../.env.local
 cp .env.example .env
-uv run otto-operator-agent start --env-file .env
+../../scripts/with-env.sh .env -- uv run --no-sync otto-operator-agent start
 ```
 
 The operator worker uses health port `8082` by default so it can run beside the
 director worker, which uses LiveKit's default `8081`. Override with
 `LIVEKIT_OPERATOR_WORKER_HTTP_PORT` if needed.
 
-Keep `LIVEKIT_AGENT_SERVICE_TOKEN` identical to the Next.js app value. In local
-development, the frontend can fall back to typed operator turns if LiveKit or
-audio provider credentials are missing.
+Shared local secrets live in the repository root `.env.local`; keep
+`agents/operator/.env` limited to operator-specific overrides such as
+`LIVEKIT_OPERATOR_AGENT_NAME`, health port, language, or runtime rollout flags.
+Passing only `--env-file .env` to the worker loads only the operator override
+file and will miss shared values such as `LIVEKIT_URL` unless they are also
+present in the shell environment.
+In local development, the frontend can fall back to typed operator turns if
+LiveKit or audio provider credentials are missing.

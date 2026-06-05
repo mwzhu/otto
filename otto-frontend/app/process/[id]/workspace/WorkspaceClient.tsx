@@ -6,7 +6,6 @@ import dynamic from "next/dynamic";
 import { TabBar } from "@/components/workspace/TabBar";
 import { SummaryTab } from "@/components/workspace/tabs/SummaryTab";
 import { NodeEvidenceDrawer, StepsTab } from "@/components/workspace/tabs/StepsTab";
-import { ImpactTab } from "@/components/workspace/tabs/ImpactTab";
 import { InsightsTab } from "@/components/workspace/tabs/InsightsTab";
 import { RiskTab } from "@/components/workspace/tabs/RiskTab";
 import { RefineProcessChat } from "@/components/workspace/RefineProcessChat";
@@ -15,7 +14,6 @@ import type { ProcessGraph } from "@/lib/types";
 import type { ProcessFollowUpTask } from "@/lib/processes/follow-up-queries";
 import type { ProcessGraphVersionSummary } from "@/lib/processes/graph-queries";
 import type { WorkspaceTab } from "@/lib/store/workspace";
-import type { ImpactOpportunity } from "@/components/workspace/tabs/ImpactTab";
 
 const ProcessCanvas = dynamic(
   () => import("@/components/canvas/ProcessCanvas").then((m) => m.ProcessCanvas),
@@ -28,8 +26,6 @@ export default function WorkspaceClient({
   graph,
   graphVersions,
   followUps = [],
-  impactOpportunities = [],
-  opportunitySource,
   initialTab,
   counts,
   canApproveDraft,
@@ -39,14 +35,13 @@ export default function WorkspaceClient({
   graph: ProcessGraph;
   graphVersions?: ProcessGraphVersionSummary[];
   followUps?: ProcessFollowUpTask[];
-  impactOpportunities?: ImpactOpportunity[];
-  opportunitySource?: "agent" | "heuristic";
   initialTab: WorkspaceTab;
   counts: Partial<Record<WorkspaceTab, number>>;
   canApproveDraft: boolean;
 }) {
   const sp = useSearchParams();
-  const active = (sp.get("tab") as WorkspaceTab) ?? initialTab ?? "summary";
+  const requestedTab = sp.get("tab");
+  const active = isWorkspaceTab(requestedTab) ? requestedTab : initialTab ?? "summary";
   const [approving, setApproving] = useState(false);
   const [approvalError, setApprovalError] = useState<string | null>(null);
   const [canvasEvidence, setCanvasEvidence] = useState<{
@@ -154,13 +149,6 @@ export default function WorkspaceClient({
           {active === "steps" && (
             <StepsTab workspaceId={workspaceId} processId={processId} graph={graph} />
           )}
-          {active === "impact" && (
-            <ImpactTab
-              processId={processId}
-              opportunities={impactOpportunities}
-              source={opportunitySource}
-            />
-          )}
           {active === "insights" && (
             <InsightsTab
               processId={processId}
@@ -186,6 +174,10 @@ export default function WorkspaceClient({
       <RefineProcessChat />
     </div>
   );
+}
+
+function isWorkspaceTab(value: string | null): value is WorkspaceTab {
+  return value === "summary" || value === "steps" || value === "insights" || value === "risk";
 }
 
 async function approveDraft({

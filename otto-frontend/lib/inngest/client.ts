@@ -11,6 +11,8 @@ export const directorInterviewCompletedEventName =
 export const documentArtifactUploadedEventName = "document.artifact.uploaded.v1";
 export const inventorySynthesisRequestedEventName =
   "synthesis.inventory.requested.v1";
+export const directorAutomationPlanRequestedEventName =
+  "synthesis.director_automation_plan.requested.v1";
 export const operatorCaptureCompletedEventName =
   "operator.capture.completed.v1";
 export const operatorScreenRecordingUploadedEventName =

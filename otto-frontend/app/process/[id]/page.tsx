@@ -2,7 +2,6 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { BreadcrumbHeader } from "@/components/layout/BreadcrumbHeader";
 import { ComplexityBreakdown } from "@/components/process/ComplexityBreakdown";
-import { AccountabilityBlock } from "@/components/process/AccountabilityBlock";
 import { SystemPills } from "@/components/process/SystemPills";
 import { RiskCallouts } from "@/components/process/RiskCallouts";
 import { Button } from "@/components/ui/Button";
@@ -81,10 +80,6 @@ export default async function ProcessDetailPage({
 
         <div className="my-8">
           <ComplexityBreakdown detail={process} />
-        </div>
-
-        <div className="my-8">
-          <AccountabilityBlock detail={process} />
         </div>
 
         <div className="my-8">

@@ -67,22 +67,22 @@ export default async function CaptureEntryPage({
 
         <section className="mt-8 grid grid-cols-2 gap-4">
           <CaptureOptionCard
-            illustration={<ModeIcon icon={<Mic size={26} />} />}
-            title="Voice-only interview"
-            description={`${BRAND.name} asks step, handoff, system, exception, and workaround questions while the operator talks through the process.`}
-            cta={
-              <Link href={`/process/${id}/capture/voice`}>
-                <Button>Start Interview</Button>
-              </Link>
-            }
-          />
-          <CaptureOptionCard
             illustration={<ModeIcon icon={<MonitorUp size={26} />} />}
             title="Screen-share + voice"
             description="Walk through the live workflow while Otto watches for workarounds, duplicate entry, exceptions, and SOP contradictions."
             cta={
               <Link href={`/process/${id}/capture/screenshare`}>
                 <Button>Share Screen</Button>
+              </Link>
+            }
+          />
+          <CaptureOptionCard
+            illustration={<ModeIcon icon={<Mic size={26} />} />}
+            title="Voice-only interview"
+            description={`${BRAND.name} asks step, handoff, system, exception, and workaround questions while the operator talks through the process.`}
+            cta={
+              <Link href={`/process/${id}/capture/voice`}>
+                <Button>Start Interview</Button>
               </Link>
             }
           />

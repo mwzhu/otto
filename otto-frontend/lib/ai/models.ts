@@ -80,6 +80,9 @@ export function anthropicModelForPrompt(
       providerDefaultOpusModel(env)
     );
   }
+  if (promptTemplateId.startsWith("synthesis.director_automation")) {
+    return env.SYNTHESIS_PLANNER_MODEL ?? env.ANTHROPIC_MODEL ?? "claude-opus-4-7";
+  }
   if (promptTemplateId.startsWith("synthesis.")) {
     return env.SYNTHESIS_PLANNER_MODEL ?? env.ANTHROPIC_MODEL ?? "claude-opus-4-7";
   }
@@ -95,6 +98,7 @@ export function anthropicMaxTokensForPrompt(promptTemplateId: string) {
   if (promptTemplateId.startsWith("operator.voice.")) return 200;
   if (isOperatorWorkflowPrompt(promptTemplateId)) return 16000;
   if (promptTemplateId.startsWith("synthesis.opportunities")) return 4000;
+  if (promptTemplateId.startsWith("synthesis.director_automation")) return 6000;
   return 1200;
 }
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Globe, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
@@ -30,6 +30,18 @@ type DirectorVoiceReadiness = {
   reason: string | null;
 };
 
+type DirectorRoomResponse = {
+  mode: "simulated" | "livekit";
+  room: string;
+  url: string | null;
+  token: string | null;
+  tokenExpiresAt: string | null;
+  agentName?: string;
+  agentParticipantIdentity?: string;
+  dispatchId?: string;
+  reason?: string;
+};
+
 export const DIRECTOR_SESSION_KEY = "otto.directorInterview.session";
 const WORKSPACE_KEY = "otto.phase0.workspaceId";
 
@@ -39,12 +51,20 @@ export function VoicePreStartClient() {
   const [starting, setStarting] = useState(false);
   const [consentGiven, setConsentGiven] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const consentCheckboxRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    window.localStorage.removeItem(DIRECTOR_SESSION_KEY);
+  }, []);
 
   async function startInterview() {
-    if (!consentGiven) {
+    const consentConfirmed =
+      consentGiven || consentCheckboxRef.current?.checked === true;
+    if (!consentConfirmed) {
       setError("Please confirm consent before starting the interview.");
       return;
     }
+    if (!consentGiven) setConsentGiven(true);
     setStarting(true);
     setError(null);
     try {
@@ -72,7 +92,7 @@ export function VoicePreStartClient() {
         },
         `director-session-${workspaceId}-${Date.now()}`,
       );
-      const directorSession: DirectorSession = {
+      let directorSession: DirectorSession = {
         workspaceId,
         captureSessionId: session.capture_session.id,
         language,
@@ -84,6 +104,28 @@ export function VoicePreStartClient() {
         roomReason: readiness.reason ?? undefined,
         startedAt: new Date().toISOString(),
       };
+      if (directorSession.roomMode === "livekit") {
+        const room = await postJson<DirectorRoomResponse>(
+          "/api/livekit/director-room",
+          {
+            workspace_id: workspaceId,
+            capture_session_id: session.capture_session.id,
+          },
+          `director-room-prewarm-${session.capture_session.id}-${Date.now()}`,
+        );
+        directorSession = {
+          ...directorSession,
+          roomMode: room.mode,
+          roomName: room.room,
+          roomUrl: room.url,
+          roomToken: room.token,
+          roomTokenExpiresAt: room.tokenExpiresAt,
+          agentName: room.agentName,
+          agentParticipantIdentity: room.agentParticipantIdentity,
+          dispatchId: room.dispatchId,
+          roomReason: room.reason,
+        };
+      }
       window.localStorage.setItem(
         DIRECTOR_SESSION_KEY,
         JSON.stringify(directorSession),
@@ -102,7 +144,7 @@ export function VoicePreStartClient() {
     <div className="space-y-10">
       <header className="space-y-2 text-center">
         <h1 className="text-[26px] font-semibold tracking-tight text-ink">
-          Clarity starts with your perspective
+          Otto starts with your perspective
         </h1>
         <p className="mx-auto max-w-[560px] text-[13px] leading-relaxed text-ink-secondary">
           Tell us about your team: who&apos;s involved, how work flows, where
@@ -126,9 +168,13 @@ export function VoicePreStartClient() {
         </div>
         <label className="flex max-w-[440px] items-start gap-2 rounded-md border border-subtle bg-canvas px-3 py-2.5 text-[12px] leading-relaxed text-ink-secondary">
           <input
+            ref={consentCheckboxRef}
             type="checkbox"
             checked={consentGiven}
-            onChange={(event) => setConsentGiven(event.target.checked)}
+            onChange={(event) => {
+              setConsentGiven(event.target.checked);
+              if (event.target.checked) setError(null);
+            }}
             className="mt-0.5 size-4 accent-[var(--solid)]"
             disabled={starting}
           />
@@ -155,7 +201,7 @@ export function VoicePreStartClient() {
           <Button
             type="button"
             onClick={startInterview}
-            disabled={starting || !consentGiven}
+            disabled={starting}
           >
             {starting ? (
               <>

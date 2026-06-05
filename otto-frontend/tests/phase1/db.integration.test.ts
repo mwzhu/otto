@@ -105,6 +105,10 @@ const badDeliveryUpdateCaptureId =
   "d4d4d4d4-d4d4-5d4d-8d4d-d4d4d4d4d4d4";
 const badDeliveryUpdateDecisionId =
   "d5d5d5d5-d5d5-5d5d-8d5d-d5d5d5d5d5d5";
+const fullTruncatedDeliveryCaptureId =
+  "d6d6d6d6-d6d6-5d6d-8d6d-d6d6d6d6d6d6";
+const fullTruncatedDeliveryDecisionId =
+  "d7d7d7d7-d7d7-5d7d-8d7d-d7d7d7d7d7d7";
 const twoCallCostCaptureId = "c3c3c3c3-c3c3-5c3c-8c3c-c3c3c3c3c3c3";
 const twoCallCostDecisionId = "c4c4c4c4-c4c4-5c4c-8c4c-c4c4c4c4c4c4";
 const cacheHitRateCaptureId = "c5c5c5c5-c5c5-5c5c-8c5c-c5c5c5c5c5c5";
@@ -3281,6 +3285,127 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
       expect(persisted.rows[0].delivery_json).toMatchObject({
         delivery_status: "pending",
         spoken_fraction: 0,
+      });
+    } finally {
+      if (previousServiceToken === undefined) {
+        delete process.env.LIVEKIT_AGENT_SERVICE_TOKEN;
+      } else {
+        process.env.LIVEKIT_AGENT_SERVICE_TOKEN = previousServiceToken;
+      }
+    }
+  });
+
+  test("internal delivery update preserves full text for truncated playout with speech", async () => {
+    const previousServiceToken = process.env.LIVEKIT_AGENT_SERVICE_TOKEN;
+    process.env.LIVEKIT_AGENT_SERVICE_TOKEN = "service-token";
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      `
+        INSERT INTO capture_sessions (
+          id,
+          org_id,
+          workspace_id,
+          capture_type,
+          started_at,
+          metadata_json
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          'director_interview',
+          now(),
+          '{"language":"en","director_user_id":"bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb"}'::jsonb
+        )
+        ON CONFLICT (id) DO UPDATE
+          SET completed_at = null,
+              metadata_json = excluded.metadata_json,
+              updated_at = now()
+      `,
+      [fullTruncatedDeliveryCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      "DELETE FROM agent_decision_log WHERE capture_session_id = $1",
+      [fullTruncatedDeliveryCaptureId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO agent_decision_log (
+          id,
+          org_id,
+          workspace_id,
+          capture_session_id,
+          turn_index,
+          stage_name,
+          ts_start,
+          sanitized_agent_utterance,
+          prompt_template_id,
+          prompt_template_version,
+          delivery_json
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          1,
+          'director.opening',
+          now(),
+          'Hi. I''m going to build a high-level map of the processes your team owns.',
+          'director.opening',
+          '1',
+          jsonb_build_object(
+            'planned_utterance',
+            'Hi. I''m going to build a high-level map of the processes your team owns.',
+            'delivery_status',
+            'pending',
+            'spoken_fraction',
+            0
+          )
+        )
+      `,
+      [
+        fullTruncatedDeliveryDecisionId,
+        orgId,
+        workspaceId,
+        fullTruncatedDeliveryCaptureId,
+      ],
+    );
+
+    const deliveryRoute = await import(
+      "@/app/api/internal/director-turns/[turnIndex]/delivery/route"
+    );
+    try {
+      const fullText =
+        "Hi. I'm going to build a high-level map of the processes your team owns.";
+      const response = await deliveryRoute.POST(
+        serviceRequest(
+          "http://otto.test/api/internal/director-turns/1/delivery",
+          {
+            capture_session_id: fullTruncatedDeliveryCaptureId,
+            decision_log_id: fullTruncatedDeliveryDecisionId,
+            delivery_status: "truncated",
+            delivered_utterance: fullText,
+            spoken_fraction: 0.5,
+          },
+          "full-truncated-delivery-update",
+        ),
+        { params: Promise.resolve({ turnIndex: "1" }) },
+      );
+
+      expect(response.status).toBe(200);
+      const persisted = await appClient.query(
+        "SELECT delivery_json FROM agent_decision_log WHERE id = $1",
+        [fullTruncatedDeliveryDecisionId],
+      );
+      expect(persisted.rows[0].delivery_json).toMatchObject({
+        delivery_status: "truncated",
+        delivered_utterance: fullText,
+        planned_utterance: fullText,
+        spoken_fraction: 0.5,
       });
     } finally {
       if (previousServiceToken === undefined) {

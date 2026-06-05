@@ -26,21 +26,29 @@ npm run eval:director:container
 ## Director Voice Production Proof
 
 The browser voice path is backed by the Python LiveKit worker in
-[`../agents/director`](../agents/director). For a full production proof, configure both
-`otto-frontend/.env.local` and `agents/director/.env` with matching `LIVEKIT_AGENT_NAME`,
+[`../agents/director`](../agents/director). For a full production proof, configure shared
+secrets in the repository root `.env.local`: `LIVEKIT_AGENT_NAME`,
 `LIVEKIT_AGENT_SERVICE_TOKEN`, LiveKit credentials, Anthropic credentials, provider credentials
-or `OTTO_USE_LIVEKIT_INFERENCE=true`, and the strict privacy acknowledgement flags.
+or `OTTO_USE_LIVEKIT_INFERENCE=true`, and the strict privacy acknowledgement flags. Keep
+`agents/director/.env` limited to director-specific overrides such as agent name,
+endpointing, or smoke-test capture-session values. `otto-frontend/.env.local` is optional
+for frontend-only overrides.
 
-Then run migrations, start the app, start the worker with
-`uv run --no-sync otto-director-agent start --env-file .env`, complete a real `/onboarding/voice`
-session, and finish with:
+Then run migrations and start the app. Start the worker with the repo env wrapper:
+
+```bash
+cd ../agents/director
+../../scripts/with-env.sh .env -- uv run --no-sync otto-director-agent start
+```
+
+After the session completes, verify it with:
 
 ```bash
 cd ../agents/director
 OTTO_CAPTURE_SESSION_ID=<completed-director-capture-session-id> \
-  uv run --no-sync otto-director-session-verify \
+  ../../scripts/with-env.sh .env -- uv run --no-sync otto-director-session-verify \
     --env-file .env \
-    --app-env-file ../../otto-frontend/.env.local \
+    --app-env-file ../../.env.local \
     --strict-voice-env
 ```
 

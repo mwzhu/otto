@@ -256,6 +256,8 @@ function isGroundedOpportunity(value: unknown): value is GroundedOpportunity {
       typeof value === "object" &&
       typeof (value as GroundedOpportunity).id === "string" &&
       typeof (value as GroundedOpportunity).process_id === "string" &&
+      typeof (value as GroundedOpportunity).implementation_plan === "string" &&
+      typeof (value as GroundedOpportunity).expected_result === "string" &&
       (value as GroundedOpportunity).assumptions,
   );
 }

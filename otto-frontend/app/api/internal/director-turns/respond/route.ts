@@ -26,6 +26,7 @@ import {
   readJsonWithHash,
   requireIdempotencyKey,
 } from "@/lib/http/json";
+import { limitToSingleQuestion } from "@/lib/interview/_core/utterance";
 
 export const runtime = "nodejs";
 
@@ -103,7 +104,25 @@ export async function POST(request: Request) {
     const run = async (send?: (event: string, data: unknown) => void) => {
       send?.("ready", { status: "responding" });
       const steering = await buildDirectorSteeringPlan(turnInput);
-      const phrased = await phraseDirectorSteeringTurn(steering);
+      let streamedText = "";
+      let streamClosed = false;
+      const phrased = await phraseDirectorSteeringTurn(steering, {
+        onTextDelta: (_delta, textSoFar) => {
+          if (!send || streamClosed) return;
+          const speakableText = limitToSingleQuestion(textSoFar);
+          if (!speakableText || speakableText.length <= streamedText.length) return;
+          const delta = speakableText.slice(streamedText.length);
+          streamedText = speakableText;
+          send("agent_text_delta", {
+            delta,
+            text: streamedText,
+            turn_index: body.turn_index,
+            stage_name: "director.turn",
+            local_turn_correlation_id: body.local_turn_correlation_id,
+          });
+          if (speakableText.includes("?")) streamClosed = true;
+        },
+      });
       send?.("planned_agent_utterance", { utterance: phrased.utterance });
       if (body.extraction_window_id) {
         await upsertDirectorExtractionWindow({

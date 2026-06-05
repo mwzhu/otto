@@ -5624,7 +5624,7 @@ class WorkerContractTests(unittest.TestCase):
         self.assertEqual(decoded["payload"]["agent_utterance"], "")
         self.assertEqual(decoded["payload"]["spoken_fraction"], 0)
 
-    def test_truncated_delivery_uses_estimated_spoken_prefix(self) -> None:
+    def test_truncated_delivery_keeps_full_text_for_transcript_display(self) -> None:
         utterance = "Let's zoom into quote approvals and start with where finance signs off."
 
         delivered = delivered_utterance_for_status(
@@ -5633,9 +5633,7 @@ class WorkerContractTests(unittest.TestCase):
             spoken_fraction=0.5,
         )
 
-        self.assertTrue(delivered.endswith("..."))
-        self.assertLess(len(delivered), len(utterance))
-        self.assertIn("quote approvals", delivered)
+        self.assertEqual(delivered, utterance)
         self.assertEqual(
             delivered_utterance_for_status(
                 utterance,

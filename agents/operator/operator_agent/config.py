@@ -24,8 +24,8 @@ class OperatorAgentConfig:
     livekit_agent_name: str
     voice_runtime: str = "planned_cascade"
     endpointing_mode: str = "dynamic"
-    endpointing_min_delay: float = 1.2
-    endpointing_max_delay: float = 6.0
+    endpointing_min_delay: float = 2.2
+    endpointing_max_delay: float = 8.0
     endpointing_alpha: float = 0.8
     strict_preflight: bool = False
     vendor_privacy_ack: bool = False
@@ -91,11 +91,11 @@ class OperatorAgentConfig:
             ),
             endpointing_min_delay=float_env(
                 "OTTO_OPERATOR_ENDPOINTING_MIN_DELAY",
-                float_env("OTTO_DIRECTOR_ENDPOINTING_MIN_DELAY", 1.2),
+                float_env("OTTO_DIRECTOR_ENDPOINTING_MIN_DELAY", 2.2),
             ),
             endpointing_max_delay=float_env(
                 "OTTO_OPERATOR_ENDPOINTING_MAX_DELAY",
-                float_env("OTTO_DIRECTOR_ENDPOINTING_MAX_DELAY", 6.0),
+                float_env("OTTO_DIRECTOR_ENDPOINTING_MAX_DELAY", 8.0),
             ),
             endpointing_alpha=float_env(
                 "OTTO_OPERATOR_ENDPOINTING_ALPHA",

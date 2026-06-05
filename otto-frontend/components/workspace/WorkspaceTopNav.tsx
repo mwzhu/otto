@@ -25,8 +25,6 @@ export function WorkspaceTopNav({
   const base = `/process/${processId}/workspace`;
   const tabs: Tab[] = [
     { label: "Current Process", href: base, segment: null },
-    { label: "Transformation Proposal", href: `${base}/transformation`, segment: "transformation" },
-    { label: "Automation", href: `${base}/automation`, segment: "automation" },
   ];
 
   const toggleRefine = useWorkspaceStore((s) => s.toggleRefine);

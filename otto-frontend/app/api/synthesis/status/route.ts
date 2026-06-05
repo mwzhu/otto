@@ -82,6 +82,7 @@ async function latestSynthesisRun(
         and(
           eq(synthesisRuns.orgId, orgId),
           eq(synthesisRuns.workspaceId, workspaceId),
+          sql`${synthesisRuns.runType} IN ('document_inventory', 'director_inventory', 'combined_inventory')`,
           captureSessionId
             ? sql`${synthesisRuns.captureSessionIds} @> ARRAY[${captureSessionId}]::uuid[]`
             : undefined,

@@ -830,7 +830,7 @@ Features:
 - Language selection.
 - Voice-only interview.
 - Conversation transcript.
-- Live structured notes.
+- Live Operations Notes.
 - Pause/resume.
 - Complete interview.
 - Auto-save partial state.

@@ -193,6 +193,17 @@ function makeOpportunity({
         : `Transform ${node.data.title}`,
     problem: reason,
     proposed_solution: targetState,
+    implementation_plan: implementationPlanFor({
+      node,
+      systems,
+      patternLabel,
+      targetState,
+    }),
+    expected_result: expectedResultFor({
+      node,
+      assumptions,
+      patternLabel,
+    }),
     automation_type: type,
     pattern_id: patternId,
     pattern_label: patternLabel,
@@ -213,6 +224,39 @@ function makeOpportunity({
     target_state: targetState,
     impact,
   };
+}
+
+function implementationPlanFor({
+  node,
+  systems,
+  patternLabel,
+  targetState,
+}: {
+  node: GraphNode;
+  systems: string[];
+  patternLabel: string;
+  targetState: string;
+}) {
+  const systemText =
+    systems.length > 0 ? systems.join(" and ") : "the captured workflow evidence";
+  return `${patternLabel} agent monitors ${node.data.title} using ${systemText}, applies the documented checks before the operator enters the step, routes exceptions with context, and keeps a human approval path for ambiguous cases. ${targetState}`;
+}
+
+function expectedResultFor({
+  node,
+  assumptions,
+  patternLabel,
+}: {
+  node: GraphNode;
+  assumptions: ROIAssumptions;
+  patternLabel: string;
+}) {
+  const hours = Math.round(
+    (assumptions.annual_volume * assumptions.minutes_saved_per_case) / 60,
+  ).toLocaleString();
+  return `${patternLabel} on ${node.data.title} should remove roughly ${hours} annual manual hours, reduce exceptions by focusing review on the modeled ${Math.round(
+    assumptions.exception_rate * 100,
+  )}% exception population, and cut preventable errors before downstream handoffs.`;
 }
 
 export function assumptionsForImpact(

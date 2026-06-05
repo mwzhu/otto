@@ -25,7 +25,7 @@ export type InventorySynthesisInput = {
   idempotencyKey?: string;
 };
 
-type CandidateInventoryRow = {
+export type CandidateInventoryRow = {
   id: string;
   proposed_name: string;
   proposed_function: string | null;
@@ -38,6 +38,17 @@ type CandidateInventoryRow = {
   risks: Array<{ text?: string; evidence_ids?: string[] }> | null;
   documented_evidence_count: number;
 };
+
+const genericCandidateProcessNames = [
+  "a couple different things",
+  "couple different things",
+  "different things",
+  "a few things",
+  "several things",
+  "some things",
+  "multiple things",
+  "things",
+] as const;
 
 export async function runInventorySynthesis(input: InventorySynthesisInput) {
   const actorUserId = input.userId ?? (await firstOrgUserId(input.orgId));
@@ -252,7 +263,7 @@ export async function runInventorySynthesis(input: InventorySynthesisInput) {
   }
 }
 
-async function loadCandidateInventory(
+export async function loadCandidateInventory(
   orgId: string,
   workspaceId: string,
   captureSessionIds: string[],
@@ -281,6 +292,7 @@ async function loadCandidateInventory(
           AND c.workspace_id = ${workspaceId}
           AND c.capture_session_id = ANY(${captureSessionIdArray})
           AND c.status = 'pending'
+          AND lower(c.proposed_name) NOT IN ${genericCandidateNamesSql()}
         GROUP BY c.id, cl.id, cl.field, cl.value
       )
       SELECT
@@ -332,11 +344,19 @@ async function loadCandidateInventory(
         AND c.workspace_id = ${workspaceId}
         AND c.capture_session_id = ANY(${captureSessionIdArray})
         AND c.status = 'pending'
+        AND lower(c.proposed_name) NOT IN ${genericCandidateNamesSql()}
       GROUP BY c.id
       ORDER BY c.created_at ASC
     `);
   });
   return result.rows;
+}
+
+function genericCandidateNamesSql() {
+  return sql`(${sql.join(
+    genericCandidateProcessNames.map((name) => sql`${name}`),
+    sql`, `,
+  )})`;
 }
 
 async function normalizeOntology(

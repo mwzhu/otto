@@ -1,6 +1,7 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 import {
   artifactUploadedEventName,
+  directorAutomationPlanRequestedEventName,
   directorInterviewCompletedEventName,
   documentArtifactUploadedEventName,
   inventorySynthesisRequestedEventName,
@@ -33,6 +34,7 @@ import {
   extractDirectorTurn,
 } from "@/lib/interview/director/brain";
 import { runInventorySynthesis } from "@/lib/synthesis/inventory";
+import { runDirectorAutomationPlan } from "@/lib/synthesis/director-automation";
 import { runOperatorProcessSynthesis } from "@/lib/synthesis/operator-process";
 
 const synthesisConcurrency: [
@@ -188,7 +190,7 @@ export const inventorySynthesis = inngest.createFunction(
     triggers: [{ event: inventorySynthesisRequestedEventName }],
   },
   async ({ event, step }) => {
-    return step.run("run-inventory-synthesis-subset", async () =>
+    const result = await step.run("run-inventory-synthesis-subset", async () =>
       runInventorySynthesis({
         orgId: event.data.orgId as string,
         workspaceId: event.data.workspaceId as string,
@@ -198,6 +200,47 @@ export const inventorySynthesis = inngest.createFunction(
           | "director_inventory"
           | "combined_inventory"
           | undefined,
+        userId: event.data.userId as string | undefined,
+        idempotencyKey: event.data.idempotencyKey as string | undefined,
+      }),
+    );
+    const runType = event.data.runType as string | undefined;
+    const env = getServerEnv();
+    if (
+      result.ok &&
+      (runType === "director_inventory" || runType === "combined_inventory") &&
+      env.DIRECTOR_AUTOMATION_PLAN_GENERATION_ENABLED
+    ) {
+      await step.run("request-director-automation-plan", async () =>
+        inngest.send({
+          name: directorAutomationPlanRequestedEventName,
+          data: {
+            orgId: event.data.orgId as string,
+            workspaceId: event.data.workspaceId as string,
+            captureSessionIds: event.data.captureSessionIds as string[],
+            userId: event.data.userId as string | undefined,
+            idempotencyKey: event.data.idempotencyKey as string | undefined,
+          },
+        }),
+      );
+    }
+    return result;
+  },
+);
+
+export const directorAutomationPlanSynthesis = inngest.createFunction(
+  {
+    id: "director-automation-plan-synthesis-v1",
+    concurrency: synthesisConcurrency,
+    throttle: synthesisOrgThrottle,
+    triggers: [{ event: directorAutomationPlanRequestedEventName }],
+  },
+  async ({ event, step }) => {
+    return step.run("run-director-automation-plan", async () =>
+      runDirectorAutomationPlan({
+        orgId: event.data.orgId as string,
+        workspaceId: event.data.workspaceId as string,
+        captureSessionIds: event.data.captureSessionIds as string[],
         userId: event.data.userId as string | undefined,
         idempotencyKey: event.data.idempotencyKey as string | undefined,
       }),
@@ -419,6 +462,7 @@ export const inngestFunctions = [
   artifactUploaded,
   directorInterviewCompleted,
   inventorySynthesis,
+  directorAutomationPlanSynthesis,
   operatorCaptureReady,
   operatorProcessSynthesis,
   operatorScreenFrameCaptured,

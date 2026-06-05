@@ -136,6 +136,7 @@ export const synthesisRunTypeEnum = pgEnum("synthesis_run_type", [
   "director_inventory",
   "combined_inventory",
   "process_graph",
+  "director_automation_plan",
 ]);
 export const synthesisStageStatusEnum = pgEnum("synthesis_stage_status", [
   "queued",
@@ -1397,6 +1398,44 @@ export const automationOpportunitySets = pgTable(
     versionPackIdx: uniqueIndex(
       "automation_opportunity_sets_version_pack_idx",
     ).on(table.versionId, table.evidencePackHash),
+  }),
+);
+
+export const directorAutomationPlans = pgTable(
+  "director_automation_plans",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orgId: uuid("org_id").references(() => organizations.id).notNull(),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id).notNull(),
+    synthesisRunId: uuid("synthesis_run_id").references(() => synthesisRuns.id),
+    sourceCaptureSessionIds: uuid("source_capture_session_ids")
+      .array()
+      .default(sql`'{}'::uuid[]`)
+      .notNull(),
+    inventoryHash: text("inventory_hash").notNull(),
+    planInputHash: text("plan_input_hash").notNull(),
+    planHash: text("plan_hash").notNull(),
+    promptTemplateId: text("prompt_template_id").notNull(),
+    promptTemplateVersion: text("prompt_template_version").notNull(),
+    model: text("model").notNull(),
+    llmRequestHash: text("llm_request_hash"),
+    llmResponseHash: text("llm_response_hash"),
+    generator: text("generator").notNull(),
+    generatorVersion: integer("generator_version").default(1).notNull(),
+    planJson: jsonb("plan_json").default(sql`'{}'::jsonb`).notNull(),
+    diagnosticsJson: jsonb("diagnostics_json")
+      .default(sql`'[]'::jsonb`)
+      .notNull(),
+    ...timestamps,
+  },
+  (table) => ({
+    orgIdx: index("director_automation_plans_org_id_idx").on(table.orgId),
+    workspaceCreatedIdx: index(
+      "director_automation_plans_workspace_created_idx",
+    ).on(table.workspaceId, table.createdAt),
+    inputHashIdx: uniqueIndex(
+      "director_automation_plans_workspace_input_hash_idx",
+    ).on(table.workspaceId, table.planInputHash),
   }),
 );
 

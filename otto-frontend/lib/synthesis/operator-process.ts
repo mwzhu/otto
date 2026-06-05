@@ -700,7 +700,7 @@ async function runOpportunitySynthesisStage(input: {
 
   try {
     const promptTemplateId = "synthesis.opportunities";
-    const promptTemplateVersion = "1";
+    const promptTemplateVersion = "2";
     const modelId = anthropicModelForPrompt(env, promptTemplateId);
     const opportunityPack = buildOpportunityEvidencePack({
       evidencePack: input.evidencePack,

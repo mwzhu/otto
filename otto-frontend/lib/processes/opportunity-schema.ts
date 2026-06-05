@@ -52,6 +52,8 @@ export const opportunityProposalSchema = z
     title: z.string().min(3),
     problem: z.string().min(3),
     proposed_solution: z.string().min(3),
+    implementation_plan: z.string().min(3),
+    expected_result: z.string().min(3),
     current_state: z.string().min(3),
     target_state: z.string().min(3),
     automation_type: z.enum(AUTOMATION_TYPES),
@@ -95,6 +97,8 @@ export type GroundedOpportunity = Opportunity & {
   evidence_label: string;
   current_state: string;
   target_state: string;
+  implementation_plan: string;
+  expected_result: string;
   impact: OpportunityImpactBand;
   effort_band: OpportunityEffortBand;
   grounding: "evidence" | "assumption";

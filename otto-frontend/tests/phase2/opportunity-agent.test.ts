@@ -43,6 +43,10 @@ describe("automation opportunity agent", () => {
         title: "Validate invoice totals",
         problem: "Invoice totals are manually checked.",
         proposed_solution: "Use validation rules before approval.",
+        implementation_plan:
+          "Validation agent reads invoice totals from ERP, checks them before approval routing, and sends mismatches to an owner queue.",
+        expected_result:
+          "Reduce manual invoice checking time and prevent downstream payment errors in the invoice validation process.",
         current_state: "Operators compare the invoice total manually.",
         target_state: "The system validates totals before routing.",
         automation_type: "data_validation",
@@ -88,6 +92,10 @@ describe("automation opportunity agent", () => {
         title: "Validate invoice totals",
         problem: "Invoice totals are manually checked.",
         proposed_solution: "Use validation rules before approval.",
+        implementation_plan:
+          "Validation agent reads invoice totals from ERP, checks them before approval routing, and sends mismatches to an owner queue.",
+        expected_result:
+          "Reduce manual invoice checking time and prevent downstream payment errors in the invoice validation process.",
         current_state: "Operators compare the invoice total manually.",
         target_state: "The system validates totals before routing.",
         automation_type: "data_validation",
@@ -124,6 +132,10 @@ describe("automation opportunity agent", () => {
         title: "Unanchored idea",
         problem: "No graph node supports this.",
         proposed_solution: "Drop it.",
+        implementation_plan:
+          "No implementation should be built because the opportunity is not anchored to a valid graph node.",
+        expected_result:
+          "No expected result should be reported without graph evidence.",
         current_state: "No current state.",
         target_state: "No target state.",
         automation_type: "workflow_automation",
@@ -176,6 +188,10 @@ describe("automation opportunity agent", () => {
         title: "Validate invoice totals",
         problem: "Invoice totals are manually checked.",
         proposed_solution: "Use validation rules before approval.",
+        implementation_plan:
+          "Validation agent reads invoice totals from ERP, checks them before approval routing, and sends mismatches to an owner queue.",
+        expected_result:
+          "Reduce manual invoice checking time and prevent downstream payment errors in the invoice validation process.",
         current_state: "Operators compare the invoice total manually.",
         target_state: "The system validates totals before routing.",
         automation_type: "data_validation",
@@ -508,6 +524,10 @@ function heuristicOpportunity() {
     title: "Heuristic opportunity",
     problem: "Manual validation.",
     proposed_solution: "Automate validation.",
+    implementation_plan:
+      "Validation agent monitors invoice records in ERP, checks totals before approval, and routes mismatches to the process owner.",
+    expected_result:
+      "Reduce manual validation effort and prevent invoice errors from reaching downstream approval.",
     automation_type: "data_validation",
     pattern_id: "data-validation",
     pattern_label: "Data validation",

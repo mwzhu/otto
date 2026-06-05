@@ -27,7 +27,7 @@ export type GroundOpportunitiesResult = {
   diagnostics: OpportunityGroundingDiagnostic[];
 };
 
-const EFFORT_PENALTY = {
+export const EFFORT_PENALTY_BY_BAND = {
   low: 1.1,
   med: 1.35,
   high: 1.7,
@@ -135,7 +135,7 @@ export function groundOpportunities(
       exception_rate: exceptionRate,
       delay_cost: input.priceConstants.delay_cost,
       confidence: clamp(Math.min(...confidenceValues), BOUNDS.confidence),
-      effort_penalty: clamp(EFFORT_PENALTY[proposal.effort_band], BOUNDS.effort_penalty),
+      effort_penalty: clamp(EFFORT_PENALTY_BY_BAND[proposal.effort_band], BOUNDS.effort_penalty),
     };
     const roi = computeROI(assumptions);
     grounded.push({
@@ -147,6 +147,8 @@ export function groundOpportunities(
       title: proposal.title,
       problem: proposal.problem,
       proposed_solution: proposal.proposed_solution,
+      implementation_plan: proposal.implementation_plan,
+      expected_result: proposal.expected_result,
       automation_type: proposal.automation_type,
       pattern_id: proposal.pattern_id,
       pattern_label: proposal.pattern_label,

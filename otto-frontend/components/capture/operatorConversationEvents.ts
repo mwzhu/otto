@@ -4,7 +4,23 @@ export function appendCaptureMessage(
   current: CaptureConversationMessage[],
   next: CaptureConversationMessage,
 ) {
-  if (current.some((message) => message.id === next.id)) return current;
+  const existingIndex = current.findIndex((message) => message.id === next.id);
+  if (existingIndex >= 0) {
+    const existing = current[existingIndex];
+    if (existing.text === next.text) return current;
+    const nextIsTruncatedExisting =
+      next.text.length < existing.text.length &&
+      existing.text.toLowerCase().startsWith(next.text.toLowerCase());
+    const merged = [...current];
+    merged[existingIndex] = {
+      ...existing,
+      text: nextIsTruncatedExisting
+        ? existing.text
+        : next.text || existing.text,
+      timestamp: next.timestamp ?? existing.timestamp,
+    };
+    return merged;
+  }
   return [...current, next].slice(-80);
 }
 
@@ -36,15 +52,22 @@ export function captureMessageFromDataEvent(
     typeof eventPayload.sent_at === "string"
       ? eventPayload.sent_at
       : new Date().toISOString();
+  const turnIndex = eventPayload.turn_index;
+  const turnScopedId =
+    typeof turnIndex === "number" || typeof turnIndex === "string"
+      ? String(turnIndex)
+      : null;
   const baseId = `${data.event}-${String(
-    eventPayload.turn_index ?? eventPayload.notice_type ?? Date.now(),
+    turnScopedId ?? eventPayload.notice_type ?? Date.now(),
   )}`;
 
   if (data.event === "operator.turn.ingested") {
     const text = stringValue(eventPayload.transcript);
     if (!text) return null;
     return {
-      id: `${baseId}-operator`,
+      id: turnScopedId
+        ? `operator.turn-${turnScopedId}-operator`
+        : `${baseId}-operator`,
       speaker: "operator",
       text,
       timestamp,
@@ -57,7 +80,9 @@ export function captureMessageFromDataEvent(
     const text = stringValue(eventPayload.agent_utterance);
     if (!text) return null;
     return {
-      id: `${baseId}-agent`,
+      id: turnScopedId
+        ? `operator.turn-${turnScopedId}-agent`
+        : `${baseId}-agent`,
       speaker: "agent",
       text,
       timestamp,

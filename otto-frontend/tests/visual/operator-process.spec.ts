@@ -171,9 +171,9 @@ test.describe("operator process capture surfaces", () => {
     expect(presigns).toHaveLength(0);
 
     await documentInput.setInputFiles({
-      name: "returns-sop.docx",
-      mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-      buffer: Buffer.from("document"),
+      name: "returns-sop.yaml",
+      mimeType: "application/x-yaml",
+      buffer: Buffer.from("process: Returns\nowner: Support Ops\n"),
     });
     await expect(page.getByText("Ready")).toBeVisible();
     await expect(page.getByRole("button", { name: "Continue to synthesis" })).toBeVisible();
@@ -197,7 +197,8 @@ test.describe("operator process capture surfaces", () => {
 
     expect(presigns).toEqual([
       expect.objectContaining({
-        filename: "returns-sop.docx",
+        filename: "returns-sop.yaml",
+        mime_type: "application/x-yaml",
         artifact_type: "document",
       }),
       expect.objectContaining({
@@ -247,7 +248,7 @@ test.describe("operator process capture surfaces", () => {
     await expect(openDrawer.getByAltText("Captured screen evidence")).toBeVisible();
   });
 
-  test("renders transformation and automation recommendations from the workflow graph", async ({ page }) => {
+  test("renders transformation and department automation recommendations from the workflow graph", async ({ page }) => {
     await gotoClean(page, `/process/${graphProcessId}/workspace?tab=steps`);
     const topNavContainer = page
       .getByRole("navigation", { name: "Workspace sections" })
@@ -268,16 +269,18 @@ test.describe("operator process capture surfaces", () => {
     await expect(page.getByText(/Connect ERP so the check happens in-flow/)).toBeVisible();
     await expect(page.getByText("1 linked evidence source").first()).toBeVisible();
 
-    await gotoClean(page, `/process/${graphProcessId}/workspace/automation`);
-    await expect(page.getByRole("heading", { name: "Ranked automation opportunities" })).toBeVisible();
-    await expect(
-      page.getByText("Automation opportunities will appear after real ROI assumptions"),
-    ).toHaveCount(0);
+    await gotoClean(page, `/overview?workspace_id=${workspaceId}&tab=automation`);
+    await expect(page.getByRole("heading", { name: "Highest ROI department automation plan" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "The Audit" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Automation plan" })).toBeVisible();
     await expect(page.getByText("Rank #1")).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Transform Check return authorization" })).toBeVisible();
+    await expect(page.getByText("Visual Test Returns")).toBeVisible();
+    await expect(page.getByText("Top automation.")).toBeVisible();
+    await expect(page.getByText("Transform Check return authorization")).toBeVisible();
     await expect(page.getByText("Problem.")).toBeVisible();
     await expect(page.getByText("Copy the RMA number into a legacy policy lookup.")).toBeVisible();
-    await expect(page.getByText("Net score (annual)")).toBeVisible();
+    await expect(page.getByText("Net annual value").first()).toBeVisible();
+    await expect(page.getByText("ROI calculation breakdown")).toBeVisible();
     await expect(page.getByText("ERP", { exact: true })).toBeVisible();
   });
 
@@ -456,7 +459,7 @@ test.describe("operator process capture surfaces", () => {
     ]);
   });
 
-  test("starts screenshare only after consent and exposes pause, redaction, and completion controls", async ({
+  test("starts screenshare only after consent and exposes pause and completion controls", async ({
     page,
   }) => {
     await installFakeScreenshareDevices(page, { animatedScreen: true });
@@ -597,18 +600,16 @@ test.describe("operator process capture surfaces", () => {
       .getByRole("button", { name: "Start Screenshare Interview" })
       .click();
 
-    await expect(page.getByText("Capture session")).toBeVisible();
-    await expect(page.getByText("visual-screenshare-capture")).toBeVisible();
-    await expect(page.getByText("Voice runtime")).toBeVisible();
-    await expect(page.getByText("simulated")).toBeVisible();
     await expect(page.getByLabel("Shared screen preview")).toBeVisible();
-    await expect(page.getByText("Screen track publishing")).toBeVisible();
-    await expect(page.getByText(/Screen keyframes captured\s+1/)).toBeVisible({
-      timeout: 8000,
-    });
+    await expect(page.getByText("Capture session")).toHaveCount(0);
+    await expect(page.getByText("Voice runtime")).toHaveCount(0);
+    await expect(page.getByText("Screen keyframes captured")).toHaveCount(0);
+    await expect(page.getByText("Screen track publishing")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Redact last 30s" })).toHaveCount(0);
+    await expect.poll(() => frameSaveRequests, { timeout: 8000 }).toBeGreaterThan(0);
     await expect(
       page.getByText("Screen keyframe was saved, but vision analysis did not queue."),
-    ).toBeVisible();
+    ).toHaveCount(0);
     expect(firstFrameBody).toMatchObject({
       workspace_id: workspaceId,
       frame_index: 0,
@@ -648,12 +649,8 @@ test.describe("operator process capture surfaces", () => {
 
     await page.getByRole("button", { name: "Pause Interview" }).click();
     await expect(page.getByRole("button", { name: "Resume" })).toBeVisible();
-    const pausedFrameCount = await readScreenshareKeyframeCount(page);
     const pausedFrameRequests = frameSaveRequests;
     await page.waitForTimeout(1200);
-    await expect(readScreenshareKeyframeCount(page)).resolves.toBe(
-      pausedFrameCount,
-    );
     expect(frameSaveRequests).toBe(pausedFrameRequests);
 
     await page.getByRole("button", { name: "Resume" }).click();
@@ -663,22 +660,7 @@ test.describe("operator process capture surfaces", () => {
     await expect
       .poll(() => frameSaveRequests, { timeout: 8000 })
       .toBeGreaterThan(pausedFrameRequests);
-    await expect
-      .poll(() => readScreenshareKeyframeCount(page), { timeout: 8000 })
-      .toBeGreaterThan(pausedFrameCount);
-
-    await page.getByRole("button", { name: "Redact last 30s" }).click();
-    await expect(page.getByText("redacting the last 30 seconds")).toBeVisible();
-    expect(firstRedactionBody).toMatchObject({
-      workspace_id: workspaceId,
-      last_seconds: 30,
-      reason: "operator_requested_last_30_seconds",
-    });
-
-    await page.getByRole("button", { name: "Redact last 30s" }).click();
-    await expect(
-      page.getByText("Redaction failed; retry before using this capture."),
-    ).toBeVisible();
+    expect(firstRedactionBody).toBeNull();
 
     await page.getByRole("button", { name: "Complete Interview" }).click();
     await page.waitForURL(/\/synthesis\?/);
@@ -742,12 +724,6 @@ async function gotoClean(page: Page, path: string) {
       !error.includes("aria-controls"),
   );
   expect(realErrors, `errors at ${path}: ${realErrors.join(" | ")}`).toEqual([]);
-}
-
-async function readScreenshareKeyframeCount(page: Page) {
-  const text = await page.getByText(/Screen keyframes captured\s+\d+/).textContent();
-  const match = text?.match(/Screen keyframes captured\s+(\d+)/);
-  return Number(match?.[1] ?? 0);
 }
 
 async function installFakeScreenshareDevices(

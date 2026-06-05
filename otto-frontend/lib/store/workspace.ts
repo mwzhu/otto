@@ -2,7 +2,7 @@
 
 import { create } from "zustand";
 
-export type WorkspaceTab = "summary" | "steps" | "impact" | "insights" | "risk";
+export type WorkspaceTab = "summary" | "steps" | "insights" | "risk";
 
 type WorkspaceState = {
   activeTab: WorkspaceTab;

@@ -129,6 +129,7 @@ class OttoApiClient:
         turn: IngestedTurn,
         idempotency_key: str,
         on_planned_agent_utterance: Any | None = None,
+        on_agent_text_delta: Any | None = None,
         local_turn_correlation_id: str | None = None,
         pending_extraction_turns: list[int] | None = None,
         pending_slot_paths: list[str] | None = None,
@@ -150,11 +151,12 @@ class OttoApiClient:
             payload["extraction_window_id"] = extraction_window_id
         if last_spoken_intent:
             payload["last_spoken_intent"] = last_spoken_intent
-        if on_planned_agent_utterance is not None:
+        if on_planned_agent_utterance is not None or on_agent_text_delta is not None:
             return await self._stream_respond_turn(
                 payload=payload,
                 idempotency_key=idempotency_key,
                 on_planned_agent_utterance=on_planned_agent_utterance,
+                on_agent_text_delta=on_agent_text_delta,
                 local_turn_correlation_id=local_turn_correlation_id,
             )
         body = await self._post("/api/internal/director-turns/respond", payload, idempotency_key)
@@ -178,7 +180,8 @@ class OttoApiClient:
         *,
         payload: dict[str, Any],
         idempotency_key: str,
-        on_planned_agent_utterance: Any,
+        on_planned_agent_utterance: Any | None,
+        on_agent_text_delta: Any | None,
         local_turn_correlation_id: str | None,
     ) -> RespondedTurn:
         final_body: dict[str, Any] | None = None
@@ -208,9 +211,16 @@ class OttoApiClient:
                     data_lines = []
                     continue
                 data = json.loads("\n".join(data_lines) or "{}")
+                if event_name == "agent_text_delta":
+                    delta = str(data.get("delta") or "")
+                    text = str(data.get("text") or "")
+                    if delta and on_agent_text_delta is not None:
+                        maybe_awaitable = on_agent_text_delta(delta, text, data)
+                        if asyncio.iscoroutine(maybe_awaitable):
+                            await maybe_awaitable
                 if event_name == "planned_agent_utterance":
                     utterance = str(data.get("utterance") or "").strip()
-                    if utterance:
+                    if utterance and on_planned_agent_utterance is not None:
                         maybe_awaitable = on_planned_agent_utterance(utterance)
                         if asyncio.iscoroutine(maybe_awaitable):
                             await maybe_awaitable

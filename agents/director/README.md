@@ -37,20 +37,25 @@ planned utterance was saved but whose delivery update never arrived.
 
 ```bash
 cd agents/director
+cp ../../.env.example ../../.env.local
+cp .env.example .env
 uv sync
 uv run otto-director-agent download-files
 uv run --no-sync python -m director_agent.schema_contract
-uv run otto-director-preflight
-uv run otto-director-preflight --env-file .env --strict
-uv run --no-sync python -m director_agent.proof_readiness --app-env-file ../../otto-frontend/.env.local --worker-env-file .env
-OTTO_CAPTURE_SESSION_ID=<existing-director-capture-session-id> uv run otto-director-turn-smoke --env-file .env
-OTTO_CAPTURE_SESSION_ID=<completed-director-capture-session-id> uv run otto-director-session-verify --env-file .env
-uv run otto-director-agent dev
+../../scripts/with-env.sh .env -- uv run --no-sync otto-director-preflight
+../../scripts/with-env.sh .env -- uv run --no-sync otto-director-preflight --strict
+../../scripts/with-env.sh .env -- uv run --no-sync python -m director_agent.proof_readiness --app-env-file ../../.env.local --worker-env-file .env --allow-runtime-overrides
+OTTO_CAPTURE_SESSION_ID=<existing-director-capture-session-id> ../../scripts/with-env.sh .env -- uv run --no-sync otto-director-turn-smoke
+OTTO_CAPTURE_SESSION_ID=<completed-director-capture-session-id> ../../scripts/with-env.sh .env -- uv run --no-sync otto-director-session-verify
+../../scripts/with-env.sh .env -- uv run --no-sync otto-director-agent start
 ```
 
-When `--env-file` is used, explicit shell environment values win over values in the file. This is
-intentional for proof commands such as `OTTO_CAPTURE_SESSION_ID=<id> ... --env-file .env`, where the
-checked-in template often leaves `OTTO_CAPTURE_SESSION_ID` blank.
+`scripts/with-env.sh` loads the root `.env.local`, then the service `.env`, then restores any
+explicit shell environment values. This is intentional for proof commands such as
+`OTTO_CAPTURE_SESSION_ID=<id> ...`, where the checked-in template often leaves
+`OTTO_CAPTURE_SESSION_ID` blank. Passing only `--env-file .env` to the worker loads only the
+director override file and will miss shared values such as `LIVEKIT_URL` unless they are also
+present in the shell environment.
 
 ## Deployment
 
@@ -59,7 +64,7 @@ The worker can be built as a small container from this directory:
 ```bash
 docker build -f agents/director/Dockerfile -t otto-director-agent .
 npm --prefix otto-frontend run eval:director:container
-docker run --env-file .env otto-director-agent
+docker run --env-file .env.local --env-file agents/director/.env otto-director-agent
 ```
 
 The container runs `uv run --no-sync otto-director-agent start`, which starts the LiveKit Agents
@@ -137,7 +142,7 @@ checkpointing, external memory/context hydration, dispatch, and delivery updates
 Use this runbook when the goal is to prove the complete voice product, not just the typed or smoke
 path.
 
-1. Configure the Next.js app environment in `otto-frontend/.env.local`:
+1. Configure the shared local environment in `.env.local` at the repository root:
    - `DATABASE_URL` and `DATABASE_SERVICE_URL`
    - WorkOS, R2, Inngest, Anthropic, and Voyage/OpenAI keys needed by the app
    - `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, and `LIVEKIT_AGENT_NAME`
@@ -158,57 +163,44 @@ path.
 3. Start the app:
 
    ```bash
+   cd otto-frontend
    npm run dev
    ```
 
    For a production-mode check, use `OTTO_DEV_AUTH_BYPASS=false npm run build` and then
    `npm run start` with the same environment.
 
-4. Configure the worker environment in `agents/director/.env` with the same LiveKit, service-token,
-   Anthropic, provider, strict-preflight, and privacy-ack values. Keep `LIVEKIT_AGENT_NAME` identical
-   to the app value. To generate the worker file from the app file without printing secret values:
-
-   ```bash
-   cd agents/director
-   uv run --no-sync python -m director_agent.proof_readiness \
-     --app-env-file ../../otto-frontend/.env.local \
-     --worker-env-file .env \
-     --write-worker-env-from-app
-   ```
-
-   The generated `agents/director/.env` is gitignored. If it already exists, the command refuses to
-   overwrite it unless you add `--overwrite-worker-env`.
-5. Check the app and worker env files together. This catches mismatched service tokens, agent names,
+4. Configure `agents/director/.env` only for director-specific overrides such as
+   `LIVEKIT_AGENT_NAME`, endpointing, or smoke-test capture-session values. Shared LiveKit,
+   provider, database, and service-token values belong in the repository root `.env.local`.
+5. Check the app and worker env together. This catches mismatched service tokens, agent names,
    provider modes, and missing privacy acknowledgements without printing secret values:
 
    ```bash
    cd agents/director
-   uv run --no-sync python -m director_agent.proof_readiness \
-     --app-env-file ../../otto-frontend/.env.local \
-     --worker-env-file .env
+   ../../scripts/with-env.sh .env -- uv run --no-sync python -m director_agent.proof_readiness \
+     --app-env-file ../../.env.local \
+     --worker-env-file .env \
+     --allow-runtime-overrides
    ```
-
-   By default this compares the files as written. If you intentionally inject secrets from the shell
-   or a deployment runtime instead of storing them in either file, add `--allow-runtime-overrides`
-   and run the command from the same environment that will start the app and worker.
 
 6. Prove the worker can boot in strict voice mode:
 
    ```bash
    cd agents/director
-   uv run --no-sync otto-director-preflight --env-file .env --strict
+   ../../scripts/with-env.sh .env -- uv run --no-sync otto-director-preflight --strict
    ```
 
 7. Start the worker in the same directory:
 
    ```bash
-   uv run --no-sync otto-director-agent start --env-file .env
+   ../../scripts/with-env.sh .env -- uv run --no-sync otto-director-agent start
    ```
 
    Or run the container after `npm --prefix otto-frontend run eval:director:container`:
 
    ```bash
-   docker run --rm --env-file agents/director/.env otto-director-agent
+   docker run --rm --env-file .env.local --env-file agents/director/.env otto-director-agent
    ```
 
 8. In the browser, open `/onboarding/voice`, pass the consent/microphone gate, complete a real
@@ -219,9 +211,9 @@ path.
 
    ```bash
    OTTO_CAPTURE_SESSION_ID=<completed-director-capture-session-id> \
-     uv run --no-sync otto-director-session-verify \
+     ../../scripts/with-env.sh .env -- uv run --no-sync otto-director-session-verify \
        --env-file .env \
-       --app-env-file ../../otto-frontend/.env.local \
+       --app-env-file ../../.env.local \
        --strict-voice-env
    ```
 
@@ -287,4 +279,6 @@ without failing. If the verification environment itself is incomplete, `--allow-
 structured preflight bundle naming the missing env vars instead of raising a traceback.
 For the final production proof, run it with `--strict-voice-env`; that mode also requires the full
 LiveKit/provider/privacy configuration before reading the persisted session evidence, so a passing
-verification cannot accidentally skip the provider setup gate.
+verification cannot accidentally skip the provider setup gate. Use the wrapper with
+`--env-file .env` and `--app-env-file ../../.env.local`, as shown in the production proof runbook,
+so the verifier sees both shared root config and director overrides.

@@ -311,7 +311,7 @@ Pre-start page:
 Live page:
 
 - shows transcript from persisted turns
-- shows structured notes/slot coverage from latest `slot_states`
+- shows Operations Notes/slot coverage from latest `slot_states`
 - supports mute, pause, and end controls
 - when end is clicked, completes session and routes to `/overview`
 

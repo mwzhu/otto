@@ -1,6 +1,10 @@
 import { describe, expect, test } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import {
+  appendCaptureMessage,
+  captureMessageFromDataEvent,
+} from "@/components/capture/operatorConversationEvents";
 import { operatorTurnPlanAnthropicToolSchema } from "@/lib/interview/operator/brain";
 import { operatorTurnPlanSchema } from "@/lib/interview/operator/schema";
 import { operatorSlotScope } from "@/lib/interview/operator/slot-schema";
@@ -9,6 +13,43 @@ import { directorTurnPlanSchema } from "@/lib/schemas/phase1";
 const root = process.cwd();
 
 describe("Phase 2 operator capture contract", () => {
+  test("conversation events merge dispatched and delivery updates for the same agent turn", () => {
+    const dispatched = captureMessageFromDataEvent([
+      JSON.stringify({
+        event: "operator.turn.dispatched",
+        payload: {
+          turn_index: 4,
+          agent_utterance: "Got it. Keep going with the next step.",
+          sent_at: "2026-06-04T21:19:00.000Z",
+        },
+      }),
+    ]);
+    const delivered = captureMessageFromDataEvent([
+      JSON.stringify({
+        event: "operator.turn.delivery_updated",
+        payload: {
+          turn_index: 4,
+          agent_utterance: "Got it. Keep going",
+          sent_at: "2026-06-04T21:19:01.000Z",
+        },
+      }),
+    ]);
+
+    expect(dispatched).not.toBeNull();
+    expect(delivered).not.toBeNull();
+    expect(dispatched?.id).toBe(delivered?.id);
+
+    const messages = appendCaptureMessage(
+      appendCaptureMessage([], dispatched!),
+      delivered!,
+    );
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      speaker: "agent",
+      text: "Got it. Keep going with the next step.",
+    });
+  });
+
   test("capture evidence migration adds mode provenance and step-scoped slots", () => {
     const migration = read("migrations/0006_capture_evidence.sql");
     const sourceMigration = read(

@@ -52,7 +52,7 @@ export async function parseDocument(input: {
     throw new Error(`Document parser failed: ${providerErrors.join("; ")}`);
   }
   throw new Error(
-    `No parser is configured for ${input.mimeType}. Use TXT, Markdown, CSV, or JSON, or configure LlamaParse/Unstructured.`,
+    `No parser is configured for ${input.mimeType}. Use TXT, Markdown, CSV, JSON, or YAML, or configure LlamaParse/Unstructured.`,
   );
 }
 

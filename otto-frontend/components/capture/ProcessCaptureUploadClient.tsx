@@ -17,6 +17,12 @@ type FileRow = {
 
 const MAX_DOCUMENT_UPLOAD_BYTES = 50 * 1024 * 1024;
 const DOCUMENT_EXTENSIONS = [
+  ".txt",
+  ".text",
+  ".log",
+  ".json",
+  ".yaml",
+  ".yml",
   ".pdf",
   ".doc",
   ".docx",
@@ -26,6 +32,11 @@ const DOCUMENT_EXTENSIONS = [
   ".xlsx",
 ];
 const DOCUMENT_MIME_TYPES = [
+  "text/plain",
+  "application/json",
+  "text/yaml",
+  "application/yaml",
+  "application/x-yaml",
   "application/pdf",
   "application/msword",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -158,12 +169,13 @@ export function ProcessCaptureUploadClient({
         <p className="mt-1 max-w-[420px] text-[12px] leading-relaxed text-ink-muted">
           {uploadKind === "screen_recording"
             ? "Accepted formats include MP4, QuickTime, and WebM."
-            : "Accepted formats include PDF, DOCX, PPTX, XLSX, and similar process documents."}
+            : "Accepted formats include SOPs, structured files, and similar process documents."}
         </p>
         <input
+          key={`${uploadKind}-upload-file-input-v2`}
           ref={inputRef}
           type="file"
-          accept={acceptedFileExtensions(uploadKind)}
+          accept={acceptedFileTypes(uploadKind)}
           className="hidden"
           onChange={(event) => void handleFiles(Array.from(event.target.files ?? []))}
         />
@@ -222,10 +234,10 @@ function fallbackMimeType(uploadKind: UploadKind) {
     : "application/octet-stream";
 }
 
-function acceptedFileExtensions(uploadKind: UploadKind) {
+function acceptedFileTypes(uploadKind: UploadKind) {
   return uploadKind === "screen_recording"
-    ? VIDEO_EXTENSIONS.join(",")
-    : DOCUMENT_EXTENSIONS.join(",");
+    ? [...VIDEO_EXTENSIONS, ...VIDEO_MIME_TYPES].join(",")
+    : "*/*";
 }
 
 function validateProcessUploadFile(file: File, uploadKind: UploadKind) {
@@ -238,7 +250,7 @@ function validateProcessUploadFile(file: File, uploadKind: UploadKind) {
   if (!isAcceptedProcessUploadFile(file, uploadKind)) {
     return uploadKind === "screen_recording"
       ? "Unsupported file type. Upload an MP4, QuickTime, or WebM screen recording."
-      : "Unsupported file type. Upload PDF, DOCX, PPTX, XLSX, or similar process documents.";
+      : "Unsupported file type. Upload a supported SOP, structured file, or process document.";
   }
   return null;
 }

@@ -13,7 +13,6 @@ import {
   getProcessGraphVersions,
 } from "@/lib/processes/graph-queries";
 import { getProcessFollowUps } from "@/lib/processes/follow-up-queries";
-import { getProcessOpportunities } from "@/lib/processes/opportunity-queries";
 import WorkspaceClient from "./WorkspaceClient";
 import type { WorkspaceTab } from "@/lib/store/workspace";
 
@@ -51,15 +50,8 @@ export default async function WorkspacePage({
   if (!process) notFound();
   const semanticFollowUps = followUps.filter(isSemanticWorkflowFollowUp);
   if (graph) {
-    const opportunitiesResult = await getProcessOpportunities({
-      orgId: auth.orgId,
-      workspaceId: workspace.id,
-      processId: id,
-      graph,
-    });
     const counts: Partial<Record<WorkspaceTab, number>> = {
       steps: graph.nodes.filter((node) => node.type === "task").length,
-      impact: opportunitiesResult.opportunities.length,
       insights: graph.summary ? 1 : graph.nodes.length > 0 ? 6 : 0,
       risk:
         graph.nodes.filter((node) => node.type === "exception").length +
@@ -72,8 +64,6 @@ export default async function WorkspacePage({
         graph={graph}
         graphVersions={graphVersions}
         followUps={followUps}
-        impactOpportunities={opportunitiesResult.opportunities}
-        opportunitySource={opportunitiesResult.source}
         initialTab="summary"
         counts={counts}
         canApproveDraft={canApproveDraft}
@@ -107,12 +97,12 @@ export default async function WorkspacePage({
             diagram with steps, systems, exceptions, workarounds, and evidence.
           </p>
           <div className="mt-4 flex flex-wrap gap-2">
-            <Link href={`/process/${id}/capture/voice`}>
-              <Button size="sm">Start Voice Interview</Button>
-            </Link>
             <Link href={`/process/${id}/capture/screenshare`}>
+              <Button size="sm">Share Screen</Button>
+            </Link>
+            <Link href={`/process/${id}/capture/voice`}>
               <Button size="sm" variant="secondary">
-                Share Screen
+                Start Voice Interview
               </Button>
             </Link>
             <Link href={`/process/${id}/capture/upload-video`}>
@@ -205,27 +195,6 @@ export default async function WorkspacePage({
           <p className="mt-1 text-[12px] text-ink-muted">
             linked evidence sources
           </p>
-        </Card>
-        <Card className="p-5">
-          <h2 className="text-[14px] font-semibold tracking-tight text-ink">
-            Accountability
-          </h2>
-          <div className="mt-3 space-y-2">
-            {process.accountability.map((item) => (
-              <div
-                key={`${item.role}-${item.person ?? ""}`}
-                className="text-[12.5px]"
-              >
-                <div className="font-medium text-ink">{item.role}</div>
-                <div className="text-ink-muted">{item.description}</div>
-              </div>
-            ))}
-            {process.accountability.length === 0 && (
-              <span className="text-[12.5px] text-ink-muted">
-                No roles linked yet.
-              </span>
-            )}
-          </div>
         </Card>
       </aside>
     </main>

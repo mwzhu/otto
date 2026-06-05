@@ -7,7 +7,7 @@ export default function OnboardingPage() {
     <div className="space-y-12">
       <header className="space-y-2 text-center">
         <h1 className="text-[28px] font-semibold tracking-tight text-ink">
-          Clarity starts with your perspective
+          Otto starts with your perspective
         </h1>
         <p className="mx-auto max-w-[520px] text-[13.5px] leading-relaxed text-ink-secondary">
           Tell us about your team: who&apos;s involved, how work flows, where the pain

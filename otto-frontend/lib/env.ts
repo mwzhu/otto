@@ -86,6 +86,7 @@ export const serverEnvSchema = z.object({
   SYNTHESIS_PLANNER_MODEL: z.string().optional(),
   OPPORTUNITY_MODEL: z.string().optional(),
   OPPORTUNITY_AGENT_ENABLED: boolEnv,
+  DIRECTOR_AUTOMATION_PLAN_GENERATION_ENABLED: boolEnv,
   LLAMAPARSE_API_KEY: z.string().optional(),
   LLAMAPARSE_API_URL: z.string().url().optional(),
   UNSTRUCTURED_API_KEY: z.string().optional(),

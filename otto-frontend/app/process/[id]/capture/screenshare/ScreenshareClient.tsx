@@ -66,16 +66,6 @@ type LiveKitClientModule = {
   createLocalAudioTrack?: () => Promise<LiveKitTrack>;
 };
 
-type CaptureHealthKey =
-  | "livekitConnected"
-  | "micPublishing"
-  | "screenTrackPublishing"
-  | "keyframesSaved"
-  | "agentJoined"
-  | "recordingActive";
-
-type CaptureHealth = Record<CaptureHealthKey, boolean>;
-
 const OPERATOR_SCREENSHARE_SESSION_KEY = "otto.operatorScreenshare.session";
 const SCREEN_FRAME_SAMPLE_INTERVAL_MS = 500;
 const SCREEN_FRAME_DUPLICATE_DIFF_THRESHOLD = 0.08;
@@ -100,25 +90,13 @@ export default function ScreenshareClient({
   processId: string;
   processName: string;
 }) {
-  const [paused, setPaused] = useState(false);
-  const [redactToast, setRedactToast] = useState(false);
   const [language, setLanguage] = useState("en");
   const [consentGiven, setConsentGiven] = useState(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [redactionError, setRedactionError] = useState<string | null>(null);
   const [session, setSession] = useState<ScreenshareSession | null>(null);
   const [messages, setMessages] = useState<CaptureConversationMessage[]>([]);
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
-  const [capturedFrameCount, setCapturedFrameCount] = useState(0);
-  const [captureHealth, setCaptureHealth] = useState<CaptureHealth>({
-    livekitConnected: false,
-    micPublishing: false,
-    screenTrackPublishing: false,
-    keyframesSaved: false,
-    agentJoined: false,
-    recordingActive: false,
-  });
   const roomRef = useRef<LiveKitRoomLike | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
@@ -146,21 +124,8 @@ export default function ScreenshareClient({
         onError: (message) => {
           if (!cancelled) setError(message);
         },
-        onFrameCaptured: () => {
-          if (!cancelled) {
-            setCapturedFrameCount((count) => count + 1);
-            setCaptureHealth((current) => ({
-              ...current,
-              keyframesSaved: true,
-            }));
-          }
-        },
+        onFrameCaptured: () => undefined,
       });
-      setCaptureHealth((current) => ({
-        ...current,
-        screenTrackPublishing: true,
-        recordingActive: Boolean(mediaRecorderRef.current),
-      }));
       return () => {
         cancelled = true;
         stopMediaRecorderWithoutUpload(mediaRecorderRef);
@@ -195,15 +160,10 @@ export default function ScreenshareClient({
         if (!cancelled) setError(message);
       },
       onFrameCaptured: () => {
-        if (!cancelled) {
-          setCapturedFrameCount((count) => count + 1);
-          setCaptureHealth((current) => ({ ...current, keyframesSaved: true }));
-        }
+        return undefined;
       },
       onHealthChange: (patch) => {
-        if (!cancelled) {
-          setCaptureHealth((current) => ({ ...current, ...patch }));
-        }
+        void patch;
       },
     });
     return () => {
@@ -273,15 +233,6 @@ export default function ScreenshareClient({
         JSON.stringify(nextSession),
       );
       setSession(nextSession);
-      setCapturedFrameCount(0);
-      setCaptureHealth({
-        livekitConnected: liveKit?.mode === "livekit" ? false : true,
-        micPublishing: false,
-        screenTrackPublishing: false,
-        keyframesSaved: false,
-        agentJoined: false,
-        recordingActive: liveKit?.mode === "livekit",
-      });
       setMessages([
         {
           id: `capture-started-${capture.capture_session.id}`,
@@ -376,50 +327,12 @@ export default function ScreenshareClient({
   return (
     <main className="mx-auto grid w-full max-w-[1400px] flex-1 grid-cols-[1.4fr_460px] gap-6 px-6 py-6">
       <section className="flex flex-col gap-4">
-        <div className="rounded-md border border-subtle bg-surface px-3 py-2 text-[12px] text-ink-secondary">
-          Capture session{" "}
-          <span className="font-mono text-ink">{session.captureSessionId}</span>
-          <span className="ml-3">
-            Voice runtime{" "}
-            <span className="font-mono text-ink">
-              {session.liveKit?.mode ?? "pending"}
-            </span>
-          </span>
-        </div>
         <ScreenSharePreview stream={screenStream} />
-        <div className="flex items-center justify-center gap-3 text-[11.5px] text-ink-secondary">
-          <span>
-            Screen keyframes captured{" "}
-            <span className="font-mono text-ink">{capturedFrameCount}</span>
-          </span>
-          {capturedFrameCount === 0 && (
-            <span className="text-ink-muted">
-              Keep the shared window visible and narrate the walkthrough.
-            </span>
-          )}
-        </div>
         {error && (
           <p className="self-center rounded-md border border-danger/20 bg-danger/5 px-3 py-1.5 text-[11.5px] text-danger">
             {error}
           </p>
         )}
-        <div className="grid grid-cols-3 gap-2 text-[11px] text-ink-secondary">
-          {captureHealthItems(captureHealth).map((item) => (
-            <div
-              key={item.label}
-              className="flex items-center gap-2 rounded-md border border-subtle bg-canvas px-2 py-1.5"
-            >
-              <span
-                className={[
-                  "size-1.5 rounded-full",
-                  item.ready ? "bg-success" : "bg-ink-muted",
-                ].join(" ")}
-                aria-hidden
-              />
-              <span>{item.label}</span>
-            </div>
-          ))}
-        </div>
         <CaptureControls
           processId={processId}
           workspaceId={workspaceId}
@@ -446,19 +359,10 @@ export default function ScreenshareClient({
               screenStreamRef,
               samplerCleanupRef,
               onFrameCaptured: () => {
-                setCapturedFrameCount((count) => count + 1);
-                setCaptureHealth((current) => ({
-                  ...current,
-                  keyframesSaved: true,
-                }));
+                return undefined;
               },
               onError: setError,
             });
-            setPaused(nextPaused);
-            setCaptureHealth((current) => ({
-              ...current,
-              recordingActive: !nextPaused && Boolean(mediaRecorderRef.current),
-            }));
           }}
           onComplete={async () => {
             setError(null);
@@ -491,39 +395,10 @@ export default function ScreenshareClient({
             );
           }}
         />
-        {redactToast && (
-          <div className="self-center rounded-md bg-ink px-3 py-1.5 text-[11.5px] text-canvas shadow-pop">
-            Got it — redacting the last 30 seconds across the recording,
-            transcript, screen events, and embeddings.
-          </div>
-        )}
-        {redactionError && (
-          <div className="self-center rounded-md border border-danger/20 bg-danger/5 px-3 py-1.5 text-[11.5px] text-danger">
-            {redactionError}
-          </div>
-        )}
       </section>
 
       <aside className="flex h-[calc(100vh-130px)] flex-col overflow-hidden rounded-lg border border-subtle bg-surface shadow-card">
-        <ConversationPanel
-          paused={paused}
-          messages={messages}
-          runtimeStatus={session.liveKit?.mode ?? "pending"}
-          onRedactRequested={async () => {
-            setRedactionError(null);
-            try {
-              await redactLastWindow({
-                workspaceId,
-                processId,
-                captureSessionId: session.captureSessionId,
-              });
-              setRedactToast(true);
-              setTimeout(() => setRedactToast(false), 3500);
-            } catch (err) {
-              setRedactionError(redactionFailureMessage(err));
-            }
-          }}
-        />
+        <ConversationPanel messages={messages} />
       </aside>
     </main>
   );
@@ -678,37 +553,6 @@ async function completeOperatorCapture({
   );
 }
 
-async function redactLastWindow({
-  workspaceId,
-  processId,
-  captureSessionId,
-}: {
-  workspaceId: string;
-  processId: string;
-  captureSessionId: string;
-}) {
-  await postJson(
-    `/api/processes/${processId}/operator-captures/${captureSessionId}/redactions`,
-    {
-      workspace_id: workspaceId,
-      last_seconds: 30,
-      reason: "operator_requested_last_30_seconds",
-    },
-    `operator-capture-redact-last-30-${captureSessionId}-${Date.now()}`,
-  );
-}
-
-function redactionFailureMessage(error: unknown) {
-  if (!(error instanceof Error)) return "Could not redact capture.";
-  if (
-    error.message === "Unexpected server error." ||
-    error.message === "Request failed (500)"
-  ) {
-    return "Redaction failed; retry before using this capture.";
-  }
-  return error.message;
-}
-
 function screenFrameFailureMessage(error: unknown) {
   if (!(error instanceof Error)) return "Could not save a screenshare keyframe.";
   if (
@@ -734,7 +578,7 @@ async function connectScreenshareRoom(input: {
   onEvent: (message: CaptureConversationMessage) => void;
   onError: (message: string) => void;
   onFrameCaptured: () => void;
-  onHealthChange: (patch: Partial<CaptureHealth>) => void;
+  onHealthChange: (patch: Record<string, boolean>) => void;
 }) {
   const roomUrl = input.session.liveKit?.url;
   const roomToken = input.session.liveKit?.token;
@@ -1007,17 +851,6 @@ function disconnectScreenshareRoom(
   audioElsRef.current = [];
 }
 
-function captureHealthItems(health: CaptureHealth) {
-  return [
-    { label: "LiveKit connected", ready: health.livekitConnected },
-    { label: "Mic publishing", ready: health.micPublishing },
-    { label: "Screen track publishing", ready: health.screenTrackPublishing },
-    { label: "Keyframes saved", ready: health.keyframesSaved },
-    { label: "Agent joined", ready: health.agentJoined },
-    { label: "Browser recording buffer", ready: health.recordingActive },
-  ];
-}
-
 function startMediaRecorderFallback(input: {
   screenStream: MediaStream;
   micStream: MediaStream | null;
@@ -1285,9 +1118,11 @@ function startScreenFrameSampler(input: {
         },
         `screen-frame-bind-${input.session.captureSessionId}-${currentFrame}`,
       );
-      if (savedFrame.warning?.message) input.onError(savedFrame.warning.message);
       input.onFrameCaptured();
       firstFrameSaved = true;
+      if (savedFrame.warning?.message) {
+        console.warn("Screenshare keyframe background warning", savedFrame.warning);
+      }
     } catch (error) {
       input.onError(screenFrameFailureMessage(error));
     } finally {

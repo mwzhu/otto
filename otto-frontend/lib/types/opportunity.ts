@@ -27,6 +27,8 @@ export type Opportunity = {
   title: string;
   problem: string;
   proposed_solution: string;
+  implementation_plan: string;
+  expected_result: string;
   automation_type: AutomationType;
   pattern_id: string;
   pattern_label: string;

@@ -1327,6 +1327,8 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(synthesisClient).toContain('sp.get("capture_session_id")');
     expect(synthesisClient).toContain("params.set(\"capture_session_id\"");
     expect(synthesisClient).toContain("!captureSessionId && !synthesisBlocked && statusTimedOut");
+    expect(synthesisClient).toContain("const statusPollTimedOut");
+    expect(synthesisClient).toContain("if (!captureSessionId) return");
     expect(transaction).toContain("capture_session_completed");
     expect(transaction).toContain("capture_session_completed_at");
     expect(transaction).toContain("captureSessions.completedAt");
@@ -1624,10 +1626,10 @@ describe("Week 3 director brain and document pipeline", () => {
     );
     expect(transcriptChat).toContain('noticeType === "failed_completion"');
     expect(transcriptChat).toContain("expectedDisconnectRef.current = false");
-    expect(transcriptChat).toContain("hasPersistedIntro");
-    expect(transcriptChat).toContain('message.stage_name === "director.opening"');
-    expect(transcriptChat).toContain("introMessage(session)");
-    expect(transcriptChat).toContain('stage_name: "director.opening"');
+    expect(transcriptChat).toContain("showStartInterviewPrompt");
+    expect(transcriptChat).toContain("waitingForFirstAgentMessage");
+    expect(transcriptChat).toContain('parsed.payload.stage_name ?? "director.turn"');
+    expect(transcriptChat).not.toContain("introMessage(session)");
     expect(transcriptChat).toContain("sendLiveKitControl");
     expect(transcriptChat).toContain("refreshLiveKitSession");
     expect(transcriptChat).toContain('"/api/livekit/director-room"');
@@ -1675,7 +1677,7 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(transcriptChat).toContain("director.turn.delivery_updated");
     expect(transcriptChat).toContain("updateAgentMessageForTurn");
     expect(transcriptChat).toContain("removeAgentMessageForTurn");
-    expect(transcriptChat).toContain("Review queued");
+    expect(transcriptChat).not.toContain("Review queued");
     expect(transcriptChat).toContain("setLastTelemetry({");
     expect(transcriptChat).toContain("id: `agent-${stageName}-${turnIndex}`");
     expect(transcriptChat).toContain("parsed.payload.stage_name ?? \"director.turn\"");
@@ -1708,9 +1710,9 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(transcriptChat).toContain("clearLiveKitReconnectTimer");
     expect(transcriptChat).toContain("Voice room disconnected. Reconnecting...");
     expect(transcriptChat).toContain("Voice room disconnected. Press Start mic to reconnect.");
-    expect(transcriptChat).toContain("Transcribing");
-    expect(transcriptChat).toContain("Mic standby");
-    expect(transcriptChat).toContain("Audio recording off");
+    expect(transcriptChat).not.toContain("Transcribing");
+    expect(transcriptChat).not.toContain("Mic standby");
+    expect(transcriptChat).not.toContain("Audio recording off");
     expect(transcriptChat).toContain("expectedLiveKitDisconnectRef");
     expect(transcriptChat).toContain("liveKitConnectingRef");
     expect(transcriptChat).toContain("liveKitConnectedSessionRef");
@@ -1732,7 +1734,13 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(transcriptChat).toContain("input.connectedSessionRef.current !== input.session.captureSessionId");
     expect(transcriptChat).toContain("input.connectedSessionRef.current = activeSession.captureSessionId");
     expect(transcriptChat).toContain("input.expectedDisconnectRef.current ||");
-    expect(transcriptChat).toContain("!input.statusRef.current.listening ||");
+    expect(transcriptChat).toContain("(input.publishMicrophone && !input.statusRef.current.listening)");
+    expect(transcriptChat).toContain("publishMicrophone: false");
+    expect(transcriptChat).toContain("startAgent: false");
+    expect(transcriptChat).toContain("surfaceErrors: false");
+    expect(transcriptChat).toContain("publishMicrophone: true");
+    expect(transcriptChat).toContain("startAgent: true");
+    expect(transcriptChat).toContain("surfaceErrors: true");
     expect(transcriptChat).toContain("const [voiceFallback, setVoiceFallback] = useState(false)");
     expect(transcriptChat).toContain('const effectiveRoomMode = voiceFallback ? "simulated" : session?.roomMode');
     expect(transcriptChat).toContain("enableTypedFallback: () => {");
@@ -1805,13 +1813,14 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(planner).toContain('"tool_choice"');
     expect(planner).toContain("director_turn_plan_tool_schema()");
     expect(planner).toContain("emit_director_turn_plan");
-    expect(transcriptChat).toContain("if (room.localParticipant.setMicrophoneEnabled)");
-    expect(transcriptChat).toContain("await room.localParticipant.setMicrophoneEnabled(true)");
-    expect(transcriptChat).toContain("} else if (livekit.createLocalAudioTrack)");
+    expect(transcriptChat).toContain("livekit.createLocalAudioTrack?.()");
+    expect(transcriptChat).toContain("await room.localParticipant.publishTrack?.(track,");
+    expect(transcriptChat).toContain("source: livekit.Track?.Source?.Microphone");
+    expect(transcriptChat).toContain("await room.localParticipant.setMicrophoneEnabled?.(true)");
     expect(
-      transcriptChat.indexOf("if (room.localParticipant.setMicrophoneEnabled)"),
+      transcriptChat.indexOf("livekit.createLocalAudioTrack?.()"),
     ).toBeLessThan(
-      transcriptChat.indexOf("await room.localParticipant.publishTrack?.(track)"),
+      transcriptChat.indexOf("await room.connect(activeSession.roomUrl"),
     );
     expect(transcriptChat).toContain("room.localParticipant.publishData(payload");
     expect(transcriptChat).not.toContain("const publishData = room?.localParticipant.publishData");
@@ -1945,13 +1954,33 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(voicePreStart.indexOf("await requestMicrophonePermission()")).toBeLessThan(
       voicePreStart.indexOf('"/api/director-interviews"'),
     );
-    expect(voicePreStart.indexOf('"/api/livekit/director-room"')).toEqual(
-      voicePreStart.lastIndexOf('"/api/livekit/director-room"'),
+    const readinessCheckIndex = voicePreStart.indexOf('"/api/livekit/director-room"');
+    const sessionCreateIndex = voicePreStart.indexOf('"/api/director-interviews"');
+    const roomPrewarmIndex = voicePreStart.indexOf(
+      '"/api/livekit/director-room"',
+      readinessCheckIndex + 1,
     );
+    expect(roomPrewarmIndex).toBeGreaterThan(sessionCreateIndex);
     expect(voicePreStart).toContain('roomMode: readiness.mode === "livekit" ? "livekit" : "simulated"');
     expect(voicePreStart).toContain("roomUrl: null");
     expect(voicePreStart).toContain("roomToken: null");
+    expect(voicePreStart).toContain("roomUrl: room.url");
+    expect(voicePreStart).toContain("roomToken: room.token");
     expect(transcriptChat).toContain("refreshLiveKitSession(input.session, () =>");
+    expect(transcriptChat).toContain("hasUsableLiveKitCredentials(input.session)");
+    expect(transcriptChat).toContain("livekit.createLocalAudioTrack?.()");
+    expect(transcriptChat).toContain("source: livekit.Track?.Source?.Microphone");
+    const liveKitStartIndex = transcriptChat.indexOf('if (effectiveRoomMode === "livekit")');
+    const optimisticListeningIndex = transcriptChat.indexOf(
+      "setListening(true);",
+      liveKitStartIndex,
+    );
+    const connectLiveKitIndex = transcriptChat.indexOf(
+      "void connectLiveKit({",
+      liveKitStartIndex,
+    );
+    expect(optimisticListeningIndex).toBeGreaterThan(liveKitStartIndex);
+    expect(optimisticListeningIndex).toBeLessThan(connectLiveKitIndex);
   });
 
   test("degraded director recovery applies extraction without advancing the live interview", () => {
@@ -2029,6 +2058,8 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(synthesisClient).toContain("const synthesisBlocked");
     expect(synthesisClient).toContain("status.ready_for_overview !== true");
     expect(synthesisClient).toContain("!captureSessionId && !synthesisBlocked && statusTimedOut");
+    expect(synthesisClient).toContain("const statusPollTimedOut");
+    expect(synthesisClient).toContain("if (!captureSessionId) return");
     expect(synthesisClient).not.toContain("status?.terminal === true ||");
     expect(synthesisClient).toContain("STATUS_TIMEOUT_MS");
     expect(statusRoute).toContain("ensureWorkspaceRole");

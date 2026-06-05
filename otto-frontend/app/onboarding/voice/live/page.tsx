@@ -5,7 +5,7 @@ export default function VoiceLivePage() {
     <div className="space-y-8">
       <header className="space-y-1.5 text-center text-ink-muted">
         <h1 className="text-[22px] font-semibold tracking-tight text-ink-muted">
-          Clarity starts with your perspective
+          Otto starts with your perspective
         </h1>
         <p className="mx-auto max-w-[520px] text-[12.5px] leading-relaxed">
           Tell us about your team: who&apos;s involved, how work flows, where the pain

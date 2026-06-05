@@ -17,6 +17,8 @@
           "title",
           "problem",
           "proposed_solution",
+          "implementation_plan",
+          "expected_result",
           "current_state",
           "target_state",
           "automation_type",
@@ -36,6 +38,8 @@
           "title": { "type": "string" },
           "problem": { "type": "string" },
           "proposed_solution": { "type": "string" },
+          "implementation_plan": { "type": "string" },
+          "expected_result": { "type": "string" },
           "current_state": { "type": "string" },
           "target_state": { "type": "string" },
           "automation_type": {

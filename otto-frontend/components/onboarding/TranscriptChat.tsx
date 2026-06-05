@@ -173,7 +173,10 @@ type LiveKitRoomLike = {
   disconnect: () => void;
   localParticipant: {
     setMicrophoneEnabled?: (enabled: boolean) => Promise<void>;
-    publishTrack?: (track: LiveKitAudioTrack) => Promise<unknown>;
+    publishTrack?: (
+      track: LiveKitAudioTrack,
+      options?: Record<string, unknown>,
+    ) => Promise<unknown>;
     publishData?: (
       payload: Uint8Array,
       options?: { reliable?: boolean; topic?: string },
@@ -186,12 +189,10 @@ type LiveKitRoomLike = {
 type LiveKitClientModule = {
   Room: new (options?: Record<string, unknown>) => LiveKitRoomLike;
   RoomEvent: Record<string, string>;
-  Track?: { Kind?: { Audio?: string } };
+  Track?: { Kind?: { Audio?: string }; Source?: { Microphone?: string } };
   createLocalAudioTrack?: () => Promise<LiveKitAudioTrack>;
 };
 
-const INITIAL_PROMPT =
-  "Hi. I'm going to build a high-level map of the processes your team owns: outcomes, people, systems, cadence, metrics, and friction. To start, what part of the business do you oversee?";
 const DIRECTOR_SESSION_CHANGED_EVENT = "otto.directorInterview.session.changed";
 const MAX_LIVEKIT_RECONNECT_ATTEMPTS = 3;
 
@@ -319,17 +320,21 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
   );
   const totalSlots = Math.max(coverage.length, 13);
   const coveragePercent = Math.round((filledSlots / totalSlots) * 100);
-  const displayMessages = useMemo(() => {
-    if (!session) return messages;
-    const hasPersistedIntro = messages.some(
-      (message) =>
-        message.speaker === "agent" &&
-        (message.stage_name === "director.opening" ||
-          message.text === INITIAL_PROMPT),
-    );
-    if (hasPersistedIntro) return messages;
-    return [introMessage(session), ...messages];
-  }, [messages, session]);
+  const displayMessages = useMemo(
+    () =>
+      listening
+        ? messages
+        : messages.filter((message) => !isDirectorOpeningMessage(message)),
+    [listening, messages],
+  );
+  const waitingForFirstAgentMessage = Boolean(
+    session && displayMessages.length === 0 && listening,
+  );
+  const showStartInterviewPrompt = Boolean(
+    session && displayMessages.length === 0 && !listening && !submitting,
+  );
+  const visibleError =
+    !listening && isLiveKitPlaybackBlockedError(error) ? null : error;
 
   const appendMessage = useCallback((
     speaker: TranscriptMessage["speaker"],
@@ -459,7 +464,7 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
       setInterim("");
       const slowTurnTimer = window.setTimeout(() => {
         setTurnWaitMessage(
-          "Structured notes are still updating. Your answer is saved locally and Otto will continue once the turn response returns.",
+          "Operations Notes are still updating. Your answer is saved locally and Otto will continue once the turn response returns.",
         );
       }, 6000);
 
@@ -486,6 +491,53 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
     [appendMessage, session, submitting],
   );
 
+  useEffect(() => {
+    if (session?.roomMode !== "livekit") return;
+    activeCaptureSessionRef.current = session.captureSessionId;
+    expectedLiveKitDisconnectRef.current = false;
+    void connectLiveKit({
+      session,
+      publishMicrophone: false,
+      startAgent: false,
+      surfaceErrors: false,
+      appendMessage,
+      updateAgentMessageForTurn,
+      removeAgentMessageForTurn,
+      setCoverage,
+      setError,
+      setLastTelemetry,
+      setListening,
+      setMuted,
+      setPaused,
+      onCompleted: navigateToSynthesisAfterWorkerComplete,
+      roomRef: liveKitRoomRef,
+      connectingRef: liveKitConnectingRef,
+      connectedSessionRef: liveKitConnectedSessionRef,
+      activeCaptureSessionRef,
+      micTrackRef: liveKitMicTrackRef,
+      audioElsRef: liveKitAudioElsRef,
+      expectedDisconnectRef: expectedLiveKitDisconnectRef,
+      reconnectTimerRef: liveKitReconnectTimerRef,
+      reconnectAttemptsRef: liveKitReconnectAttemptsRef,
+      directorTurnIndexesRef: liveKitDirectorTurnIndexesRef,
+      agentTurnKeysRef: liveKitAgentTurnKeysRef,
+      statusRef,
+      onCompletionFailed: () => {
+        completionNavigationStartedRef.current = false;
+        setSubmitting(false);
+      },
+      enableTypedFallback: () => undefined,
+      rehydrateTranscript: () => hydrateTranscript(session),
+    }).catch(() => undefined);
+  }, [
+    appendMessage,
+    hydrateTranscript,
+    navigateToSynthesisAfterWorkerComplete,
+    removeAgentMessageForTurn,
+    session,
+    updateAgentMessageForTurn,
+  ]);
+
   const startListening = useCallback(() => {
     if (!session) return;
     activeCaptureSessionRef.current = session.captureSessionId;
@@ -493,6 +545,7 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
       expectedLiveKitDisconnectRef.current = false;
       clearLiveKitReconnectTimer(liveKitReconnectTimerRef);
       liveKitReconnectAttemptsRef.current = 0;
+      setListening(true);
       setMuted(false);
       setPaused(false);
       statusRef.current = {
@@ -503,6 +556,9 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
       };
       void connectLiveKit({
         session,
+        publishMicrophone: true,
+        startAgent: true,
+        surfaceErrors: true,
         appendMessage,
         updateAgentMessageForTurn,
         removeAgentMessageForTurn,
@@ -673,7 +729,16 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
           .catch(() => undefined);
         setListening(false);
         statusRef.current = { ...statusRef.current, listening: false };
-        setError("Finishing notes before opening the overview...");
+        disconnectLiveKitRoom(liveKitRoomRef, liveKitMicTrackRef, liveKitAudioElsRef);
+        liveKitConnectedSessionRef.current = null;
+        clearStoredDirectorSession();
+        router.push(
+          `/synthesis?next=${encodeURIComponent(nextHref)}&workspace_id=${encodeURIComponent(
+            session.workspaceId,
+          )}&capture_session_id=${encodeURIComponent(
+            session.captureSessionId,
+          )}`,
+        );
         return;
       } else {
         stopRecognition(false);
@@ -721,39 +786,11 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
                 Director interview
               </p>
               <p className="text-[11px] text-ink-muted">
-                {effectiveRoomMode === "livekit"
-                  ? session.roomName
-                  : "Simulated transcript mode"}{" "}
-                · {formatTime(elapsed)}
-                {lastTelemetry?.latency_ms?.speech_pre_tts_total_ms !== undefined
-                  ? ` · ${lastTelemetry.latency_ms.speech_pre_tts_total_ms}ms pre-TTS`
-                  : lastTelemetry?.latency_ms?.pre_tts_total_ms !== undefined
-                    ? ` · ${lastTelemetry.latency_ms.pre_tts_total_ms}ms pre-TTS`
-                  : ""}
+                {formatTime(elapsed)}
               </p>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Pill tone={effectiveRoomMode === "livekit" ? "success" : "neutral"}>
-              {effectiveRoomMode}
-            </Pill>
-            <Pill tone={listening && !paused ? "success" : "neutral"}>
-              {listening && !paused ? "Transcribing" : "Mic standby"}
-            </Pill>
-            {lastTelemetry?.extraction_status === "pending" ? (
-              <Pill tone="neutral">Notes updating</Pill>
-            ) : null}
-            {(lastTelemetry?.stale_question_count ?? 0) > 0 ? (
-              <Pill tone="warn">Steering stale</Pill>
-            ) : null}
-            {lastTelemetry?.degraded_quality ||
-            lastTelemetry?.extraction_status === "failed" ||
-            (lastTelemetry?.checker_violation_count ?? 0) > 0 ? (
-              <span title={lastTelemetry?.degraded_reasons?.join(", ")}>
-                <Pill tone="warn">Review queued</Pill>
-              </span>
-            ) : null}
-            <Pill tone="neutral">Audio recording off</Pill>
             <Button
               variant="secondary"
               size="sm"
@@ -842,6 +879,39 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
         </header>
 
         <div className="flex-1 space-y-4 overflow-y-auto px-4 py-5">
+          {showStartInterviewPrompt ? (
+            <div className="flex min-h-full flex-col items-center justify-center text-center">
+              <div className="flex h-11 w-11 items-center justify-center rounded-full bg-solid text-canvas shadow-[0_12px_30px_rgba(24,24,27,0.18)]">
+                <Mic size={18} aria-hidden />
+              </div>
+              <h2 className="mt-4 text-[17px] font-semibold tracking-tight text-ink">
+                Start Interview
+              </h2>
+              <p className="mt-2 max-w-[360px] text-[12.5px] leading-relaxed text-ink-secondary">
+                Otto will begin speaking after you start the mic.
+              </p>
+              <Button
+                type="button"
+                size="lg"
+                className="mt-5 min-w-[190px] shadow-[0_16px_34px_rgba(24,24,27,0.22)] ring-4 ring-solid/10"
+                onClick={startListening}
+                disabled={(effectiveRoomMode !== "livekit" && !speechSupported) || submitting}
+              >
+                <Mic size={15} aria-hidden />
+                Start mic
+              </Button>
+            </div>
+          ) : null}
+          {waitingForFirstAgentMessage ? (
+            <div className="flex min-h-full flex-col items-center justify-center text-center">
+              <div className="rounded-lg border border-subtle bg-muted px-3.5 py-3">
+                <AnimatedDots />
+              </div>
+              <p className="mt-3 text-[12.5px] text-ink-secondary">
+                Otto is about to start speaking.
+              </p>
+            </div>
+          ) : null}
           {displayMessages.map((message) => (
             <div
               key={message.id}
@@ -881,9 +951,9 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
               {interim}
             </p>
           )}
-          {error && (
+          {visibleError && (
             <p className="rounded-md border border-danger/20 bg-danger/5 px-3 py-2 text-[12px] text-danger">
-              {error}
+              {visibleError}
             </p>
           )}
           {turnWaitMessage && (
@@ -947,7 +1017,7 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
 
       <aside className="rounded-lg border border-subtle bg-surface shadow-card">
         <header className="border-b border-subtle px-4 py-3">
-          <p className="text-[12px] font-semibold text-ink">Structured notes</p>
+          <p className="text-[12px] font-semibold text-ink">Operations Notes</p>
           <p className="mt-1 text-[11.5px] text-ink-muted">
             {filledSlots} of {totalSlots} slots covered · {coveragePercent}%
           </p>
@@ -979,8 +1049,7 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
                   </div>
                   <p className="mt-1 text-[11.5px] text-ink-muted">
                     {slot.evidence_count} evidence link
-                    {slot.evidence_count === 1 ? "" : "s"} ·{" "}
-                    {Math.round(slot.confidence * 100)}% confidence
+                    {slot.evidence_count === 1 ? "" : "s"}
                   </p>
                   {slot.value ? (
                     <p className="mt-2 line-clamp-2 text-[11.5px] leading-relaxed text-ink-secondary">
@@ -1008,27 +1077,13 @@ function NoActiveSession({ onStart }: { onStart: () => void }) {
       </h2>
       <p className="mx-auto mt-2 max-w-[440px] text-[12.5px] leading-relaxed text-ink-secondary">
         The live room needs a capture session before it can persist transcript
-        turns and structured notes.
+        turns and Operations Notes.
       </p>
       <Button type="button" className="mt-5" onClick={onStart}>
         Start from pre-check
       </Button>
     </div>
   );
-}
-
-function introMessage(session: DirectorSession): TranscriptMessage {
-  return {
-    id: "agent-intro",
-    speaker: "agent",
-    text: INITIAL_PROMPT,
-    turn_index: 0,
-    stage_name: "director.opening",
-    ts: new Date(session.startedAt).toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit",
-    }),
-  };
 }
 
 function mergeTranscriptMessages(
@@ -1042,6 +1097,17 @@ function mergeTranscriptMessages(
     (message) => !seen.has(transcriptMessageIdentity(message)),
   );
   return [...history, ...optimistic];
+}
+
+function isDirectorOpeningMessage(message: TranscriptMessage) {
+  return message.speaker === "agent" && message.stage_name === "director.opening";
+}
+
+function isLiveKitPlaybackBlockedError(error: string | null) {
+  return (
+    error ===
+    "Agent audio is ready, but the browser blocked playback. Press Start mic again."
+  );
 }
 
 function transcriptMessageIdentity(message: TranscriptMessage) {
@@ -1169,6 +1235,9 @@ function clearStoredDirectorSession() {
 
 type LiveKitConnectInput = {
   session: DirectorSession;
+  publishMicrophone: boolean;
+  startAgent: boolean;
+  surfaceErrors: boolean;
   appendMessage: (
     speaker: TranscriptMessage["speaker"],
     text: string,
@@ -1217,16 +1286,35 @@ async function connectLiveKit(input: LiveKitConnectInput) {
       input.expectedDisconnectRef.current = false;
       clearLiveKitReconnectTimer(input.reconnectTimerRef);
       input.reconnectAttemptsRef.current = 0;
-      await syncLiveKitControlState(
-        input.roomRef.current,
-        input.statusRef.current,
-        input.session.captureSessionId,
-      );
+      if (input.publishMicrophone) {
+        const livekit = (await importLiveKitClient()) as LiveKitClientModule;
+        await publishLiveKitMicrophone(input.roomRef.current, input.micTrackRef, livekit);
+        await syncLiveKitControlState(
+          input.roomRef.current,
+          input.statusRef.current,
+          input.session.captureSessionId,
+        );
+        if (input.startAgent) {
+          await sendLiveKitControl(
+            input.roomRef.current,
+            "start",
+            input.session.captureSessionId,
+          ).catch(() => undefined);
+        }
+        await playLiveKitAudioElements(
+          input.audioElsRef,
+          input.statusRef,
+          input.setError,
+        );
+      }
       await input.rehydrateTranscript().catch(() => undefined);
-      input.setListening(true);
+      if (input.publishMicrophone) input.setListening(true);
       return;
     }
-    if (!liveKitConnectStillCurrent(input) || !input.statusRef.current.listening) {
+    if (
+      !liveKitConnectStillCurrent(input) ||
+      (input.publishMicrophone && !input.statusRef.current.listening)
+    ) {
       return;
     }
   }
@@ -1252,30 +1340,48 @@ async function connectLiveKitOnce(input: LiveKitConnectInput) {
       input.expectedDisconnectRef.current = false;
       clearLiveKitReconnectTimer(input.reconnectTimerRef);
       input.reconnectAttemptsRef.current = 0;
-      await syncLiveKitControlState(
-        input.roomRef.current,
-        input.statusRef.current,
-        input.session.captureSessionId,
-      );
+      if (input.publishMicrophone) {
+        const livekit = (await importLiveKitClient()) as LiveKitClientModule;
+        await publishLiveKitMicrophone(input.roomRef.current, input.micTrackRef, livekit);
+        await syncLiveKitControlState(
+          input.roomRef.current,
+          input.statusRef.current,
+          input.session.captureSessionId,
+        );
+        if (input.startAgent) {
+          await sendLiveKitControl(
+            input.roomRef.current,
+            "start",
+            input.session.captureSessionId,
+          ).catch(() => undefined);
+        }
+      }
       await input.rehydrateTranscript().catch(() => undefined);
-      input.setListening(true);
+      if (input.publishMicrophone) input.setListening(true);
       return;
     }
   }
-  const activeSession = await refreshLiveKitSession(input.session, () =>
-    liveKitConnectStillCurrent(input),
-  ).catch((error) => {
-    if (hasUsableLiveKitCredentials(input.session)) return input.session;
-    throw error;
-  });
+  const activeSession = hasUsableLiveKitCredentials(input.session)
+    ? input.session
+    : await refreshLiveKitSession(input.session, () =>
+        liveKitConnectStillCurrent(input),
+      ).catch((error) => {
+        if (hasUsableLiveKitCredentials(input.session)) return input.session;
+        throw error;
+      });
   if (!liveKitConnectStillCurrent(input)) return;
   if (!activeSession.roomUrl || !activeSession.roomToken) {
-    input.setError("LiveKit is missing a room URL or token. Using typed fallback.");
-    input.enableTypedFallback();
+    if (input.surfaceErrors) {
+      input.setError("LiveKit is missing a room URL or token. Using typed fallback.");
+      input.enableTypedFallback();
+    }
     return;
   }
 
   let pendingRoom: LiveKitRoomLike | null = null;
+  let localAudioTrackError: unknown = null;
+  let localAudioTrackPromise: Promise<LiveKitAudioTrack | null> =
+    Promise.resolve(null);
   try {
     const livekit = (await importLiveKitClient()) as LiveKitClientModule;
     const room = new livekit.Room({ adaptiveStream: true, dynacast: true });
@@ -1294,10 +1400,14 @@ async function connectLiveKitOnce(input: LiveKitConnectInput) {
         }
         element.dataset.ottoLivekitAudio = "true";
         document.body.appendChild(element);
-        void element.play().catch(() => {
-          input.setError("Agent audio is ready, but the browser blocked playback. Press Start mic again.");
-        });
         input.audioElsRef.current.push(element);
+        if (input.statusRef.current.listening) {
+          void element.play().catch(() => {
+            if (input.statusRef.current.listening) {
+              input.setError("Agent audio is ready, but the browser blocked playback. Press Start mic again.");
+            }
+          });
+        }
       }
     });
     room.on(events.TrackUnsubscribed ?? "trackUnsubscribed", (track) => {
@@ -1365,13 +1475,15 @@ async function connectLiveKitOnce(input: LiveKitConnectInput) {
       clearLiveKitReconnectTimer(input.reconnectTimerRef);
       input.reconnectAttemptsRef.current = 0;
       input.setError(null);
-      input.setListening(true);
-      input.statusRef.current = { ...input.statusRef.current, listening: true };
-      void syncLiveKitControlState(
-        room,
-        input.statusRef.current,
-        activeSession.captureSessionId,
-      );
+      if (input.statusRef.current.listening) {
+        input.setListening(true);
+        input.statusRef.current = { ...input.statusRef.current, listening: true };
+        void syncLiveKitControlState(
+          room,
+          input.statusRef.current,
+          activeSession.captureSessionId,
+        );
+      }
       void input.rehydrateTranscript().catch(() => {
         input.setError(
           "Voice room reconnected, but transcript refresh failed. Live updates will continue.",
@@ -1394,7 +1506,8 @@ async function connectLiveKitOnce(input: LiveKitConnectInput) {
       cleanupLiveKitAudioElements(input.audioElsRef);
       const shouldReconnect =
         !input.expectedDisconnectRef.current &&
-        liveKitSessionStillCurrent(input, activeSession.captureSessionId);
+        liveKitSessionStillCurrent(input, activeSession.captureSessionId) &&
+        input.statusRef.current.listening;
       input.setListening(false);
       if (shouldReconnect) {
         scheduleLiveKitReconnect(input, activeSession.captureSessionId);
@@ -1404,52 +1517,88 @@ async function connectLiveKitOnce(input: LiveKitConnectInput) {
 
     input.expectedDisconnectRef.current = false;
     clearLiveKitReconnectTimer(input.reconnectTimerRef);
+    if (input.publishMicrophone) {
+      localAudioTrackPromise =
+        livekit.createLocalAudioTrack?.().catch((error) => {
+          localAudioTrackError = error;
+          return null;
+        }) ?? Promise.resolve(null);
+    }
     await room.connect(activeSession.roomUrl, activeSession.roomToken);
     if (
       input.expectedDisconnectRef.current ||
-      !input.statusRef.current.listening ||
+      (input.publishMicrophone && !input.statusRef.current.listening) ||
       !liveKitConnectStillCurrent(input)
     ) {
-      room.disconnect();
-      input.setListening(false);
-      return;
-    }
-    if (room.localParticipant.setMicrophoneEnabled) {
-      await room.localParticipant.setMicrophoneEnabled(true);
-    } else if (livekit.createLocalAudioTrack) {
-      const track = await livekit.createLocalAudioTrack();
-      await room.localParticipant.publishTrack?.(track);
-      input.micTrackRef.current = track;
-    }
-    if (!liveKitConnectStillCurrent(input)) {
+      await localAudioTrackPromise
+        .then((track) => track?.stop?.())
+        .catch(() => undefined);
       room.disconnect();
       input.setListening(false);
       return;
     }
     input.roomRef.current = room;
     input.connectedSessionRef.current = activeSession.captureSessionId;
+    if (input.publishMicrophone) {
+      const track = await localAudioTrackPromise;
+      if (localAudioTrackError) throw localAudioTrackError;
+      if (track) {
+        await room.localParticipant.publishTrack?.(track, {
+          source: livekit.Track?.Source?.Microphone ?? "microphone",
+        });
+        input.micTrackRef.current = track;
+      } else {
+        await room.localParticipant.setMicrophoneEnabled?.(true);
+      }
+    }
+    if (!liveKitConnectStillCurrent(input)) {
+      input.micTrackRef.current?.stop?.();
+      input.micTrackRef.current = null;
+      room.disconnect();
+      input.setListening(false);
+      return;
+    }
     input.reconnectAttemptsRef.current = 0;
-    await syncLiveKitControlState(
-      room,
-      input.statusRef.current,
-      activeSession.captureSessionId,
-    );
+    if (input.publishMicrophone) {
+      await syncLiveKitControlState(
+        room,
+        input.statusRef.current,
+        activeSession.captureSessionId,
+      );
+      if (input.startAgent) {
+        await sendLiveKitControl(
+          room,
+          "start",
+          activeSession.captureSessionId,
+        ).catch(() => undefined);
+      }
+      await playLiveKitAudioElements(
+        input.audioElsRef,
+        input.statusRef,
+        input.setError,
+      );
+    }
     input.setError(null);
-    input.setListening(true);
+    if (input.publishMicrophone) input.setListening(true);
   } catch (error) {
+    await localAudioTrackPromise
+      .then((track) => track?.stop?.())
+      .catch(() => undefined);
     cleanupFailedLiveKitConnection(
       input,
       pendingRoom,
       activeSession.captureSessionId,
     );
     if (!liveKitConnectStillCurrent(input)) return;
-    input.setError(
-      error instanceof Error
-        ? `LiveKit connection failed: ${error.message}`
-        : "LiveKit connection failed. Use typed fallback.",
-    );
-    input.enableTypedFallback();
-    input.setListening(false);
+    if (input.surfaceErrors) {
+      input.setError(
+        error instanceof Error
+          ? `LiveKit connection failed: ${error.message}`
+          : "LiveKit connection failed. Use typed fallback.",
+      );
+      input.enableTypedFallback();
+      input.setListening(false);
+    }
   }
 }
 
@@ -1518,6 +1667,44 @@ function clearLiveKitReconnectTimer(
 
 async function importLiveKitClient() {
   return (await import("livekit-client")) as unknown as LiveKitClientModule;
+}
+
+async function publishLiveKitMicrophone(
+  room: LiveKitRoomLike,
+  micTrackRef: MutableRefObject<LiveKitAudioTrack | null>,
+  livekit: LiveKitClientModule,
+) {
+  if (micTrackRef.current) {
+    await room.localParticipant.setMicrophoneEnabled?.(true);
+    return;
+  }
+  if (livekit.createLocalAudioTrack) {
+    const track = await livekit.createLocalAudioTrack();
+    await room.localParticipant.publishTrack?.(track, {
+      source: livekit.Track?.Source?.Microphone ?? "microphone",
+    });
+    micTrackRef.current = track;
+    return;
+  }
+  await room.localParticipant.setMicrophoneEnabled?.(true);
+}
+
+async function playLiveKitAudioElements(
+  audioElsRef: MutableRefObject<HTMLMediaElement[]>,
+  statusRef: MutableRefObject<{ listening: boolean }>,
+  setError: (error: string | null) => void,
+) {
+  if (!statusRef.current.listening) return;
+  for (const element of audioElsRef.current) {
+    try {
+      await element.play();
+    } catch {
+      if (statusRef.current.listening) {
+        setError("Agent audio is ready, but the browser blocked playback. Press Start mic again.");
+      }
+      return;
+    }
+  }
 }
 
 async function refreshLiveKitSession(
@@ -1609,6 +1796,7 @@ async function handleLiveKitData(
       payload?: {
         transcript?: string;
         agent_utterance?: string;
+        agent_utterance_delta?: string;
         delivery_status?: "completed" | "truncated" | "failed_text_fallback";
         notice_type?: string;
         message?: string;
@@ -1627,7 +1815,7 @@ async function handleLiveKitData(
         degraded_reasons?: string[];
         turn_index?: number;
         stage_name?: string;
-        action?: "mute" | "unmute" | "pause" | "resume" | "end";
+        action?: "start" | "mute" | "unmute" | "pause" | "resume" | "end";
         paused?: boolean;
         muted?: boolean;
         ended?: boolean;
@@ -1649,6 +1837,16 @@ async function handleLiveKitData(
       ) {
         directorTurnIndexesRef.current.add(turnIndex);
         appendMessage("director", parsed.payload.transcript, turnIndex);
+      }
+      return;
+    }
+    if (parsed.event === "director.turn.agent_delta" && parsed.payload) {
+      const turnIndex = parsed.payload.turn_index;
+      const text = parsed.payload.agent_utterance;
+      if (typeof turnIndex === "number" && typeof text === "string" && text) {
+        const stageName = parsed.payload.stage_name ?? "director.turn";
+        agentTurnKeysRef.current.add(agentMessageKey(stageName, turnIndex));
+        updateAgentMessageForTurn(turnIndex, stageName, text);
       }
       return;
     }
@@ -1746,6 +1944,9 @@ async function handleLiveKitData(
             parsed.payload.turn_index,
             parsed.payload.stage_name ?? "director.turn",
           );
+          return;
+        }
+        if (parsed.payload.delivery_status === "truncated") {
           return;
         }
         updateAgentMessageForTurn(
@@ -1882,7 +2083,7 @@ function isExpectedAgentDataSender(
 
 async function sendLiveKitControl(
   room: LiveKitRoomLike | null,
-  action: "mute" | "unmute" | "pause" | "resume" | "end",
+  action: "start" | "mute" | "unmute" | "pause" | "resume" | "end",
   captureSessionId: string,
 ) {
   if (!room?.localParticipant.publishData) return false;

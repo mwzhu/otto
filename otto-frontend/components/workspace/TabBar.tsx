@@ -15,12 +15,12 @@ export function TabBar({
 }) {
   const router = useRouter();
   const sp = useSearchParams();
-  const active = (sp.get("tab") as WorkspaceTab) ?? "summary";
+  const requested = sp.get("tab");
+  const active = isWorkspaceTab(requested) ? requested : "summary";
 
   const tabs: TabDef[] = [
     { id: "summary", label: "Summary" },
     { id: "steps", label: "Steps", count: counts.steps },
-    { id: "impact", label: "Impact", count: counts.impact },
     { id: "insights", label: "Insights", count: counts.insights },
     { id: "risk", label: "Risk & Vulnerabilities", count: counts.risk },
   ];
@@ -67,4 +67,8 @@ export function TabBar({
       })}
     </div>
   );
+}
+
+function isWorkspaceTab(value: string | null): value is WorkspaceTab {
+  return value === "summary" || value === "steps" || value === "insights" || value === "risk";
 }

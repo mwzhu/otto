@@ -203,7 +203,7 @@ test.describe("director pre-start and synthesis routing", () => {
 
     await expect(page.getByText(typedAnswer)).toBeVisible();
     await expect(
-      page.getByText("Structured notes are still updating."),
+      page.getByText("Operations Notes are still updating."),
     ).toBeVisible({ timeout: 8000 });
     await expect(
       page.getByText("Which process should we zoom into first?"),

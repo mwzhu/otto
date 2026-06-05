@@ -1,40 +1,81 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { BreadcrumbHeader } from "@/components/layout/BreadcrumbHeader";
 import { MetricTile } from "@/components/overview/MetricTile";
 import { ProcessCard } from "@/components/overview/ProcessCard";
-import { DrilldownBanner } from "@/components/overview/DrilldownBanner";
 import {
   OverviewTabStrip,
   type OverviewTab,
 } from "@/components/overview/OverviewTabStrip";
-import { TeamResponsibilities } from "@/components/overview/TeamResponsibilities";
+import { AutomationTab } from "@/components/overview/AutomationTab";
 import type { ProcessSummary } from "@/lib/types";
 import type { OverviewMetrics } from "@/lib/overview/queries";
+import type { DepartmentAutomationPlan } from "@/lib/overview/automation";
 import Link from "next/link";
 import { Button } from "@/components/ui/Button";
 
 export function OverviewClient({
   processes,
   metrics,
+  automationPlan,
   workspaceId,
   workspaceName = "Acme Co.",
   functionName = "Commercial Department",
+  captureSessionId,
+  initialTab = "overview",
 }: {
   processes: ProcessSummary[];
   metrics?: OverviewMetrics;
+  automationPlan?: DepartmentAutomationPlan;
   workspaceId: string;
   workspaceName?: string;
   functionName?: string;
+  captureSessionId?: string | null;
+  initialTab?: OverviewTab;
 }) {
-  const [tab, setTab] = useState<OverviewTab>("overview");
+  const [tab, setTab] = useState<OverviewTab>(initialTab);
+  const router = useRouter();
 
   const avgComplexity = metrics?.averageComplexity ?? average(processes.map((p) => p.complexity_score));
   const docCoverage =
     metrics?.documentationCoverage ??
     Math.round(average(processes.map((p) => p.doc_coverage)) * 100);
   const spofCount = metrics?.spofCount ?? 0;
+
+  useEffect(() => {
+    const shouldPoll =
+      tab === "automation" &&
+      Boolean(workspaceId) &&
+      (automationPlan?.planState === "pending" ||
+        automationPlan?.planState === "running" ||
+        automationPlan?.refreshState === "pending" ||
+        automationPlan?.refreshState === "running");
+    if (!shouldPoll) return;
+    let cancelled = false;
+    const poll = async () => {
+      const params = new URLSearchParams({ workspace_id: workspaceId });
+      if (captureSessionId) params.set("capture_session_id", captureSessionId);
+      const response = await fetch(`/api/automation-plan/status?${params}`, {
+        cache: "no-store",
+      });
+      if (!response.ok || cancelled) return;
+      const status = (await response.json()) as {
+        run_state: "none" | "pending" | "running" | "completed" | "failed";
+        has_completed_plan: boolean;
+      };
+      const terminal =
+        status.run_state === "completed" || status.run_state === "failed";
+      if (terminal) router.refresh();
+    };
+    const interval = window.setInterval(poll, 3000);
+    void poll();
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [automationPlan, captureSessionId, router, tab, workspaceId]);
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -82,8 +123,6 @@ export function OverviewClient({
               />
             </section>
 
-            <DrilldownBanner />
-
             {processes.length === 0 && (
               <section className="rounded-lg border border-dashed border-subtle bg-surface p-8 text-center">
                 <h2 className="text-[16px] font-semibold tracking-tight text-ink">
@@ -103,18 +142,6 @@ export function OverviewClient({
               </section>
             )}
 
-            {metrics?.hasProcessingCaptures && (
-              <section className="rounded-md border border-subtle bg-muted px-4 py-3 text-[12.5px] text-ink-secondary">
-                Intake is still processing. Published cards will keep appearing here as synthesis completes.
-              </section>
-            )}
-
-            {metrics?.hasPartialSynthesis && (
-              <section className="rounded-md border border-[#F0DCAA] bg-[#FFF9EB] px-4 py-3 text-[12.5px] text-ink-secondary">
-                Some synthesis runs are partial or failed. The visible cards are usable, and an FDE can retry the failed stages.
-              </section>
-            )}
-
             <section className="grid grid-cols-3 gap-3">
               {processes.map((p) => (
                 <ProcessCard key={`${p.source ?? "process"}:${p.id}`} p={p} workspaceId={workspaceId} />
@@ -123,7 +150,37 @@ export function OverviewClient({
           </div>
         ) : (
           <div className="pt-6">
-            <TeamResponsibilities />
+            <AutomationTab
+              workspaceId={workspaceId}
+              captureSessionId={captureSessionId}
+              plan={
+                automationPlan ?? {
+                  departmentName: functionName,
+                  processCount: processes.length,
+                  processGraphCount: 0,
+                  opportunityCount: 0,
+                  source: "none",
+                  planState: "none",
+                  refreshState: null,
+                  updatedAt: null,
+                  topOpportunities: [],
+                  metrics: {
+                    annualNetValue: 0,
+                    annualGrossValue: 0,
+                    annualHoursSaved: 0,
+                    annualTimeValue: 0,
+                    annualErrorValue: 0,
+                    annualDelayValue: 0,
+                    averageConfidence: 0,
+                  },
+                  audit: {
+                    problem:
+                      "No automation-ready process maps have been published for this department yet.",
+                    patterns: [],
+                  },
+                }
+              }
+            />
           </div>
         )}
       </main>

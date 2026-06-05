@@ -99,9 +99,10 @@ export default function SynthesisClient() {
         // The timed local fallback below still gets the user to the overview.
       }
       if (cancelled) return;
-      if (Date.now() - startedAt >= STATUS_TIMEOUT_MS) {
+      const statusPollTimedOut = Date.now() - startedAt >= STATUS_TIMEOUT_MS;
+      if (statusPollTimedOut) {
         setStatusTimedOut(true);
-        return;
+        if (!captureSessionId) return;
       }
       timeout = setTimeout(poll, STATUS_POLL_MS);
     }

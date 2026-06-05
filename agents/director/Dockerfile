@@ -9,6 +9,7 @@ ENV PYTHONUNBUFFERED=1 \
 COPY prompts ./prompts
 COPY probes ./probes
 COPY schemas ./schemas
+COPY agents/realtime_core ./agents/realtime_core
 COPY agents/director/pyproject.toml agents/director/uv.lock ./agents/director/
 COPY agents/director/director_agent ./agents/director/director_agent
 

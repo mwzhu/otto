@@ -321,7 +321,7 @@ function transcriptAgentUtterance(
   const planned = cleanTranscriptUtterance(delivery.planned_utterance);
 
   if (status === "pending") return null;
-  if (status === "truncated") return delivered ?? planned;
+  if (status === "truncated") return delivered;
   if (status === "completed" || status === "failed_text_fallback") {
     return delivered ?? planned ?? legacy;
   }

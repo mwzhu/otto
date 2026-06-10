@@ -1699,7 +1699,7 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(transcriptChat).toContain("agentMessageKey(");
     expect(transcriptChat).toContain("stage_name");
     expect(transcriptChat).toContain("director.turn.telemetry");
-    expect(transcriptChat).toContain("pre-TTS");
+    expect(transcriptChat).toContain("pre_tts_total_ms");
     expect(transcriptChat).toContain("TrackUnsubscribed");
     expect(transcriptChat).toContain("trackUnsubscribed");
     expect(transcriptChat).toContain("removeLiveKitAudioElement");

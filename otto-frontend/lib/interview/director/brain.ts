@@ -883,6 +883,15 @@ async function planDirectorTurnWithExtractionPlanner(
   }
 
   plan = mergeDeterministicExtractions(plan, deterministicPlan);
+  // Deterministic slots injected by the merge bypass the Task 3 normalization
+  // above; re-run it so a deterministic `filled` cannot reinstate a value the
+  // normalizer demoted or converted to asked_unknown. All rules are idempotent.
+  plan = {
+    ...plan,
+    ...normalizeSlotExtractionEvidence(plan, input.evidenceIds, {
+      utteranceType: plan.utterance_type,
+    }),
+  };
   const metadata = llmResult?.metadata ?? fallbackMetadata("director.turn.extract", started);
   return {
     plan,

@@ -1,5 +1,8 @@
 import { describe, expect, test } from "vitest";
-import { normalizeSlotExtractionEvidence } from "@/lib/interview/director/brain";
+import {
+  mergeDeterministicExtractions,
+  normalizeSlotExtractionEvidence,
+} from "@/lib/interview/director/brain";
 import { missingFilledSlotComponents } from "@/lib/interview/director/slot-schema";
 
 const evidenceId = "00000000-0000-0000-0000-000000000201";
@@ -254,5 +257,52 @@ describe("director extraction normalization (Task 3)", () => {
 
     expect(result.slot_updates[0].evidence_ids).toEqual([evidenceId]);
     expect(result.claims[0].evidence_ids).toEqual([]);
+  });
+});
+
+describe("post-merge normalization (deterministic reinstatement guard)", () => {
+  test("a deterministic filled scope.boundaries with only process_names cannot survive the merge", () => {
+    const evidenceId = "11111111-1111-1111-1111-111111111111";
+    const normalizedPlan = {
+      slot_updates: [
+        {
+          slot_path: "scope.boundaries",
+          value: { process_names: ["Order Intake"] },
+          status: "partial" as const,
+          confidence: 0.8,
+          evidence_ids: [evidenceId],
+          priority: 1,
+        },
+      ],
+      claims: [],
+      tool_calls: [],
+      contradiction_signals: [],
+    };
+    const deterministicPlan = {
+      slot_updates: [
+        {
+          slot_path: "scope.boundaries",
+          value: { process_names: ["Order Intake"] },
+          status: "filled" as const,
+          confidence: 0.9,
+          evidence_ids: [evidenceId],
+          priority: 1,
+        },
+      ],
+      claims: [],
+      tool_calls: [],
+      contradiction_signals: [],
+    };
+    // Simulate the planner pipeline: merge, then the idempotent re-normalization
+    // added so deterministic slots cannot reinstate demoted statuses.
+    const merged = mergeDeterministicExtractions(
+      normalizedPlan as never,
+      deterministicPlan as never,
+    );
+    const renormalized = normalizeSlotExtractionEvidence(merged as never, [evidenceId]);
+    const boundary = renormalized.slot_updates.find(
+      (slot) => slot.slot_path === "scope.boundaries",
+    );
+    expect(boundary?.status).toBe("partial");
   });
 });

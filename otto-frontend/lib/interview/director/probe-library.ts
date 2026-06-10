@@ -8,6 +8,10 @@ export type ProbeIntent = {
   targetSlot: string;
   intent: string;
   phrasing: string;
+  /** All canonical phrasings for this probe (anchor examples for the phraser). */
+  phrasings: string[];
+  /** Imperative instruction telling the phraser exactly what to ask. */
+  directive: string;
   score: number;
   reason: string;
   cooldownSeconds: number;
@@ -15,7 +19,70 @@ export type ProbeIntent = {
   expectedShape: string;
 };
 
-const defaultProbeLibrary: ProbeIntent[] = [
+type ProbeSeed = Omit<ProbeIntent, "phrasings" | "directive"> & {
+  phrasings?: string[];
+  directive?: string;
+};
+
+/**
+ * Imperative per-intent instructions for the voice phraser. The spoken
+ * question MUST target the chosen intent; these tell the phraser what to ask
+ * (not how the coverage currently looks). Probes without a curated or YAML
+ * directive get one derived from their metadata automatically.
+ */
+const curatedProbeDirectives: Record<string, string> = {
+  discover_function:
+    "Ask the director what part of the business they oversee. Stay at the function/remit level; do not drill into any single process.",
+  discover_processes:
+    "Ask the director what other recurring processes their team owns. Collect a breadth-first list of process names. Do not drill into the steps of a single process.",
+  define_process_boundary:
+    "Ask the director where the focus process starts and ends — what kicks it off and what counts as done. Do not ask for step-by-step detail.",
+  capture_owner_roles:
+    "Ask the director which role or team is accountable for the focus process and who else participates.",
+  capture_systems:
+    "Ask the director which systems of record, spreadsheets, or shadow tools the team relies on for the focus process.",
+  quantify_frequency_volume:
+    "Ask the director how often the focus process runs and at roughly what volume.",
+  capture_outcome:
+    "Ask the director what business outcome or decision the focus process is supposed to produce.",
+  capture_metrics:
+    "Ask the director how they measure whether the focus process is working well (KPI, SLA, or reviewed metric).",
+  capture_dependencies:
+    "Ask the director what upstream inputs the focus process depends on or where the important handoffs are.",
+  capture_friction:
+    "Ask the director where the focus process slows down, breaks, or requires manual cleanup today.",
+  capture_risk_spof:
+    "Ask the director whether any part of the focus process depends on one person, tribal knowledge, or a fragile workaround.",
+  capture_documentation:
+    "Ask the director where the source of truth for the focus process lives (SOP, runbook, wiki, or tribal knowledge).",
+};
+
+function derivedProbeDirective(seed: {
+  intent: string;
+  targetSlot: string;
+  expectedShape: string;
+}): string {
+  return (
+    `Ask the director one question that fills the "${seed.targetSlot}" slot. ` +
+    `Expected answer shape: ${seed.expectedShape} ` +
+    "Stay at the process level; do not ask for step-by-step detail."
+  ).replace(/\s+/g, " ");
+}
+
+function finalizeProbe(seed: ProbeSeed): ProbeIntent {
+  const phrasings =
+    seed.phrasings && seed.phrasings.length > 0 ? seed.phrasings : [seed.phrasing];
+  return {
+    ...seed,
+    phrasings,
+    directive:
+      seed.directive ??
+      curatedProbeDirectives[seed.intent] ??
+      derivedProbeDirective(seed),
+  };
+}
+
+const defaultProbeSeeds: ProbeSeed[] = [
   {
     probeId: "scope-boundaries",
     targetSlot: "scope.boundaries",
@@ -153,6 +220,8 @@ const defaultProbeLibrary: ProbeIntent[] = [
   },
 ];
 
+const defaultProbeLibrary: ProbeIntent[] = defaultProbeSeeds.map(finalizeProbe);
+
 type ProbeYamlProbe = {
   id?: unknown;
   intent?: unknown;
@@ -162,6 +231,7 @@ type ProbeYamlProbe = {
   expected_shape?: unknown;
   base_priority?: unknown;
   phrasings?: unknown;
+  directive?: unknown;
 };
 
 type ProbeYamlDocument = {
@@ -187,25 +257,30 @@ export function loadDirectorProbeLibrary(): ProbeIntent[] {
 
 function probeFromYaml(probe: ProbeYamlProbe) {
   const targetSlots = Array.isArray(probe.target_slots) ? probe.target_slots : [];
-  const phrasings = Array.isArray(probe.phrasings) ? probe.phrasings : [];
+  const rawPhrasings = Array.isArray(probe.phrasings) ? probe.phrasings : [];
+  const phrasings = rawPhrasings
+    .map(stringValue)
+    .filter((value): value is string => Boolean(value));
   const probeId = stringValue(probe.id);
   const intent = stringValue(probe.intent);
   const targetSlot = stringValue(targetSlots[0]);
-  const phrasing = stringValue(phrasings[0]);
+  const phrasing = phrasings[0];
   if (!probeId || !intent || !targetSlot || !phrasing) return undefined;
 
   const expectedShape = stringValue(probe.expected_shape) || "Short evidence-backed answer.";
-  return {
+  return finalizeProbe({
     probeId,
     targetSlot,
     intent,
     phrasing,
+    phrasings,
+    directive: stringValue(probe.directive),
     score: numberValue(probe.base_priority, 10),
     reason: expectedShape,
     cooldownSeconds: numberValue(probe.cooldown_seconds, 90),
     maxFires: numberValue(probe.max_fires, 2),
     expectedShape,
-  };
+  });
 }
 
 function sharedProbePath(filename: string) {
@@ -226,7 +301,8 @@ function numberValue(value: unknown, fallback: number) {
 
 export function fallbackProbeForSlot(slotPath: string) {
   return (
-    probeLibrary.find((probe) => probe.targetSlot === slotPath) ?? {
+    probeLibrary.find((probe) => probe.targetSlot === slotPath) ??
+    finalizeProbe({
       probeId: `fill-${slotPath.replace(/[^a-z0-9]+/gi, "-")}`,
       targetSlot: slotPath,
       intent: `fill_${slotPath.replace(/[^a-z0-9]+/gi, "_")}`,
@@ -236,7 +312,7 @@ export function fallbackProbeForSlot(slotPath: string) {
       cooldownSeconds: 90,
       maxFires: 2,
       expectedShape: "Short evidence-backed answer.",
-    }
+    })
   );
 }
 
@@ -245,6 +321,28 @@ export function probeConfigForIntent(intentName: string, targetSlot?: string) {
     probeLibrary.find((probe) => probe.intent === intentName) ??
     (targetSlot ? fallbackProbeForSlot(targetSlot) : undefined)
   );
+}
+
+/**
+ * Canonical phrasings for the chosen intent, used as anchor examples for the
+ * voice phraser (and as the verbatim escalation utterance).
+ */
+export function probePhrasingsForIntent(
+  intentName: string,
+  targetSlot?: string,
+): string[] {
+  return probeConfigForIntent(intentName, targetSlot)?.phrasings ?? [];
+}
+
+/**
+ * Imperative instruction for the chosen intent. Unlike `reason` (a coverage
+ * status report), this tells the phraser exactly what to ask next.
+ */
+export function probeDirectiveForIntent(
+  intentName: string,
+  targetSlot?: string,
+): string | undefined {
+  return probeConfigForIntent(intentName, targetSlot)?.directive;
 }
 
 function slotLabel(slotPath: string) {

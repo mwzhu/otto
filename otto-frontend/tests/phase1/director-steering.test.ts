@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   applySteeringIntentExclusions,
   buildDirectorSteeringContext,
+  checkDirectorSpokenOutput,
   checkerVerdictSignalFromDeliveryJson,
   consecutivePriorIntentFirings,
   deterministicTurnPlan,
@@ -338,6 +339,53 @@ describe("provisional-answer guard (Task 2)", () => {
     expect(provisional).toContain("systems.systems_of_record");
     // turn 3 firing's reply turn (4) is pending, so its slot is guarded too.
     expect(provisional).toContain("ownership.roles");
+  });
+});
+
+describe("heuristic checker with utterances in do_not_ask (Task 4b)", () => {
+  test("prior-question utterances only flag on verbatim repeats, not shared common words", async () => {
+    const priorAnthropic = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    try {
+      const steeringContext = {
+        do_not_ask: [
+          "function.name",
+          "What are the main steps Marcus is working through?",
+        ],
+      };
+      // Shares "what"/"main"/"working" with the blocked utterance but targets
+      // a different question: must not be flagged stale.
+      const onTopic = await checkDirectorSpokenOutput({
+        spokenAgentUtterance:
+          "Thanks. What outcome is Order Intake supposed to produce?",
+        steeringContext,
+      });
+      expect(
+        onTopic.violations.filter((violation) => violation.type === "asked_do_not_ask"),
+      ).toHaveLength(0);
+      expect(onTopic.stale_question_count).toBe(0);
+
+      // A verbatim repeat of a blocked utterance is flagged.
+      const repeated = await checkDirectorSpokenOutput({
+        spokenAgentUtterance: "What are the main steps Marcus is working through?",
+        steeringContext,
+      });
+      expect(
+        repeated.violations.some((violation) => violation.type === "asked_do_not_ask"),
+      ).toBe(true);
+      expect(repeated.stale_question_count).toBeGreaterThan(0);
+
+      // Slot paths still flag via term matching.
+      const staleSlot = await checkDirectorSpokenOutput({
+        spokenAgentUtterance: "And what is the name of your function?",
+        steeringContext,
+      });
+      expect(staleSlot.stale_question_count).toBeGreaterThan(0);
+    } finally {
+      if (priorAnthropic !== undefined) {
+        process.env.ANTHROPIC_API_KEY = priorAnthropic;
+      }
+    }
   });
 });
 

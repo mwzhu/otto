@@ -2035,9 +2035,14 @@ function heuristicDirectorOutputCheck(input: {
     });
   }
   const doNotAsk = arrayOfStrings(input.steeringContext.do_not_ask);
-  const staleQuestions = doNotAsk.filter((slotPath) =>
-    slotPathQuestionTerms(slotPath).some((term) => lower.includes(term)),
-  );
+  // do_not_ask mixes slot paths with verbatim prior utterances; only slot
+  // paths go through term matching (single common words from an utterance
+  // would false-positive on nearly every question).
+  const staleQuestions = doNotAsk
+    .filter(isSlotPathLike)
+    .filter((slotPath) =>
+      slotPathQuestionTerms(slotPath).some((term) => lower.includes(term)),
+    );
   for (const slotPath of staleQuestions.slice(0, 3)) {
     violations.push({
       type: "asked_do_not_ask",
@@ -2045,12 +2050,31 @@ function heuristicDirectorOutputCheck(input: {
       message: `The spoken response may have re-asked covered or pending slot ${slotPath}.`,
     });
   }
+  const repeatedUtterances = doNotAsk
+    .filter((entry) => !isSlotPathLike(entry))
+    .filter((entry) => normalizedUtteranceKey(entry) === normalizedUtteranceKey(utterance))
+    .slice(0, 1);
+  for (const repeated of repeatedUtterances) {
+    violations.push({
+      type: "asked_do_not_ask",
+      severity: "medium",
+      message: `The spoken response repeated a prior question verbatim: ${repeated}`,
+    });
+  }
   return {
     checker_status: "complete" as const,
     violations,
     checker_violation_count: violations.length,
-    stale_question_count: staleQuestions.length,
+    stale_question_count: staleQuestions.length + repeatedUtterances.length,
   };
+}
+
+function isSlotPathLike(value: string) {
+  return /^[a-z0-9_]+(\.[a-z0-9_]+)+$/i.test(value.trim());
+}
+
+function normalizedUtteranceKey(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
 function normalizeDirectorOutputCheck(

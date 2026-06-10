@@ -241,6 +241,7 @@ async function uploadFile(file: File, rowId: string) {
       postJson<{
         artifact: { id: string };
         upload_url: string;
+        proxy_upload_url?: string;
       }>(
         `/api/workspaces/${workspaceId}/artifacts/presign`,
         {
@@ -254,14 +255,11 @@ async function uploadFile(file: File, rowId: string) {
   );
   updateUploadRow(rowId, "extracting", 45);
   await withUploadStep("Uploading file", async () => {
-    const upload = await fetch(presign.upload_url, {
-      method: "PUT",
-      headers: { "content-type": file.type || "application/octet-stream" },
-      body: file,
+    await uploadArtifactBytes({
+      file,
+      uploadUrl: presign.upload_url,
+      fallbackUploadUrl: presign.proxy_upload_url,
     });
-    if (!upload.ok) {
-      throw new Error(`storage upload failed (${upload.status})`);
-    }
   });
   updateUploadRow(rowId, "ontology", 75);
   await withUploadStep(
@@ -335,6 +333,43 @@ async function postJson<T>(url: string, body: unknown, idempotencyKey: string) {
     throw new Error(payload?.error?.message ?? `Request failed (${response.status})`);
   }
   return payload as T;
+}
+
+async function uploadArtifactBytes(input: {
+  file: File;
+  uploadUrl: string;
+  fallbackUploadUrl?: string;
+}) {
+  try {
+    await putArtifactBytes(input.uploadUrl, input.file);
+  } catch (error) {
+    if (!input.fallbackUploadUrl) throw error;
+    await putArtifactBytes(input.fallbackUploadUrl, input.file);
+  }
+}
+
+async function putArtifactBytes(url: string, file: File) {
+  const response = await fetch(url, {
+    method: "PUT",
+    headers: { "content-type": file.type || "application/octet-stream" },
+    body: file,
+  });
+  if (!response.ok) {
+    const message = await uploadErrorMessage(response);
+    throw new Error(message ?? `storage upload failed (${response.status})`);
+  }
+}
+
+async function uploadErrorMessage(response: Response) {
+  try {
+    const payload = await response.json();
+    if (typeof payload?.error?.message === "string") {
+      return payload.error.message;
+    }
+  } catch {
+    // Direct storage URLs do not return Otto API JSON.
+  }
+  return null;
 }
 
 async function withUploadStep<T>(

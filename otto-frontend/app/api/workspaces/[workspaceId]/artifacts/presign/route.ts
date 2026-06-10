@@ -101,7 +101,13 @@ export async function POST(
         subjectId: artifact.id,
         metadataJson: { idempotency_key: idempotencyKey },
       });
-      const response = { artifact, upload_url: uploadUrl };
+      const response = {
+        artifact,
+        upload_url: uploadUrl,
+        proxy_upload_url: shouldOfferProxyUpload(body.artifact_type)
+          ? `/api/artifacts/${artifact.id}/upload`
+          : undefined,
+      };
       await storeIdempotentResponse(tx, {
         orgId: auth.orgId,
         key: idempotencyKey,
@@ -117,6 +123,10 @@ export async function POST(
   } catch (error) {
     return apiError(error);
   }
+}
+
+function shouldOfferProxyUpload(artifactType: string) {
+  return artifactType === "document" || artifactType === "image";
 }
 
 async function createUploadUrl(input: { key: string; contentType: string }) {

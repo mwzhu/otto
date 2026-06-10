@@ -2293,6 +2293,9 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
       const presignRoute = await import(
         "@/app/api/workspaces/[workspaceId]/artifacts/presign/route"
       );
+      const artifactUploadRoute = await import(
+        "@/app/api/artifacts/[artifactId]/upload/route"
+      );
       const artifactCompleteRoute = await import(
         "@/app/api/artifacts/[artifactId]/complete/route"
       );
@@ -2577,6 +2580,28 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
       expect(presignResponse.status).toBe(201);
       const presignJson = await presignResponse.json();
       const apiArtifactId = presignJson.artifact.id as string;
+      expect(presignJson.proxy_upload_url).toBe(
+        `/api/artifacts/${apiArtifactId}/upload`,
+      );
+
+      const artifactUploadResponse = await artifactUploadRoute.PUT(
+        new Request(`http://otto.test/api/artifacts/${apiArtifactId}/upload`, {
+          method: "PUT",
+          headers: {
+            "content-type": "text/plain",
+            "content-length": "46",
+          },
+          body: "Process: Returns\nOwner: Support Ops\nCadence: weekly",
+        }),
+        { params: Promise.resolve({ artifactId: apiArtifactId }) },
+      );
+      expect(artifactUploadResponse.status).toBe(200);
+      const artifactUploadJson = await artifactUploadResponse.json();
+      expect(artifactUploadJson).toMatchObject({
+        ok: true,
+        artifact_id: apiArtifactId,
+        storage: "local",
+      });
 
       const artifactCompleteResponse = await artifactCompleteRoute.POST(
         apiRequest(`http://otto.test/api/artifacts/${apiArtifactId}/complete`, {

@@ -9,6 +9,8 @@ test.describe("document and process upload flows", () => {
   }) => {
     let workspaceCalls = 0;
     let presignCalls = 0;
+    let directUploadCalls = 0;
+    let proxyUploadCalls = 0;
     let completeCalls = 0;
 
     await page.route("**/api/workspaces", async (route) => {
@@ -35,10 +37,16 @@ test.describe("document and process upload flows", () => {
         body: JSON.stringify({
           artifact: { id: "director-upload-artifact" },
           upload_url: "https://upload.test/director-upload-artifact",
+          proxy_upload_url: "/api/artifacts/director-upload-artifact/upload",
         }),
       });
     });
     await page.route("https://upload.test/director-upload-artifact", async (route) => {
+      directUploadCalls += 1;
+      await route.fulfill({ status: 200, body: "" });
+    });
+    await page.route("**/api/artifacts/director-upload-artifact/upload", async (route) => {
+      proxyUploadCalls += 1;
       await route.fulfill({ status: 200, body: "" });
     });
     await page.route("**/api/artifacts/director-upload-artifact/complete", async (route) => {
@@ -61,7 +69,7 @@ test.describe("document and process upload flows", () => {
     await expect(page.getByText("Unsupported file type.")).toBeVisible();
     expect(workspaceCalls).toBe(0);
     expect(presignCalls).toBe(0);
-    await expect(page.getByRole("button", { name: /Continue/ })).toHaveCount(0);
+    expect(await page.getByRole("button", { name: /Continue/ }).count()).toBe(0);
 
     const tempDir = await mkdtemp(join(tmpdir(), "otto-upload-"));
     const tooLargePath = join(tempDir, "too-large.pdf");
@@ -72,7 +80,7 @@ test.describe("document and process upload flows", () => {
     await expect(page.getByText("files must be 50 MB or smaller")).toBeVisible();
     expect(workspaceCalls).toBe(0);
     expect(presignCalls).toBe(0);
-    await expect(page.getByRole("button", { name: /Continue/ })).toHaveCount(0);
+    expect(await page.getByRole("button", { name: /Continue/ }).count()).toBe(0);
 
     await gotoClean(page, "/onboarding/upload");
     await page.locator('input[type="file"]').setInputFiles({
@@ -84,7 +92,63 @@ test.describe("document and process upload flows", () => {
     await expect(page.getByRole("button", { name: "Continue → Synthesize" })).toBeVisible();
     expect(workspaceCalls).toBe(1);
     expect(presignCalls).toBe(1);
+    expect(directUploadCalls).toBe(1);
+    expect(proxyUploadCalls).toBe(0);
     expect(completeCalls).toBe(1);
+  });
+
+  test("falls back to same-origin upload when direct storage upload fails", async ({
+    page,
+  }) => {
+    let directUploadCalls = 0;
+    let proxyUploadCalls = 0;
+
+    await page.route("**/api/workspaces", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          workspace: { id: "fallback-workspace" },
+        }),
+      });
+    });
+    await page.route("**/api/workspaces/fallback-workspace/artifacts/presign", async (route) => {
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({
+          artifact: { id: "fallback-artifact" },
+          upload_url: "https://upload.test/fallback-artifact",
+          proxy_upload_url: "/api/artifacts/fallback-artifact/upload",
+        }),
+      });
+    });
+    await page.route("https://upload.test/fallback-artifact", async (route) => {
+      directUploadCalls += 1;
+      await route.abort("failed");
+    });
+    await page.route("**/api/artifacts/fallback-artifact/upload", async (route) => {
+      proxyUploadCalls += 1;
+      await route.fulfill({ status: 200, body: "" });
+    });
+    await page.route("**/api/artifacts/fallback-artifact/complete", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ artifact: { id: "fallback-artifact" } }),
+      });
+    });
+
+    await gotoClean(page, "/onboarding/upload");
+    await page.locator('input[type="file"]').setInputFiles({
+      name: "director-notes.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("Process: Returns\nOwner: Support Ops"),
+    });
+
+    await expect(page.getByText("Done")).toBeVisible();
+    expect(directUploadCalls).toBe(1);
+    expect(proxyUploadCalls).toBe(1);
   });
 });
 

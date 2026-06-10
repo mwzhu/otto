@@ -267,6 +267,45 @@ const directorOutputCheckSchema = z.object({
   stale_question_count: z.number().int().min(0).default(0),
 }).strict();
 
+const directorOutputCheckAnthropicToolSchema = {
+  type: "object",
+  properties: {
+    checker_status: { type: "string", enum: ["complete", "failed"] },
+    violations: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          type: {
+            type: "string",
+            enum: [
+              "asked_do_not_ask",
+              "unsupported_claim",
+              "ignored_next_objective",
+              "multiple_questions",
+              "too_verbose",
+              "contradicted_steering",
+            ],
+          },
+          severity: { type: "string", enum: ["low", "medium", "high"] },
+          message: { type: "string" },
+        },
+        required: ["type", "severity", "message"],
+        additionalProperties: false,
+      },
+    },
+    checker_violation_count: { type: "integer" },
+    stale_question_count: { type: "integer" },
+  },
+  required: [
+    "checker_status",
+    "violations",
+    "checker_violation_count",
+    "stale_question_count",
+  ],
+  additionalProperties: false,
+} as const;
+
 export async function runDirectorTurn(
   input: DirectorTurnInput,
 ): Promise<DirectorTurnResult> {
@@ -1593,13 +1632,13 @@ export async function checkDirectorSpokenOutput(input: {
   const heuristic = heuristicDirectorOutputCheck(input);
   try {
     const result = await structured({
-      prompt_template_id: "director.voice.output-checker",
+      prompt_template_id: "director.checker.output",
       prompt_template_version: "1",
       schema_name: "director-output-check",
       schema: directorOutputCheckSchema,
       static_input: [
         "You are checking one spoken Otto director-interview utterance after it was already delivered.",
-        "Return JSON only. Do not rewrite the utterance.",
+        "Record your verdict with the emit_director_output_check tool. Do not rewrite the utterance.",
         "Flag unsupported factual claims, repeated/stale questions, ignored steering, multiple questions, verbosity, and steering contradictions.",
       ].join("\n"),
       dynamic_input: JSON.stringify(
@@ -1611,6 +1650,13 @@ export async function checkDirectorSpokenOutput(input: {
         2,
       ),
       input: "Return checker_status, violations, checker_violation_count, and stale_question_count.",
+      anthropic_tool: {
+        name: "emit_director_output_check",
+        description:
+          "Emit the post-hoc verdict for one delivered director-interview utterance: checker status, steering violations, and counts.",
+        input_schema: directorOutputCheckAnthropicToolSchema as unknown as Record<string, unknown>,
+        strict: true,
+      },
       mock: heuristic,
     });
     return normalizeDirectorOutputCheck(result.value, result.metadata);
@@ -1620,7 +1666,7 @@ export async function checkDirectorSpokenOutput(input: {
         ...heuristic,
         checker_status: "failed",
       },
-      fallbackMetadata("director.voice.output-checker", started),
+      fallbackMetadata("director.checker.output", started),
     );
   }
 }

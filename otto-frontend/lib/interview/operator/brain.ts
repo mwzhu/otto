@@ -146,6 +146,45 @@ const operatorOutputCheckSchema = z
   })
   .strict();
 
+const operatorOutputCheckAnthropicToolSchema = {
+  type: "object",
+  properties: {
+    checker_status: { type: "string", enum: ["complete", "failed"] },
+    violations: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          type: {
+            type: "string",
+            enum: [
+              "asked_do_not_ask",
+              "unsupported_claim",
+              "multiple_questions",
+              "too_verbose",
+              "internal_mechanics",
+              "contradicted_reconciliation",
+            ],
+          },
+          severity: { type: "string", enum: ["low", "medium", "high"] },
+          message: { type: "string" },
+        },
+        required: ["type", "severity", "message"],
+        additionalProperties: false,
+      },
+    },
+    checker_violation_count: { type: "integer" },
+    stale_question_count: { type: "integer" },
+  },
+  required: [
+    "checker_status",
+    "violations",
+    "checker_violation_count",
+    "stale_question_count",
+  ],
+  additionalProperties: false,
+} as const;
+
 export type OperatorTurnPlanStreamEvent = {
   type: "planned_agent_utterance";
   utterance: string;
@@ -578,13 +617,13 @@ export async function checkOperatorSpokenOutput(input: {
   const heuristic = heuristicOperatorOutputCheck(input);
   try {
     const result = await structured({
-      prompt_template_id: "operator.voice.output-checker",
+      prompt_template_id: "operator.checker.output",
       prompt_template_version: "1",
       schema_name: "operator-output-check",
       schema: operatorOutputCheckSchema,
       static_input: [
         "You are checking one spoken Otto operator-interview utterance after it was already delivered.",
-        "Return JSON only. Do not rewrite the utterance.",
+        "Record your verdict with the emit_operator_output_check tool. Do not rewrite the utterance.",
         "Flag unsupported factual claims, stale questions, ignored workflow steering, multiple questions, verbosity, internal mechanics, and contradictions with live reconciliation signals.",
       ].join("\n"),
       dynamic_input: JSON.stringify(
@@ -597,6 +636,13 @@ export async function checkOperatorSpokenOutput(input: {
       ),
       input:
         "Return checker_status, violations, checker_violation_count, and stale_question_count.",
+      anthropic_tool: {
+        name: "emit_operator_output_check",
+        description:
+          "Emit the post-hoc verdict for one delivered operator-interview utterance: checker status, steering violations, and counts.",
+        input_schema: operatorOutputCheckAnthropicToolSchema as unknown as Record<string, unknown>,
+        strict: true,
+      },
       mock: heuristic,
     });
     return normalizeOperatorOutputCheck(result.value, result.metadata);
@@ -2184,7 +2230,7 @@ function operatorCheckerFallbackMetadata(startedAt: Date): Generation {
   return {
     text: "",
     model: "deterministic-operator-output-checker",
-    prompt_template_id: "operator.voice.output-checker",
+    prompt_template_id: "operator.checker.output",
     prompt_template_version: "1",
     token_count_input: 0,
     token_count_output: 0,

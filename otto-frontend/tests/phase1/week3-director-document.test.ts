@@ -1489,9 +1489,9 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(brain).toContain("candidateProcessBelongsToSession");
     expect(brain).toContain("rejected_focus_candidate_process_id");
     expect(brain).toContain("does not belong to this capture session");
-    expect(brain).toContain("preflightDirectorPlanClaims");
-    expect(brain).toContain("preflightDirectorPlanClaimSubjects");
-    expect(brain).toContain("directorClaimSubjectFailure");
+    expect(brain).toContain("dispatchPlanClaims");
+    expect(brain).toContain("resolveDirectorPlanClaimSubjects");
+    expect(brain).toContain("drainDirectorRetryClaimTasks");
     expect(brain).toContain("referencedCandidateProcessIdFromValue");
     expect(brain).toContain("Director Phase 1 claims must target candidate_process subjects until promotion");
     expect(brain).toContain("candidate_process claims must target a candidate from this capture session");

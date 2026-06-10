@@ -124,6 +124,10 @@ const requiredClaimEvidenceCaptureId =
   "c7c7c7c7-c7c7-5c7c-8c7c-c7c7c7c7c7c7";
 const slotSatisfiedInvalidSubjectCaptureId =
   "c8d8c8d8-c8d8-58d8-88d8-c8d8c8d8c8d8";
+const demoClaimReplayCaptureId = "e0e0e0e0-e0e0-5e0e-8e0e-e0e0e0e0e0e0";
+const demoClaimReplayEvidenceId = "e1e1e1e1-e1e1-5e1e-8e1e-e1e1e1e1e1e1";
+const drainRetryCaptureId = "e2e2e2e2-e2e2-5e2e-8e2e-e2e2e2e2e2e2";
+const drainRetryEvidenceId = "e3e3e3e3-e3e3-5e3e-8e3e-e3e3e3e3e3e3";
 
 let connectionString = "";
 let appClient: Client;
@@ -1494,6 +1498,372 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
       invalid_claims: 0,
       invalid_subject_follow_ups: 1,
       degraded_decisions: 1,
+    });
+  });
+
+  test("director dispatch writes same-turn claims via name resolution, find-or-create, and phase remap", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [demoClaimReplayCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO evidence (id, org_id, workspace_id, source_type, evidence_label, quote)
+        VALUES ($1, $2, $3, 'transcript_segment', 'stated_director', 'Order intake, order picking, shipping, invoicing, purchasing, and vendor payments. Marcus owns picking.')
+        ON CONFLICT (id) DO NOTHING
+      `,
+      [demoClaimReplayEvidenceId, orgId, workspaceId],
+    );
+
+    const { dispatchDirectorTurnPlan } = await import("@/lib/interview/director/brain");
+    const chosenIntent = {
+      intent: "discover_processes",
+      target_slot: "process.inventory",
+      score: 100,
+      reason: "The process inventory is the selected intent for this turn.",
+    };
+    const processNames = [
+      "Order Intake",
+      "Order Picking",
+      "Shipping",
+      "Invoicing",
+      "Purchasing",
+      "Vendor Payments",
+    ];
+    const hallucinatedProcessId = "f8f8f8f8-f8f8-5f8f-8f8f-f8f8f8f8f8f8";
+    const hallucinatedEvidenceId = "f9f9f9f9-f9f9-5f9f-8f9f-f9f9f9f9f9f9";
+
+    const result = await dispatchDirectorTurnPlan({
+      orgId,
+      workspaceId,
+      captureSessionId: demoClaimReplayCaptureId,
+      userId,
+      latestUtterance:
+        "We run order intake, order picking, shipping, invoicing, purchasing, and vendor payments. Marcus owns picking. A week of delay loses about ten percent of customers.",
+      transcriptSegmentIds: [],
+      evidenceIds: [demoClaimReplayEvidenceId],
+      turnIndex: 51,
+      plannedAgentUtterance: "Which of those should we map first?",
+      plan: {
+        utterance_type: "substantive_answer",
+        slot_updates: [],
+        claims: [
+          // 6x candidate_process.proposed_name referencing same-turn
+          // candidates by NAME (lowercased to prove normalized matching).
+          ...processNames.map((name) => ({
+            subject_type: "candidate_process",
+            subject_id: name.toLowerCase(),
+            field: "proposed_name",
+            value: name,
+            confidence: 0.85,
+            evidence_ids: [demoClaimReplayEvidenceId],
+          })),
+          {
+            subject_type: "candidate_process",
+            subject_id: "Order   Intake",
+            field: "process_relationship",
+            value:
+              "Order intake → Order picking → Shipping → Invoicing (sequential end-to-end); Purchasing and Vendor payments are parallel",
+            confidence: 0.86,
+            evidence_ids: [demoClaimReplayEvidenceId],
+          },
+          {
+            subject_type: "person",
+            subject_id: "Marcus",
+            field: "role",
+            value: "Warehouse picking lead",
+            confidence: 0.82,
+            evidence_ids: [demoClaimReplayEvidenceId],
+          },
+          {
+            subject_type: "person",
+            subject_id: "Marcus",
+            field: "single_point_of_failure",
+            value: true,
+            confidence: 0.8,
+            evidence_ids: [demoClaimReplayEvidenceId],
+          },
+          {
+            subject_type: "process",
+            subject_id: hallucinatedProcessId,
+            field: "business_outcome",
+            value: { name: "a week of delay loses roughly 10% of customers" },
+            confidence: 0.8,
+            evidence_ids: [demoClaimReplayEvidenceId],
+          },
+          {
+            subject_type: "process",
+            subject_id: "Order intake",
+            field: "kpi",
+            value: { name: "hundreds of thousands lost per delayed week" },
+            confidence: 0.78,
+            evidence_ids: [demoClaimReplayEvidenceId],
+          },
+          {
+            subject_type: "system",
+            subject_id: "Gmail",
+            field: "used_in_process",
+            value: "Order Intake",
+            confidence: 0.8,
+            evidence_ids: [demoClaimReplayEvidenceId],
+          },
+          {
+            subject_type: "system",
+            subject_id: "Google Sheets",
+            field: "used_in_process",
+            value: "Order Picking",
+            confidence: 0.8,
+            evidence_ids: [demoClaimReplayEvidenceId],
+          },
+          // 14th synthetic claim with a hallucinated evidence id must reject.
+          {
+            subject_type: "candidate_process",
+            subject_id: "Order Intake",
+            field: "kpi",
+            value: { name: "fabricated metric" },
+            confidence: 0.9,
+            evidence_ids: [hallucinatedEvidenceId],
+          },
+        ],
+        tool_calls: processNames.map((name) => ({
+          name: "recordProcess",
+          arguments: { name, confidence: 0.85 },
+        })),
+        contradiction_signals: [],
+        current_phase: "inventory",
+        proposed_next_phase: "expand",
+        phase_transition_ready: true,
+        ranked_intents: [chosenIntent],
+        chosen_intent: chosenIntent,
+        planned_agent_utterance: "Which of those should we map first?",
+      },
+    });
+
+    expect(result.degraded_quality).toBe(true);
+    expect(result.degraded_reasons).toContain("invalid_evidence_reference");
+    expect(result.degraded_reasons).not.toContain("claim_subject_validation_failed");
+    expect(result.degraded_reasons).not.toContain("claim_validation_failed");
+    expect(result.degraded_reasons).not.toContain("claim_dispatch_failed");
+    expect(result.candidate_process_ids).toHaveLength(6);
+
+    const rows = await appClient.query(
+      `
+        SELECT
+          (SELECT count(*)::int
+             FROM candidate_processes
+            WHERE capture_session_id = $1) AS candidates,
+          (SELECT count(*)::int
+             FROM claims c
+             JOIN candidate_processes cp ON cp.id = c.subject_id
+            WHERE cp.capture_session_id = $1
+              AND c.subject_type = 'candidate_process'
+              AND c.field = 'proposed_name'
+              AND c.status = 'active') AS proposed_name_claims,
+          (SELECT count(*)::int
+             FROM claims c
+             JOIN candidate_processes cp ON cp.id = c.subject_id
+            WHERE cp.capture_session_id = $1
+              AND cp.proposed_name = 'Order Intake'
+              AND c.field = 'process_relationship'
+              AND c.status = 'active') AS relationship_claims,
+          (SELECT count(*)::int
+             FROM claims c
+             JOIN people p ON p.id = c.subject_id
+            WHERE c.subject_type = 'person'
+              AND lower(p.name) = 'marcus'
+              AND c.field IN ('role', 'single_point_of_failure')
+              AND c.status = 'active') AS marcus_claims,
+          (SELECT count(*)::int
+             FROM people
+            WHERE org_id = $2
+              AND lower(name) = 'marcus'
+              AND source = 'director_interview') AS marcus_people,
+          (SELECT count(*)::int
+             FROM claims c
+             JOIN candidate_processes cp ON cp.id = c.subject_id
+            WHERE cp.capture_session_id = $1
+              AND cp.proposed_name = 'Order Intake'
+              AND c.field IN ('business_outcome', 'kpi')
+              AND c.status = 'active'
+              AND c.metadata_json->'remapped_from'->>'subject_type' = 'process') AS remapped_claims,
+          (SELECT count(*)::int
+             FROM claims c
+            WHERE c.subject_type = 'process'
+              AND c.field IN ('business_outcome', 'kpi')) AS canonical_process_claims,
+          (SELECT count(*)::int
+             FROM claims c
+             JOIN systems s ON s.id = c.subject_id
+             JOIN candidate_processes cp
+               ON cp.id = (c.value->>'candidate_process_id')::uuid
+            WHERE c.subject_type = 'system'
+              AND c.field = 'used_in_process'
+              AND c.status = 'active'
+              AND s.name IN ('Gmail', 'Google Sheets')
+              AND cp.capture_session_id = $1) AS coerced_system_claims,
+          (SELECT count(*)::int
+             FROM claims c
+             JOIN candidate_processes cp ON cp.id = c.subject_id
+            WHERE cp.capture_session_id = $1
+              AND c.field = 'kpi'
+              AND c.value->>'name' = 'fabricated metric') AS hallucinated_claims,
+          (SELECT count(*)::int
+             FROM follow_up_tasks
+            WHERE capture_session_id = $1
+              AND title LIKE 'Review stale director evidence%') AS stale_evidence_follow_ups,
+          (SELECT count(*)::int
+             FROM follow_up_tasks
+            WHERE capture_session_id = $1) AS follow_ups
+      `,
+      [demoClaimReplayCaptureId, orgId],
+    );
+
+    expect(rows.rows[0]).toEqual({
+      candidates: 6,
+      proposed_name_claims: 6,
+      relationship_claims: 1,
+      marcus_claims: 2,
+      marcus_people: 1,
+      remapped_claims: 2,
+      canonical_process_claims: 0,
+      coerced_system_claims: 2,
+      hallucinated_claims: 0,
+      stale_evidence_follow_ups: 1,
+      follow_ups: 2,
+    });
+  });
+
+  test("director dispatch drains queued retry-claim tasks when their entity is created", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [drainRetryCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO evidence (id, org_id, workspace_id, source_type, evidence_label, quote)
+        VALUES ($1, $2, $3, 'transcript_segment', 'stated_director', 'Priya runs inventory restock end to end.')
+        ON CONFLICT (id) DO NOTHING
+      `,
+      [drainRetryEvidenceId, orgId, workspaceId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO follow_up_tasks (org_id, workspace_id, capture_session_id, task_type, title, description, target_type, priority, status, context_json)
+        VALUES
+          ($1, $2, $3, 'low_confidence_claim', 'Retry director claim: person.role', 'Person not found.', 'person', 2, 'open', $4::jsonb),
+          ($1, $2, $3, 'low_confidence_claim', 'Review invalid director claim subject: candidate_process.kpi', 'Candidate not found.', 'candidate_process', 2, 'open', $5::jsonb)
+      `,
+      [
+        orgId,
+        workspaceId,
+        drainRetryCaptureId,
+        JSON.stringify({
+          subject_type: "person",
+          subject_id: "Priya",
+          field: "role",
+          value: "Operations Manager",
+          confidence: 0.74,
+          evidence_ids: [drainRetryEvidenceId],
+        }),
+        JSON.stringify({
+          subject_type: "candidate_process",
+          subject_id: "Inventory Restock",
+          field: "kpi",
+          value: { name: "stockout rate" },
+          confidence: 0.8,
+          evidence_ids: [drainRetryEvidenceId],
+        }),
+      ],
+    );
+
+    const { dispatchDirectorTurnPlan } = await import("@/lib/interview/director/brain");
+    const chosenIntent = {
+      intent: "discover_processes",
+      target_slot: "process.inventory",
+      score: 100,
+      reason: "The process inventory is the selected intent for this turn.",
+    };
+
+    const result = await dispatchDirectorTurnPlan({
+      orgId,
+      workspaceId,
+      captureSessionId: drainRetryCaptureId,
+      userId,
+      latestUtterance: "Priya runs inventory restock end to end.",
+      transcriptSegmentIds: [],
+      evidenceIds: [drainRetryEvidenceId],
+      turnIndex: 52,
+      plannedAgentUtterance: "What does success look like for inventory restock?",
+      plan: {
+        utterance_type: "substantive_answer",
+        slot_updates: [],
+        claims: [],
+        tool_calls: [
+          {
+            name: "recordProcess",
+            arguments: { name: "Inventory Restock", confidence: 0.8 },
+          },
+          { name: "recordPerson", arguments: { name: "Priya" } },
+        ],
+        contradiction_signals: [],
+        current_phase: "inventory",
+        proposed_next_phase: "expand",
+        phase_transition_ready: false,
+        ranked_intents: [chosenIntent],
+        chosen_intent: chosenIntent,
+        planned_agent_utterance:
+          "What does success look like for inventory restock?",
+      },
+    });
+
+    expect(result.degraded_quality).toBe(false);
+
+    const rows = await appClient.query(
+      `
+        SELECT
+          (SELECT count(*)::int
+             FROM follow_up_tasks
+            WHERE capture_session_id = $1
+              AND status = 'resolved'
+              AND resolved_at IS NOT NULL) AS resolved_tasks,
+          (SELECT count(*)::int
+             FROM follow_up_tasks
+            WHERE capture_session_id = $1
+              AND status = 'open') AS open_tasks,
+          (SELECT count(*)::int
+             FROM claims c
+             JOIN people p ON p.id = c.subject_id
+            WHERE c.subject_type = 'person'
+              AND lower(p.name) = 'priya'
+              AND c.field = 'role'
+              AND c.value = '"Operations Manager"'::jsonb
+              AND c.status = 'active'
+              AND c.metadata_json->>'source' = 'director_claim_retry_drain') AS drained_person_claims,
+          (SELECT count(*)::int
+             FROM claims c
+             JOIN candidate_processes cp ON cp.id = c.subject_id
+            WHERE cp.capture_session_id = $1
+              AND cp.proposed_name = 'Inventory Restock'
+              AND c.field = 'kpi'
+              AND c.value->>'name' = 'stockout rate'
+              AND c.status = 'active'
+              AND c.metadata_json->>'source' = 'director_claim_retry_drain') AS drained_candidate_claims
+      `,
+      [drainRetryCaptureId],
+    );
+
+    expect(rows.rows[0]).toEqual({
+      resolved_tasks: 2,
+      open_tasks: 0,
+      drained_person_claims: 1,
+      drained_candidate_claims: 1,
     });
   });
 

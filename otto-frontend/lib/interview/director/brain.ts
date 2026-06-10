@@ -43,6 +43,7 @@ import {
 } from "@/lib/interview/director/tools";
 import {
   writeClaimInTransaction,
+  type ClaimSubject,
   type ClaimWriteTx,
 } from "@/lib/db/write-claim";
 import { stableStringify } from "@/lib/http/json";
@@ -795,6 +796,9 @@ function deterministicSlotExtraction(plan: DirectorTurnPlan): LooseSlotExtractio
   };
 }
 
+// TODO(operator-mirror): apply the same non-answer / inferred-confidence /
+// filled-shape normalization to the operator extraction path
+// (lib/interview/operator/brain.ts) once the director version is verified.
 export function normalizeSlotExtractionEvidence(
   extraction: LooseSlotExtraction,
   allowedEvidenceIds: string[],
@@ -1024,11 +1028,6 @@ export async function dispatchDirectorTurnPlan(
   const metadata =
     input.metadata ??
     fallbackMetadata("director.turn.plan", started);
-  const claimPreflight = preflightDirectorPlanClaims(plan.claims);
-  degradedQuality = degradedQuality || claimPreflight.invalid.length > 0;
-  if (claimPreflight.invalid.length > 0) {
-    degradedReasons.add("claim_validation_failed");
-  }
   const advanceConversationState = input.advanceConversationState ?? true;
 
   const commit = async (tx: ClaimWriteTx) => {
@@ -1044,6 +1043,30 @@ export async function dispatchDirectorTurnPlan(
     const candidateProcessIds: string[] = [];
     const candidateProcessIdsByName = new Map<string, string>();
     const toolExecutionLog: DirectorToolExecutionLog[] = [];
+    // Task 5: track every entity this dispatch creates so claim subject
+    // resolution can see same-turn rows and queued retry-claim tasks can be
+    // drained once their target entity exists.
+    const createdClaimEntities: DirectorCreatedClaimEntity[] = [];
+    const sessionClaimEntities: DirectorClaimSessionEntities = {
+      candidatesByName: new Map(),
+      peopleByName: new Map(),
+      systemsByName: new Map(),
+      rolesByName: new Map(),
+    };
+    const trackCreatedClaimEntity = (entity: DirectorCreatedClaimEntity) => {
+      createdClaimEntities.push(entity);
+      const normalized = normalizeDirectorEntityName(entity.name);
+      if (!normalized) return;
+      if (entity.type === "candidate_process") {
+        sessionClaimEntities.candidatesByName.set(normalized, entity.id);
+      } else if (entity.type === "person") {
+        sessionClaimEntities.peopleByName.set(normalized, entity.id);
+      } else if (entity.type === "system") {
+        sessionClaimEntities.systemsByName.set(normalized, entity.id);
+      } else if (entity.type === "role") {
+        sessionClaimEntities.rolesByName.set(normalized, entity.id);
+      }
+    };
     const runDirectorTool = async (
       toolIndex: number,
       toolName: string,
@@ -1174,6 +1197,11 @@ export async function dispatchDirectorTurnPlan(
         normalizeCandidateProcessName(candidate.proposedName),
         candidate.id,
       );
+      trackCreatedClaimEntity({
+        type: "candidate_process",
+        id: candidate.id,
+        name: candidate.proposedName,
+      });
     }
       const focusSelection = await selectActiveCandidateProcessId(context, {
         requestedFocusCandidateId: plan.focus_candidate_process_id,
@@ -1222,8 +1250,8 @@ export async function dispatchDirectorTurnPlan(
             tool.name,
             tool.arguments,
             toolCandidateId,
-            () =>
-              recordSystem(
+            async () => {
+              const system = await recordSystem(
                 context,
                 {
                   name: systemName,
@@ -1231,7 +1259,14 @@ export async function dispatchDirectorTurnPlan(
                   candidateProcessId: toolCandidateId,
                 },
                 { tx },
-              ),
+              );
+              trackCreatedClaimEntity({
+                type: "system",
+                id: system.id,
+                name: system.name,
+              });
+              return system;
+            },
           );
         }
       }
@@ -1243,8 +1278,8 @@ export async function dispatchDirectorTurnPlan(
             tool.name,
             tool.arguments,
             undefined,
-            () =>
-              recordPerson(
+            async () => {
+              const person = await recordPerson(
                 context,
                 {
                   name: personName,
@@ -1253,7 +1288,14 @@ export async function dispatchDirectorTurnPlan(
                   evidenceIds: input.evidenceIds,
                 },
                 { tx },
-              ),
+              );
+              trackCreatedClaimEntity({
+                type: "person",
+                id: person.id,
+                name: person.name,
+              });
+              return person;
+            },
           );
         }
       }
@@ -1369,31 +1411,21 @@ export async function dispatchDirectorTurnPlan(
         { tx },
       );
     }
-    for (const invalidClaim of claimPreflight.invalid) {
-      await createFollowUpTask(
-        context,
-        {
-          taskType: "low_confidence_claim",
-          title: `Review unsupported director claim: ${invalidClaim.claim.subject_type}.${invalidClaim.claim.field}`,
-          description: invalidClaim.reason,
-          targetType: invalidClaim.claim.subject_type,
-          targetId: invalidClaim.claim.subject_id,
-          priority: 2,
-          contextJson: {
-            field: invalidClaim.claim.field,
-            value: invalidClaim.claim.value,
-            evidence_ids: invalidClaim.claim.evidence_ids,
-          },
-        },
-        { tx },
-      );
-    }
-    const claimSubjectPreflight = await preflightDirectorPlanClaimSubjects(
+    // Task 5: entity-creating tool calls and candidate materialization have
+    // already run above, so claim subject resolution can see rows created in
+    // this same dispatch. Resolution accepts UUID-or-name references, creates
+    // evidence-backed person/system subjects that resolve to nothing, and
+    // remaps phase-1 process claims onto the focus/name-matched candidate.
+    const claimResolution = await resolveDirectorPlanClaimSubjects(
       context,
-      claimPreflight.valid,
+      plan.claims,
+      { activeCandidateId, ...sessionClaimEntities },
       tx,
     );
-    for (const invalidClaim of claimSubjectPreflight.invalid) {
+    for (const createdEntity of claimResolution.createdEntities) {
+      createdClaimEntities.push(createdEntity);
+    }
+    for (const invalidClaim of claimResolution.invalid) {
       await createFollowUpTask(
         context,
         {
@@ -1401,28 +1433,32 @@ export async function dispatchDirectorTurnPlan(
           title: `Review invalid director claim subject: ${invalidClaim.claim.subject_type}.${invalidClaim.claim.field}`,
           description: invalidClaim.reason,
           targetType: invalidClaim.claim.subject_type,
-          targetId: invalidClaim.claim.subject_id,
+          targetId: uuidOrUndefined(invalidClaim.claim.subject_id),
           priority: 2,
-          contextJson: {
-            field: invalidClaim.claim.field,
-            value: invalidClaim.claim.value,
-            evidence_ids: invalidClaim.claim.evidence_ids,
-          },
+          contextJson: directorClaimFollowUpContext(invalidClaim.claim),
         },
         { tx },
       );
     }
-    degradedQuality = degradedQuality || claimSubjectPreflight.invalid.length > 0;
-    if (claimSubjectPreflight.invalid.length > 0) {
+    degradedQuality = degradedQuality || claimResolution.invalid.length > 0;
+    if (claimResolution.invalid.length > 0) {
       degradedReasons.add("claim_subject_validation_failed");
     }
     const claimDispatch = await dispatchPlanClaims(
       context,
-      claimSubjectPreflight.valid,
+      claimResolution.claims,
       tx,
     );
     degradedQuality = degradedQuality || claimDispatch.degraded;
-    if (claimDispatch.degraded) degradedReasons.add("claim_dispatch_failed");
+    if (claimDispatch.invalidClaims > 0) {
+      degradedReasons.add("claim_validation_failed");
+    }
+    if (claimDispatch.failedWrites > 0) {
+      degradedReasons.add("claim_dispatch_failed");
+    }
+    // Task 5: replay queued retry/review claim tasks whose target entity was
+    // created by this dispatch (out-of-order extraction windows are real).
+    await drainDirectorRetryClaimTasks(context, createdClaimEntities, tx);
 
     if (degradedQuality) {
       if (degradedReasons.size === 0) {
@@ -2092,20 +2128,6 @@ function objectProperty(parent: Record<string, unknown>, key: string): Record<st
   const next: Record<string, unknown> = {};
   parent[key] = next;
   return next;
-}
-
-function preflightDirectorPlanClaims(claims: DirectorTurnPlan["claims"]) {
-  const valid: DirectorTurnPlan["claims"] = [];
-  const invalid: Array<{ claim: DirectorTurnPlan["claims"][number]; reason: string }> = [];
-  for (const claim of claims) {
-    const claimValidation = validateDirectorPlanClaim(claim);
-    if (claimValidation.ok) {
-      valid.push(claim);
-    } else {
-      invalid.push({ claim, reason: claimValidation.reason });
-    }
-  }
-  return { valid, invalid };
 }
 
 export function preflightDirectorPlanEvidence(
@@ -2834,18 +2856,38 @@ async function recordCandidateProcessClaimFromTool(
   });
 }
 
+type DirectorPlanClaim = DirectorTurnPlan["claims"][number];
+
+type DirectorCreatedClaimEntity = {
+  type: "candidate_process" | "person" | "system" | "role";
+  id: string;
+  name: string;
+};
+
+type DirectorClaimSessionEntities = {
+  activeCandidateId?: string;
+  candidatesByName: Map<string, string>;
+  peopleByName: Map<string, string>;
+  systemsByName: Map<string, string>;
+  rolesByName: Map<string, string>;
+};
+
 async function dispatchPlanClaims(
   context: DirectorToolContext,
   claims: DirectorTurnPlan["claims"],
   tx: ClaimWriteTx,
-): Promise<{ degraded: boolean; droppedClaims: number }> {
-  let degraded = false;
-  let droppedClaims = 0;
+): Promise<{
+  degraded: boolean;
+  droppedClaims: number;
+  invalidClaims: number;
+  failedWrites: number;
+}> {
+  let invalidClaims = 0;
+  let failedWrites = 0;
   for (const claim of claims) {
     const claimValidation = validateDirectorPlanClaim(claim);
     if (!claimValidation.ok) {
-      degraded = true;
-      droppedClaims += 1;
+      invalidClaims += 1;
       await createFollowUpTask(
         context,
         {
@@ -2853,13 +2895,9 @@ async function dispatchPlanClaims(
           title: `Review unsupported director claim: ${claim.subject_type}.${claim.field}`,
           description: claimValidation.reason,
           targetType: claim.subject_type,
-          targetId: claim.subject_id,
+          targetId: uuidOrUndefined(claim.subject_id),
           priority: 2,
-          contextJson: {
-            field: claim.field,
-            value: claim.value,
-            evidence_ids: claim.evidence_ids,
-          },
+          contextJson: directorClaimFollowUpContext(claim),
         },
         { tx },
       );
@@ -2880,15 +2918,9 @@ async function dispatchPlanClaims(
         workspaceId: context.workspaceId,
         userId: context.userId,
         subject: {
-          type: claim.subject_type as
-            | "process"
-            | "process_version"
-            | "candidate_process"
-            | "system"
-            | "role"
-            | "person",
+          type: claim.subject_type,
           id: claim.subject_id,
-        },
+        } as ClaimSubject,
         field: claim.field,
         value: claim.value,
         evidenceIds: claim.evidence_ids,
@@ -2899,8 +2931,7 @@ async function dispatchPlanClaims(
         metadata: { ...claim.metadata, source: "director_turn_plan" },
       });
     } catch (error) {
-      degraded = true;
-      droppedClaims += 1;
+      failedWrites += 1;
       await createFollowUpTask(
         context,
         {
@@ -2911,75 +2942,585 @@ async function dispatchPlanClaims(
               ? error.message
               : "The director claim could not be written automatically.",
           targetType: claim.subject_type,
-          targetId: claim.subject_id,
+          targetId: uuidOrUndefined(claim.subject_id),
           priority: 2,
-          contextJson: {
-            field: claim.field,
-            value: claim.value,
-            evidence_ids: claim.evidence_ids,
-          },
+          contextJson: directorClaimFollowUpContext(claim),
         },
         { tx },
       );
     }
   }
-  return { degraded, droppedClaims };
+  return {
+    degraded: invalidClaims + failedWrites > 0,
+    droppedClaims: invalidClaims + failedWrites,
+    invalidClaims,
+    failedWrites,
+  };
 }
 
-async function preflightDirectorPlanClaimSubjects(
+/**
+ * Carries the full claim payload on follow-up tasks so queued retries can be
+ * replayed verbatim once their subject entity exists (see
+ * drainDirectorRetryClaimTasks). subject_id may be a plain name here — the
+ * uuid `target_id` column is populated separately via uuidOrUndefined.
+ */
+function directorClaimFollowUpContext(claim: DirectorPlanClaim) {
+  return {
+    subject_type: claim.subject_type,
+    subject_id: claim.subject_id,
+    field: claim.field,
+    value: claim.value,
+    confidence: claim.confidence,
+    evidence_ids: claim.evidence_ids,
+    ...(claim.metadata ? { metadata: claim.metadata } : {}),
+  };
+}
+
+/**
+ * Task 5 subject resolution. Claim subject references may be UUIDs or plain
+ * names (the extraction model cannot know ids for entities created in the
+ * same payload). Resolution order per claim:
+ * 1. `process.*` / `process_version.*` subjects are remapped onto the
+ *    name-matched or focus candidate_process with metadata.remapped_from.
+ * 2. A subject_id that parses as a UUID and resolves in this org/session is
+ *    used as-is; otherwise it is treated as a name and resolved against
+ *    session entities (existing rows plus rows created earlier in this
+ *    dispatch) using normalized-name matching (case/whitespace-insensitive).
+ * 3. person/system subjects that resolve to nothing but carry evidence are
+ *    created with the same semantics as recordPerson/recordSystem.
+ * Unresolvable subjects stay hard-rejected.
+ */
+export async function resolveDirectorPlanClaimSubjects(
   context: DirectorToolContext,
   claims: DirectorTurnPlan["claims"],
+  sessionEntities: DirectorClaimSessionEntities,
   tx: ClaimWriteTx,
-) {
-  const valid: DirectorTurnPlan["claims"] = [];
-  const invalid: Array<{
-    claim: DirectorTurnPlan["claims"][number];
-    reason: string;
-  }> = [];
+): Promise<{
+  claims: DirectorTurnPlan["claims"];
+  invalid: Array<{ claim: DirectorPlanClaim; reason: string }>;
+  createdEntities: DirectorCreatedClaimEntity[];
+}> {
+  const resolved: DirectorTurnPlan["claims"] = [];
+  const invalid: Array<{ claim: DirectorPlanClaim; reason: string }> = [];
+  const createdEntities: DirectorCreatedClaimEntity[] = [];
 
-  for (const claim of claims) {
-    const reason = await directorClaimSubjectFailure(context, claim, tx);
-    if (reason) {
-      invalid.push({ claim, reason });
-    } else {
-      valid.push(claim);
+  for (const originalClaim of claims) {
+    let claim: DirectorPlanClaim = {
+      ...originalClaim,
+      ...(originalClaim.metadata
+        ? { metadata: { ...originalClaim.metadata } }
+        : {}),
+    };
+
+    if (
+      claim.subject_type === "process" ||
+      claim.subject_type === "process_version"
+    ) {
+      const nameHint = claimSubjectNameHint(claim);
+      const remapTargetId =
+        (await resolveCandidateProcessSubject(
+          context,
+          claim.subject_id,
+          sessionEntities,
+          tx,
+        )) ??
+        (nameHint
+          ? await resolveCandidateProcessSubject(
+              context,
+              nameHint,
+              sessionEntities,
+              tx,
+            )
+          : undefined) ??
+        sessionEntities.activeCandidateId;
+      if (!remapTargetId) {
+        invalid.push({
+          claim: originalClaim,
+          reason:
+            "Director Phase 1 claims must target candidate_process subjects until promotion, and no session candidate process was available to remap this claim onto.",
+        });
+        continue;
+      }
+      claim = {
+        ...claim,
+        subject_type: "candidate_process",
+        subject_id: remapTargetId,
+        metadata: {
+          ...(claim.metadata ?? {}),
+          remapped_from: {
+            subject_type: originalClaim.subject_type,
+            subject_id: originalClaim.subject_id,
+          },
+        },
+      };
+    } else if (claim.subject_type === "candidate_process") {
+      const nameHint = claimSubjectNameHint(claim);
+      const candidateId =
+        (await resolveCandidateProcessSubject(
+          context,
+          claim.subject_id,
+          sessionEntities,
+          tx,
+        )) ??
+        (nameHint
+          ? await resolveCandidateProcessSubject(
+              context,
+              nameHint,
+              sessionEntities,
+              tx,
+            )
+          : undefined);
+      if (!candidateId) {
+        invalid.push({
+          claim: originalClaim,
+          reason:
+            "Director candidate_process claims must target a candidate from this capture session.",
+        });
+        continue;
+      }
+      claim = { ...claim, subject_id: candidateId };
+    } else if (
+      claim.subject_type === "person" ||
+      claim.subject_type === "system" ||
+      claim.subject_type === "role"
+    ) {
+      const resolution = await resolveNamedEntityClaimSubject(
+        context,
+        claim,
+        sessionEntities,
+        tx,
+      );
+      if (!resolution.id) {
+        invalid.push({ claim: originalClaim, reason: resolution.failureReason });
+        continue;
+      }
+      if (resolution.created) createdEntities.push(resolution.created);
+      claim = { ...claim, subject_id: resolution.id };
+    } else if (!isUuidString(claim.subject_id)) {
+      invalid.push({
+        claim: originalClaim,
+        reason: `Director claims for subject type ${claim.subject_type} must reference an existing row id.`,
+      });
+      continue;
     }
+
+    if (claim.subject_type === "system" && claim.field === "used_in_process") {
+      claim = await coerceUsedInProcessClaimValue(
+        context,
+        claim,
+        sessionEntities,
+        tx,
+      );
+    }
+
+    const referencedCandidateProcessId = referencedCandidateProcessIdFromValue(
+      claim.value,
+    );
+    if (
+      referencedCandidateProcessId &&
+      !(await candidateProcessBelongsToSession(
+        context,
+        referencedCandidateProcessId,
+        tx,
+      ))
+    ) {
+      invalid.push({
+        claim: originalClaim,
+        reason:
+          "Director claims that reference candidate_process_id must reference this capture session.",
+      });
+      continue;
+    }
+
+    resolved.push(claim);
   }
-  return { valid, invalid };
+  return { claims: resolved, invalid, createdEntities };
 }
 
-async function directorClaimSubjectFailure(
+function claimSubjectNameHint(claim: DirectorPlanClaim) {
+  const fromMetadata = claim.metadata?.subject_name;
+  return typeof fromMetadata === "string" && fromMetadata.trim()
+    ? fromMetadata
+    : undefined;
+}
+
+async function resolveCandidateProcessSubject(
   context: DirectorToolContext,
-  claim: DirectorTurnPlan["claims"][number],
+  reference: string,
+  sessionEntities: DirectorClaimSessionEntities,
+  tx: ClaimWriteTx,
+): Promise<string | undefined> {
+  if (
+    isUuidString(reference) &&
+    (await candidateProcessBelongsToSession(context, reference.trim(), tx))
+  ) {
+    return reference.trim();
+  }
+  const normalized = normalizeDirectorEntityName(reference);
+  if (!normalized || isUuidString(normalized)) return undefined;
+  return (
+    sessionEntities.candidatesByName.get(normalized) ??
+    (await candidateProcessIdByNormalizedName(context, normalized, tx))
+  );
+}
+
+async function resolveNamedEntityClaimSubject(
+  context: DirectorToolContext,
+  claim: DirectorPlanClaim,
+  sessionEntities: DirectorClaimSessionEntities,
+  tx: ClaimWriteTx,
+): Promise<{
+  id?: string;
+  created?: DirectorCreatedClaimEntity;
+  failureReason: string;
+}> {
+  const subjectType = claim.subject_type as "person" | "system" | "role";
+  const byName =
+    subjectType === "person"
+      ? sessionEntities.peopleByName
+      : subjectType === "system"
+        ? sessionEntities.systemsByName
+        : sessionEntities.rolesByName;
+  const notFound = {
+    failureReason: `${namedEntityLabel(subjectType)} not found for director claim subject.`,
+  };
+  if (
+    isUuidString(claim.subject_id) &&
+    (await namedEntityExistsById(context, subjectType, claim.subject_id.trim(), tx))
+  ) {
+    return { id: claim.subject_id.trim(), failureReason: "" };
+  }
+  const nameReference = isUuidString(claim.subject_id)
+    ? claimSubjectNameHint(claim)
+    : claim.subject_id;
+  const normalized = nameReference
+    ? normalizeDirectorEntityName(nameReference)
+    : undefined;
+  if (!normalized || isUuidString(normalized)) return notFound;
+  const existingId =
+    byName.get(normalized) ??
+    (await namedEntityIdByNormalizedName(context, subjectType, normalized, tx));
+  if (existingId) {
+    byName.set(normalized, existingId);
+    return { id: existingId, failureReason: "" };
+  }
+  if (
+    subjectType !== "role" &&
+    claim.evidence_ids.length > 0 &&
+    isPlausibleClaimSubjectName(nameReference ?? "")
+  ) {
+    const created =
+      subjectType === "person"
+        ? await recordPerson(
+            context,
+            { name: nameReference!.trim(), evidenceIds: claim.evidence_ids },
+            { tx },
+          )
+        : await recordSystem(
+            context,
+            { name: nameReference!.trim(), evidenceIds: claim.evidence_ids },
+            { tx },
+          );
+    byName.set(normalized, created.id);
+    return {
+      id: created.id,
+      created: { type: subjectType, id: created.id, name: created.name },
+      failureReason: "",
+    };
+  }
+  return notFound;
+}
+
+const namedEntityTables = {
+  person: "people",
+  system: "systems",
+  role: "roles",
+} as const;
+
+function namedEntityLabel(subjectType: "person" | "system" | "role") {
+  return subjectType === "person"
+    ? "Person"
+    : subjectType === "system"
+      ? "System"
+      : "Role";
+}
+
+async function namedEntityExistsById(
+  context: DirectorToolContext,
+  subjectType: "person" | "system" | "role",
+  id: string,
   tx: ClaimWriteTx,
 ) {
-  if (
-    claim.subject_type === "process" ||
-    claim.subject_type === "process_version"
-  ) {
-    return "Director Phase 1 claims must target candidate_process subjects until promotion.";
-  }
+  const rows = await tx.execute<{ id: string }>(sql`
+    SELECT id
+    FROM ${sql.raw(namedEntityTables[subjectType])}
+    WHERE id = ${id}
+      AND org_id = ${context.orgId}
+    LIMIT 1
+  `);
+  return rows.rows.length > 0;
+}
 
-  if (
-    claim.subject_type === "candidate_process" &&
-    !(await candidateProcessBelongsToSession(context, claim.subject_id, tx))
-  ) {
-    return "Director candidate_process claims must target a candidate from this capture session.";
-  }
+async function namedEntityIdByNormalizedName(
+  context: DirectorToolContext,
+  subjectType: "person" | "system" | "role",
+  normalizedName: string,
+  tx: ClaimWriteTx,
+) {
+  const rows = await tx.execute<{ id: string }>(sql`
+    SELECT id
+    FROM ${sql.raw(namedEntityTables[subjectType])}
+    WHERE org_id = ${context.orgId}
+      AND lower(regexp_replace(trim(name), '\\s+', ' ', 'g')) = ${normalizedName}
+    ORDER BY created_at ASC
+    LIMIT 1
+  `);
+  return rows.rows[0]?.id;
+}
 
-  const referencedCandidateProcessId = referencedCandidateProcessIdFromValue(claim.value);
-  if (
-    referencedCandidateProcessId &&
-    !(await candidateProcessBelongsToSession(
-      context,
-      referencedCandidateProcessId,
-      tx,
-    ))
-  ) {
-    return "Director claims that reference candidate_process_id must reference this capture session.";
-  }
+async function candidateProcessIdByNormalizedName(
+  context: DirectorToolContext,
+  normalizedName: string,
+  tx: ClaimWriteTx,
+) {
+  const rows = await tx.execute<{ id: string }>(sql`
+    SELECT id
+    FROM candidate_processes
+    WHERE org_id = ${context.orgId}
+      AND workspace_id = ${context.workspaceId}
+      AND capture_session_id = ${context.captureSessionId}
+      AND lower(regexp_replace(trim(proposed_name), '\\s+', ' ', 'g')) = ${normalizedName}
+      AND status = 'pending'
+    ORDER BY created_at DESC
+    LIMIT 1
+  `);
+  return rows.rows[0]?.id;
+}
 
-  return null;
+/**
+ * Backstop for string-valued `system.used_in_process` payloads (Task 6 fixes
+ * the shape at generation): coerce the process-name string into the required
+ * `{ candidate_process_id }` object by resolving the name against session
+ * candidates, falling back to the focus candidate.
+ */
+async function coerceUsedInProcessClaimValue(
+  context: DirectorToolContext,
+  claim: DirectorPlanClaim,
+  sessionEntities: DirectorClaimSessionEntities,
+  tx: ClaimWriteTx,
+): Promise<DirectorPlanClaim> {
+  const value = claim.value;
+  if (typeof value === "string" && value.trim()) {
+    const candidateId =
+      (await resolveCandidateProcessSubject(context, value, sessionEntities, tx)) ??
+      sessionEntities.activeCandidateId;
+    if (!candidateId) return claim;
+    return {
+      ...claim,
+      value: { candidate_process_id: candidateId, process_name: value.trim() },
+      metadata: {
+        ...(claim.metadata ?? {}),
+        coerced_value_from: "string",
+      },
+    };
+  }
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const record = value as Record<string, unknown>;
+    if (typeof record.candidate_process_id === "string") return claim;
+    const processName =
+      stringArg(record.process_name) ??
+      stringArg(record.candidate_process_name) ??
+      stringArg(record.process) ??
+      stringArg(record.name);
+    const candidateId =
+      (processName
+        ? await resolveCandidateProcessSubject(
+            context,
+            processName,
+            sessionEntities,
+            tx,
+          )
+        : undefined) ?? sessionEntities.activeCandidateId;
+    if (!candidateId) return claim;
+    return {
+      ...claim,
+      value: { ...record, candidate_process_id: candidateId },
+      metadata: {
+        ...(claim.metadata ?? {}),
+        coerced_value_from: "object_missing_candidate_process_id",
+      },
+    };
+  }
+  return claim;
+}
+
+function isPlausibleClaimSubjectName(name: string) {
+  const trimmed = name.trim();
+  if (!trimmed || trimmed.length > 120) return false;
+  if (isUuidString(trimmed)) return false;
+  return /[a-z]/i.test(trimmed);
+}
+
+const UUID_STRING_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isUuidString(value: string) {
+  return UUID_STRING_PATTERN.test(value.trim());
+}
+
+function uuidOrUndefined(value: string) {
+  return isUuidString(value) ? value.trim() : undefined;
+}
+
+function normalizeDirectorEntityName(value: string) {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+/**
+ * Task 5 auto-drain: when an entity gets created, replay open
+ * "Retry director claim" / "Review invalid director claim subject" follow-up
+ * tasks that were queued because the entity did not exist yet (out-of-order
+ * extraction commits). Successful replays mark the task resolved.
+ */
+async function drainDirectorRetryClaimTasks(
+  context: DirectorToolContext,
+  createdEntities: DirectorCreatedClaimEntity[],
+  tx: ClaimWriteTx,
+): Promise<{ drained: number }> {
+  if (createdEntities.length === 0) return { drained: 0 };
+  const rows = await tx.execute<{
+    id: string;
+    title: string;
+    target_type: string | null;
+    target_id: string | null;
+    context_json: Record<string, unknown> | null;
+  }>(sql`
+    SELECT id, title, target_type, target_id, context_json
+    FROM follow_up_tasks
+    WHERE org_id = ${context.orgId}
+      AND workspace_id = ${context.workspaceId}
+      AND capture_session_id = ${context.captureSessionId}
+      AND status = 'open'
+      AND task_type = 'low_confidence_claim'
+      AND (
+        title LIKE 'Retry director claim:%'
+        OR title LIKE 'Review invalid director claim subject:%'
+      )
+    ORDER BY created_at ASC
+    FOR UPDATE
+  `);
+  let drained = 0;
+  for (const task of rows.rows) {
+    const taskContext = (task.context_json ?? {}) as Record<string, unknown>;
+    const entity = createdEntities.find((candidate) =>
+      retryClaimTaskTargetsEntity(task, taskContext, candidate),
+    );
+    if (!entity) continue;
+    const replay = retryClaimFromTaskContext(taskContext, entity);
+    if (!replay) continue;
+    const validation = validateDirectorPlanClaim(replay);
+    if (!validation.ok) continue;
+    const request = {
+      subject_type: replay.subject_type,
+      subject_id: replay.subject_id,
+      field: replay.field,
+      value: replay.value,
+      evidence_ids: replay.evidence_ids,
+      confidence: replay.confidence,
+    };
+    await writeClaimInTransaction(tx, {
+      orgId: context.orgId,
+      workspaceId: context.workspaceId,
+      userId: context.userId,
+      subject: { type: entity.type, id: entity.id } as ClaimSubject,
+      field: replay.field,
+      value: replay.value,
+      evidenceIds: replay.evidence_ids,
+      confidence: replay.confidence,
+      idempotencyKey: `director-claim-drain:${task.id}`,
+      requestHash: hash(request),
+      route: "director-turn/drain-retry-claim",
+      metadata: {
+        ...(replay.metadata ?? {}),
+        source: "director_claim_retry_drain",
+        retry_task_id: task.id,
+      },
+    });
+    await tx.execute(sql`
+      UPDATE follow_up_tasks
+      SET status = 'resolved', resolved_at = now(), updated_at = now()
+      WHERE id = ${task.id}
+    `);
+    drained += 1;
+  }
+  return { drained };
+}
+
+function retryClaimTaskTargetsEntity(
+  task: { target_type: string | null; target_id: string | null },
+  taskContext: Record<string, unknown>,
+  entity: DirectorCreatedClaimEntity,
+) {
+  const subjectType =
+    typeof taskContext.subject_type === "string"
+      ? taskContext.subject_type
+      : task.target_type;
+  if (subjectType !== entity.type) return false;
+  if (task.target_id && task.target_id === entity.id) return true;
+  const normalizedEntityName = normalizeDirectorEntityName(entity.name);
+  if (!normalizedEntityName) return false;
+  const subjectReference =
+    typeof taskContext.subject_id === "string"
+      ? taskContext.subject_id
+      : undefined;
+  const subjectName =
+    typeof taskContext.subject_name === "string"
+      ? taskContext.subject_name
+      : undefined;
+  return [subjectReference, subjectName].some(
+    (reference) =>
+      reference !== undefined &&
+      normalizeDirectorEntityName(reference) === normalizedEntityName,
+  );
+}
+
+function retryClaimFromTaskContext(
+  taskContext: Record<string, unknown>,
+  entity: DirectorCreatedClaimEntity,
+): DirectorPlanClaim | undefined {
+  const field =
+    typeof taskContext.field === "string" && taskContext.field.trim()
+      ? taskContext.field
+      : undefined;
+  if (!field || taskContext.value === undefined) return undefined;
+  const evidenceIds = Array.isArray(taskContext.evidence_ids)
+    ? taskContext.evidence_ids.filter(
+        (evidenceId): evidenceId is string =>
+          typeof evidenceId === "string" && isUuidString(evidenceId),
+      )
+    : [];
+  if (evidenceIds.length === 0) return undefined;
+  const confidence =
+    typeof taskContext.confidence === "number" &&
+    taskContext.confidence >= 0 &&
+    taskContext.confidence <= 1
+      ? taskContext.confidence
+      : 0.6;
+  const metadata =
+    taskContext.metadata &&
+    typeof taskContext.metadata === "object" &&
+    !Array.isArray(taskContext.metadata)
+      ? (taskContext.metadata as Record<string, unknown>)
+      : undefined;
+  return {
+    subject_type: entity.type,
+    subject_id: entity.id,
+    field,
+    value: taskContext.value,
+    confidence,
+    evidence_ids: evidenceIds,
+    ...(metadata ? { metadata } : {}),
+  };
 }
 
 function referencedCandidateProcessIdFromValue(value: unknown) {

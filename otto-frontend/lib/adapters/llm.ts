@@ -414,12 +414,25 @@ function scrubSchemaNode(node: unknown): unknown {
   return output;
 }
 
+// Strict tool use is gated OFF by default. Several extraction schemas are
+// intrinsically incompatible with Anthropic strict mode — claim/slot `value`
+// fields are free-form objects (different shape per field) and many properties
+// are optional, but strict requires `additionalProperties: false` on every
+// object and every property in `required`. Sending such a schema returns a 400
+// on every call. Until each schema is individually validated as strict-safe,
+// run non-strict (the schema still steers the model; Zod + dispatch validate
+// the output). Re-enable per environment with OTTO_STRICT_TOOLS=true.
+function strictToolsEnabled() {
+  return process.env.OTTO_STRICT_TOOLS === "true";
+}
+
 function anthropicToolPayload(tool: NonNullable<GenerateOpts["anthropic_tool"]>) {
+  const useStrict = Boolean(tool.strict) && strictToolsEnabled();
   return {
     name: tool.name,
     description: tool.description,
-    input_schema: tool.strict ? scrubForStrict(tool.input_schema) : tool.input_schema,
-    ...(tool.strict ? { strict: true } : {}),
+    input_schema: useStrict ? scrubForStrict(tool.input_schema) : tool.input_schema,
+    ...(useStrict ? { strict: true } : {}),
   };
 }
 

@@ -43,6 +43,11 @@ export function defaultClassifier(error: unknown): RetryableErrorKind | "fatal" 
   if (message.includes("timeout")) return "timeout";
   if (message.includes("network") || message.includes("fetch")) return "network";
   if (message.includes("500") || message.includes("503")) return "server";
+  // Client errors (4xx other than 429) are not transient — retrying a 400/401/
+  // 403/404/422 only burns the backoff budget (~31s for a request that will
+  // never succeed) and hides the real failure. Fail fast so the caller falls
+  // back immediately.
+  if (/\b4\d\d\b/.test(message) && !message.includes("429")) return "fatal";
   return "unknown";
 }
 

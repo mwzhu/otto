@@ -380,6 +380,7 @@ async function planOperatorTurnWithPlanner(
         description:
           "Emit the validated operator workflow interview turn plan, including provisional step updates, slots, contradictions, chosen intent, and the exact next spoken utterance.",
         input_schema: operatorTurnPlanAnthropicToolSchema(),
+        strict: true,
       },
       mock: deterministicPlan,
     });

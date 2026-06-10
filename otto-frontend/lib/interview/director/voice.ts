@@ -63,6 +63,20 @@ export async function phraseDirectorTurnDetailed(input: {
     verbatimAnchor ?? deterministicPhrase(input.plan, input.focusProcessName),
   );
   const env = getServerEnv();
+  if (verbatimAnchor) {
+    // Verbatim escalation exists because the phraser ignored steering; asking
+    // the same phraser to comply via prompt would re-trust the failing
+    // component, and on the streaming path deltas reach TTS before any
+    // post-generation check could override. Bypass generation entirely and
+    // speak the canonical probe phrasing.
+    await input.onTextDelta?.(fallback, fallback);
+    return {
+      utterance: fallback,
+      metadata: deterministicVoiceMetadata(started, input, fallback, {
+        reason: "verbatim_escalation",
+      }),
+    };
+  }
   const useSeparateVoiceLlm =
     input.forceSeparateVoiceLlm ||
     process.env.OTTO_DIRECTOR_USE_SEPARATE_VOICE_LLM === "true";

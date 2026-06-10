@@ -287,7 +287,6 @@ describe("provisional-answer guard (Task 2)", () => {
       latestUtterance:
         "It keeps revenue flowing because orders ship out the same week they come in.",
       pendingExtractionTurns: [2],
-      pendingSlotPaths: [],
       recentFirings: [firing("capture_outcome", "outcomes.business_outcomes", 2, 8_000)],
     });
     expect(provisional).toContain("outcomes.business_outcomes");
@@ -297,7 +296,6 @@ describe("provisional-answer guard (Task 2)", () => {
     const provisional = provisionallyAnsweredSlotPaths({
       latestUtterance: "I don't know, hard to say.",
       pendingExtractionTurns: [],
-      pendingSlotPaths: [],
       recentFirings: [firing("capture_outcome", "outcomes.business_outcomes", 2, 8_000)],
     });
     expect(provisional).not.toContain("outcomes.business_outcomes");
@@ -325,12 +323,11 @@ describe("provisional-answer guard (Task 2)", () => {
     ).toBe(false);
   });
 
-  test("caller-supplied pending slots flow into the provisional set", () => {
+  test("only spoken probes are guarded; pending steering targets never asked are not", () => {
     const provisional = provisionallyAnsweredSlotPaths({
       latestUtterance:
         "We also coordinate the weekly vendor payment runs with the finance group downstream.",
       pendingExtractionTurns: [3, 4],
-      pendingSlotPaths: ["systems.systems_of_record"],
       recentFirings: [
         firing("capture_systems", "systems.systems_of_record", 4, 5_000),
         firing("capture_owner_roles", "ownership.roles", 3, 45_000),
@@ -339,6 +336,10 @@ describe("provisional-answer guard (Task 2)", () => {
     expect(provisional).toContain("systems.systems_of_record");
     // turn 3 firing's reply turn (4) is pending, so its slot is guarded too.
     expect(provisional).toContain("ownership.roles");
+    // Ranked-context slots that were never spoken (they ride along in
+    // steering target_slots) must NOT be excluded from the chooser.
+    expect(provisional).not.toContain("scope.boundaries");
+    expect(provisional).toHaveLength(2);
   });
 });
 
@@ -424,5 +425,44 @@ describe("verbatim phrasing fallback (Task 1)", () => {
         process.env.ANTHROPIC_API_KEY = priorAnthropic;
       }
     }
+  });
+
+  test("verbatim escalation bypasses generation entirely, overriding even a planned utterance", async () => {
+    const plan = deterministicTurnPlan({
+      latestUtterance:
+        "There is a lot happening across the department right now, more than I can list quickly.",
+      evidenceIds: [evidenceId],
+      currentSlots: new Map(),
+      currentPhase: "inventory",
+      candidateProcessNames: [],
+    });
+    const anchors = probePhrasingsForIntent("discover_processes", "process.inventory");
+    const deltas: string[] = [];
+    const phrased = await phraseDirectorTurnDetailed({
+      plan: {
+        ...plan,
+        // The phraser/one-call path would normally speak this off-objective
+        // utterance; verbatim escalation must win without calling any LLM.
+        planned_agent_utterance:
+          "When an order arrives, walk me through the first thing your team does.",
+      },
+      recentTurns: [],
+      coverageSummary: "test coverage",
+      onTextDelta: (delta) => {
+        deltas.push(delta);
+      },
+      steering: {
+        directive: directorIntentDirective(intentFixture()),
+        anchorPhrasings: anchors,
+        doNotAsk: [],
+        verbatimRequired: true,
+      },
+    });
+    expect(phrased.utterance).toBe(anchors[0]);
+    // The streaming consumer (TTS) must receive the anchor, not LLM deltas.
+    expect(deltas.join("")).toBe(anchors[0]);
+    expect(
+      (phrased.metadata as { utterance_source?: string }).utterance_source,
+    ).toBe("deterministic_phrase_fallback");
   });
 });

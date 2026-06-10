@@ -408,7 +408,6 @@ export async function buildDirectorSteeringPlan(
   const provisionallyAnsweredSlots = provisionallyAnsweredSlotPaths({
     latestUtterance: input.latestUtterance,
     pendingExtractionTurns,
-    pendingSlotPaths,
     recentFirings: probeFiringRows,
   });
   const plan = deterministicTurnPlan({
@@ -693,11 +692,15 @@ export function consecutivePriorIntentFirings(
 export function provisionallyAnsweredSlotPaths(input: {
   latestUtterance: string;
   pendingExtractionTurns: number[];
-  pendingSlotPaths: string[];
   recentFirings: DirectorProbeFiringRow[];
 }): string[] {
   const pendingTurns = new Set(input.pendingExtractionTurns);
-  const provisional = new Set(input.pendingSlotPaths);
+  // Seed from probe firings only: a slot is provisionally answered when its
+  // probe was actually SPOKEN and the exchange has not committed. Pending
+  // steering target_slots must not seed this set — they carry the chosen
+  // intent plus ranked context slots, and excluding never-asked slots lets the
+  // chooser skip real probes and fall through to a bridge/summary.
+  const provisional = new Set<string>();
   const ordered = orderProbeFiringsByRecency(input.recentFirings);
   for (const firing of ordered) {
     if (!firing.targetSlot || firing.turnIndex === null) continue;

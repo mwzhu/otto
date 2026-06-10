@@ -81,14 +81,21 @@ const DIRECTOR_CLAIM_SUBJECT_TYPES: readonly string[] = [
   "role",
 ];
 
+// All current director phases share the discovery-layer subject set; the
+// per-phase map keeps the routing explicit and lets later phases diverge
+// without changing call sites.
+const DIRECTOR_PHASE_CLAIM_SUBJECTS: Record<DirectorInterviewPhase, readonly string[]> = {
+  orient: DIRECTOR_CLAIM_SUBJECT_TYPES,
+  inventory: DIRECTOR_CLAIM_SUBJECT_TYPES,
+  expand: DIRECTOR_CLAIM_SUBJECT_TYPES,
+  enrich: DIRECTOR_CLAIM_SUBJECT_TYPES,
+  closeout: DIRECTOR_CLAIM_SUBJECT_TYPES,
+};
+
 export function directorClaimSubjectTypesForPhase(
-  _phase?: DirectorInterviewPhase,
+  phase: DirectorInterviewPhase = "inventory",
 ): readonly string[] {
-  // All current director phases (orient/inventory/expand/enrich/closeout)
-  // share the discovery-layer subject set. The parameter keeps the routing
-  // explicit for callers and lets later phases diverge without changing the
-  // call sites.
-  return DIRECTOR_CLAIM_SUBJECT_TYPES;
+  return DIRECTOR_PHASE_CLAIM_SUBJECTS[phase];
 }
 
 const SUBJECT_ID_DESCRIPTION =

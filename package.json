@@ -1,0 +1,17 @@
+{
+  "name": "otto",
+  "private": true,
+  "workspaces": [
+    "otto-frontend"
+  ],
+  "scripts": {
+    "build": "npm --workspace otto-frontend run build",
+    "dev:app": "npm --workspace otto-frontend run dev",
+    "dev:inngest": "npx inngest-cli@latest dev -u http://localhost:3000/api/inngest",
+    "dev:director": "cd agents/director && ../../scripts/with-env.sh .env -- uv run --no-sync otto-director-agent start",
+    "dev:operator": "cd agents/operator && ../../scripts/with-env.sh .env -- uv run --no-sync otto-operator-agent start"
+  },
+  "dependencies": {
+    "next": "16.2.6"
+  }
+}

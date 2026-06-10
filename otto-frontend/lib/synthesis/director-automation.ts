@@ -256,6 +256,7 @@ async function extractDirectorAutomationPlan(input: {
       description:
         "Emit a director-level automation plan with operational ranges and no dollar values.",
       input_schema: directorAutomationAnthropicToolSchema,
+      strict: true,
     },
     mock: input.mock,
   });

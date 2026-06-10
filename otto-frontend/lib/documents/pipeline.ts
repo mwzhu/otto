@@ -480,6 +480,7 @@ export async function extractDocumentInventory(text: string) {
         description:
           "Emit evidence-backed process inventory candidates from the provided document chunk.",
         input_schema: documentInventoryAnthropicToolSchema,
+        strict: true,
       },
       mock: fallback,
     });

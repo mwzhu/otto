@@ -18,6 +18,8 @@ probes:
     cooldown_seconds: 45
     max_fires: 3
     expected_shape: Function or remit name with business outcomes when available.
+    directive: >-
+      Ask the director what part of the business they oversee. Stay at the function/remit level; do not drill into any single process.
     base_priority: 110
     phrasings:
       - What part of the business do you oversee?
@@ -35,6 +37,8 @@ probes:
     cooldown_seconds: 60
     max_fires: 3
     expected_shape: List of recurring processes or operating cadences.
+    directive: >-
+      Ask the director what other recurring processes their team owns. Collect a breadth-first list of process names. Do not drill into the steps of a single process.
     base_priority: 105
     phrasings:
       - What are the main recurring processes your team owns?
@@ -51,6 +55,8 @@ probes:
     cooldown_seconds: 75
     max_fires: 2
     expected_shape: A named process plus start and end conditions.
+    directive: >-
+      Ask the director where the focus process starts and ends — what kicks it off and what counts as done. Do not ask for step-by-step detail.
     base_priority: 100
     phrasings:
       - Which process should we focus on first?
@@ -67,6 +73,8 @@ probes:
     cooldown_seconds: 75
     max_fires: 2
     expected_shape: Accountable role/team and participating teams.
+    directive: >-
+      Ask the director which role or team is accountable for the focus process and who else participates.
     base_priority: 95
     phrasings:
       - Who is accountable for that process?
@@ -84,6 +92,8 @@ probes:
     cooldown_seconds: 75
     max_fires: 2
     expected_shape: Systems of record, spreadsheets, and shadow tools.
+    directive: >-
+      Ask the director which systems of record, spreadsheets, or shadow tools the team relies on for the focus process.
     base_priority: 90
     phrasings:
       - Which systems of record or spreadsheets does the team rely on for this?
@@ -100,6 +110,8 @@ probes:
     cooldown_seconds: 75
     max_fires: 2
     expected_shape: Business outcome, decision, or measurable result.
+    directive: >-
+      Ask the director what business outcome or decision the focus process is supposed to produce.
     base_priority: 85
     phrasings:
       - What outcome is this process supposed to produce for the business?
@@ -116,6 +128,8 @@ probes:
     cooldown_seconds: 75
     max_fires: 2
     expected_shape: Cadence and rough transaction/person/team volume.
+    directive: >-
+      Ask the director how often the focus process runs and at roughly what volume.
     base_priority: 80
     phrasings:
       - How often does this happen?
@@ -133,6 +147,8 @@ probes:
     cooldown_seconds: 90
     max_fires: 2
     expected_shape: Upstream input, downstream consumer, or handoff point.
+    directive: >-
+      Ask the director what upstream inputs the focus process depends on or where the important handoffs are.
     base_priority: 74
     phrasings:
       - What upstream inputs does this depend on?
@@ -150,6 +166,8 @@ probes:
     cooldown_seconds: 90
     max_fires: 2
     expected_shape: KPI, SLA, target, or reviewed metric.
+    directive: >-
+      Ask the director how they measure whether the focus process is working well (KPI, SLA, or reviewed metric).
     base_priority: 72
     phrasings:
       - How do you measure whether this process is working well?
@@ -168,6 +186,8 @@ probes:
     cooldown_seconds: 90
     max_fires: 2
     expected_shape: Bottleneck, rework, exception, delay, or manual cleanup.
+    directive: >-
+      Ask the director where the focus process slows down, breaks, or requires manual cleanup today.
     base_priority: 70
     phrasings:
       - Where does the work slow down, break, or require manual cleanup today?
@@ -185,6 +205,8 @@ probes:
     cooldown_seconds: 120
     max_fires: 2
     expected_shape: Named role/person dependency, fragile workaround, or tribal knowledge.
+    directive: >-
+      Ask the director whether any part of the focus process depends on one person, tribal knowledge, or a fragile workaround.
     base_priority: 60
     phrasings:
       - Is any part of this dependent on one person or one fragile workaround?
@@ -202,6 +224,8 @@ probes:
     cooldown_seconds: 120
     max_fires: 2
     expected_shape: SOP, runbook, wiki, or source-of-truth signal.
+    directive: >-
+      Ask the director where the source of truth for the focus process lives (SOP, runbook, wiki, or tribal knowledge).
     base_priority: 55
     phrasings:
       - Where does the source of truth live?

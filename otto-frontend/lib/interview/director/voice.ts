@@ -19,6 +19,19 @@ type PhraseableDirectorPlan = Omit<DirectorTurnPlan, "planned_agent_utterance"> 
   planned_agent_utterance?: string;
 };
 
+/**
+ * Explicit steering sections for the voice phraser. Passed as labeled prompt
+ * sections (not a JSON pseudo-turn) so the fast model treats the directive as
+ * binding rather than background noise.
+ */
+export type DirectorVoiceSteering = {
+  directive: string;
+  anchorPhrasings: string[];
+  doNotAsk: string[];
+  verbatimRequired: boolean;
+  requiredStyle?: string;
+};
+
 export async function phraseDirectorTurn(input: {
   plan: DirectorTurnPlan;
   recentTurns: string[];
@@ -36,11 +49,34 @@ export async function phraseDirectorTurnDetailed(input: {
   coverageSummary: string;
   focusProcessName?: string;
   forceSeparateVoiceLlm?: boolean;
+  steering?: DirectorVoiceSteering;
   onTextDelta?: (delta: string, textSoFar: string) => void | Promise<void>;
 }): Promise<PhrasedDirectorTurn> {
   const started = Date.now();
-  const fallback = limitToSingleQuestion(deterministicPhrase(input.plan, input.focusProcessName));
+  // When verbatim escalation is active, the deterministic fallback is the
+  // canonical probe phrasing itself.
+  const verbatimAnchor =
+    input.steering?.verbatimRequired && input.steering.anchorPhrasings[0]
+      ? input.steering.anchorPhrasings[0]
+      : undefined;
+  const fallback = limitToSingleQuestion(
+    verbatimAnchor ?? deterministicPhrase(input.plan, input.focusProcessName),
+  );
   const env = getServerEnv();
+  if (verbatimAnchor) {
+    // Verbatim escalation exists because the phraser ignored steering; asking
+    // the same phraser to comply via prompt would re-trust the failing
+    // component, and on the streaming path deltas reach TTS before any
+    // post-generation check could override. Bypass generation entirely and
+    // speak the canonical probe phrasing.
+    await input.onTextDelta?.(fallback, fallback);
+    return {
+      utterance: fallback,
+      metadata: deterministicVoiceMetadata(started, input, fallback, {
+        reason: "verbatim_escalation",
+      }),
+    };
+  }
   const useSeparateVoiceLlm =
     input.forceSeparateVoiceLlm ||
     process.env.OTTO_DIRECTOR_USE_SEPARATE_VOICE_LLM === "true";
@@ -81,18 +117,29 @@ export async function phraseDirectorTurnDetailed(input: {
         "Do not sound like a survey. Acknowledge what they said, then ask one targeted question.",
         "Keep it under 45 words unless answering a meta question.",
         "Anchor questions in concrete examples when possible.",
+        "HARD RULES:",
+        "- Your question MUST target the OBJECTIVE below. Never substitute a different topic.",
+        "- The ANCHOR PHRASINGS show what to ask; adapt the wording to the conversation, never the target.",
+        "- If VERBATIM REQUIRED is yes, speak the first anchor phrasing verbatim after a brief acknowledgment.",
+        "- Never re-ask anything in DO NOT ASK, including paraphrases of it.",
+        "- Director interviews stay at process level: never ask for step-by-step detail. If the director defers to an operator, acknowledge and move on.",
       ].join("\n"),
       dynamic_input: [
-        `Phase: ${input.plan.proposed_next_phase}`,
-        `Utterance type: ${input.plan.utterance_type}`,
-        `Chosen intent: ${JSON.stringify(input.plan.chosen_intent)}`,
-        input.focusProcessName ? `Focus process: ${input.focusProcessName}` : "",
-        `Coverage: ${input.coverageSummary}`,
-        "Recent turns:",
-        ...input.recentTurns.slice(-4).map((turn) => `- ${turn}`),
+        directorSteeringPromptSections(input.steering),
+        [
+          `Phase: ${input.plan.proposed_next_phase}`,
+          `Utterance type: ${input.plan.utterance_type}`,
+          `Chosen intent: ${JSON.stringify(input.plan.chosen_intent)}`,
+          input.focusProcessName ? `Focus process: ${input.focusProcessName}` : "",
+          `Coverage: ${input.coverageSummary}`,
+          "Recent turns:",
+          ...input.recentTurns.slice(-4).map((turn) => `- ${turn}`),
+        ]
+          .filter(Boolean)
+          .join("\n"),
       ]
         .filter(Boolean)
-        .join("\n"),
+        .join("\n\n"),
       input: "Return only the next sentence(s) Otto should say. No JSON.",
     };
     const result = input.onTextDelta
@@ -117,6 +164,36 @@ export async function phraseDirectorTurnDetailed(input: {
       }),
     };
   }
+}
+
+function directorSteeringPromptSections(steering?: DirectorVoiceSteering) {
+  if (!steering) return "";
+  const sections = [
+    "## OBJECTIVE (your question MUST target this)",
+    steering.directive,
+  ];
+  if (steering.anchorPhrasings.length > 0) {
+    sections.push(
+      "## ANCHOR PHRASINGS (adapt wording to the conversation, never the target)",
+      ...steering.anchorPhrasings.map((phrasing) => `- ${phrasing}`),
+    );
+  }
+  sections.push(
+    "## VERBATIM REQUIRED",
+    steering.verbatimRequired
+      ? "Yes. Speak the first anchor phrasing verbatim after a brief acknowledgment."
+      : "No. Adapt the anchors naturally.",
+  );
+  if (steering.doNotAsk.length > 0) {
+    sections.push(
+      "## DO NOT ASK (already covered, pending, or just asked)",
+      ...steering.doNotAsk.slice(0, 12).map((item) => `- ${item}`),
+    );
+  }
+  if (steering.requiredStyle) {
+    sections.push("## STYLE", steering.requiredStyle);
+  }
+  return sections.join("\n");
 }
 
 function brainPlannedVoiceMetadata(

@@ -81,6 +81,140 @@ export function slotPriority(slotPath: string) {
   );
 }
 
+/**
+ * Per-slot "filled requires" shape hints. A slot may only be stored as
+ * `filled` when every component group below is satisfied by the value;
+ * otherwise the extraction normalizer demotes it to `partial`.
+ *
+ * A group is satisfied when the value object carries one of the listed keys
+ * with non-empty content, or — for free-text values — when the text matches
+ * the group's pattern.
+ */
+export type DirectorSlotFilledComponent = {
+  component: string;
+  keys: string[];
+  textPattern?: RegExp;
+};
+
+export const directorSlotFilledRequirements: Record<
+  string,
+  DirectorSlotFilledComponent[]
+> = {
+  "scope.boundaries": [
+    {
+      component: "start_condition",
+      keys: [
+        "start_condition",
+        "starts_when",
+        "start",
+        "trigger",
+        "begins_when",
+        "entry_point",
+      ],
+      textPattern:
+        /\b(start|starts|begin|begins|kick(?:s|ed)? off|triggered|when .{0,40}(arrives|lands|comes in|received))\b/i,
+    },
+    {
+      component: "end_condition",
+      keys: [
+        "end_condition",
+        "ends_when",
+        "end",
+        "done_when",
+        "completion",
+        "complete_when",
+        "finished_when",
+        "exit_point",
+      ],
+      textPattern:
+        /\b(end|ends|done|complete|completed|finish|finished|released|closed|delivered)\b/i,
+    },
+  ],
+  "friction.pain_points": [
+    {
+      component: "pain_point",
+      keys: ["pain_point", "pain_points", "text", "items", "description"],
+    },
+  ],
+  "outcomes.business_outcomes": [
+    {
+      component: "business_outcome",
+      keys: [
+        "business_outcomes",
+        "business_outcome",
+        "outcomes",
+        "outcome",
+        "text",
+        "items",
+        "name",
+      ],
+    },
+  ],
+};
+
+/**
+ * Returns the component labels a value is missing for the slot to qualify as
+ * `filled`. Slots without registered requirements always return [].
+ */
+export function missingFilledSlotComponents(
+  slotPath: string,
+  value: unknown,
+): string[] {
+  const requirements = directorSlotFilledRequirements[slotPath];
+  if (!requirements) return [];
+  return requirements
+    .filter((group) => !filledComponentSatisfied(group, value))
+    .map((group) => group.component);
+}
+
+function filledComponentSatisfied(
+  group: DirectorSlotFilledComponent,
+  value: unknown,
+): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!text) return false;
+    return group.textPattern ? group.textPattern.test(text) : true;
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) return false;
+    if (!group.textPattern) return true;
+    return value.some(
+      (entry) => typeof entry === "string" && group.textPattern!.test(entry),
+    );
+  }
+  if (typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  const hasComponentKey = group.keys.some((key) =>
+    hasNonEmptyContent(record[key]),
+  );
+  if (hasComponentKey) return true;
+  if (!group.textPattern) return false;
+  return nestedStrings(record).some((text) => group.textPattern!.test(text));
+}
+
+function hasNonEmptyContent(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value === "string") return value.trim().length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  return true;
+}
+
+function nestedStrings(value: unknown, depth = 0): string[] {
+  if (depth > 3 || value === undefined || value === null) return [];
+  if (typeof value === "string") return value.trim() ? [value] : [];
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => nestedStrings(entry, depth + 1));
+  }
+  if (typeof value === "object") {
+    return Object.values(value as Record<string, unknown>).flatMap((entry) =>
+      nestedStrings(entry, depth + 1),
+    );
+  }
+  return [];
+}
+
 export function isCaptureLevelDirectorSlot(slotPath: string) {
   return slotPath === "function.name" || slotPath === "process.inventory";
 }

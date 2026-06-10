@@ -17,6 +17,7 @@ import { writeAgentDecisionInTransaction } from "@/lib/db/write-agent-decision";
 import {
   directorSlotDefinitions,
   isCaptureLevelDirectorSlot,
+  missingFilledSlotComponents,
   slotPriority,
   type DirectorSlotStatus,
 } from "@/lib/interview/director/slot-schema";
@@ -485,7 +486,9 @@ async function planDirectorTurnWithExtractionPlanner(
       },
       mock: deterministicSlotExtraction(deterministicPlan),
     });
-    const extraction = normalizeSlotExtractionEvidence(llmResult.value, input.evidenceIds);
+    const extraction = normalizeSlotExtractionEvidence(llmResult.value, input.evidenceIds, {
+      utteranceType: deterministicPlan.utterance_type,
+    });
     plan = {
       ...deterministicPlan,
       slot_updates: extraction.slot_updates,
@@ -792,32 +795,66 @@ function deterministicSlotExtraction(plan: DirectorTurnPlan): LooseSlotExtractio
   };
 }
 
-function normalizeSlotExtractionEvidence(
+export function normalizeSlotExtractionEvidence(
   extraction: LooseSlotExtraction,
   allowedEvidenceIds: string[],
+  options: { utteranceType?: DirectorUtteranceType } = {},
 ): Pick<DirectorTurnPlan, "slot_updates" | "claims" | "tool_calls" | "contradiction_signals"> {
   const normalizedSlotUpdates: DirectorTurnPlan["slot_updates"] =
-    extraction.slot_updates.map((slotUpdate) => ({
-      slot_path: slotUpdate.slot_path,
-      ...(slotUpdate.candidate_process_id
-        ? { candidate_process_id: slotUpdate.candidate_process_id }
-        : {}),
-      ...(slotUpdate.value !== undefined ? { value: slotUpdate.value } : {}),
-      status: slotUpdate.status,
-      confidence: slotUpdate.confidence,
-      evidence_ids: normalizeAssertionEvidenceIds(slotUpdate.evidence_ids, allowedEvidenceIds, {
-        fallbackToCurrentTurn: true,
-      }),
-      ...(slotUpdate.last_asked_at ? { last_asked_at: slotUpdate.last_asked_at } : {}),
-      priority: slotUpdate.priority,
-      ...(slotUpdate.candidates ? { candidates: slotUpdate.candidates } : {}),
-    }));
+    extraction.slot_updates.map((slotUpdate) => {
+      let status = slotUpdate.status;
+      let value = slotUpdate.value;
+      let confidence = slotUpdate.confidence;
+      // Task 3 rule 1: a don't-know reply is never a slot value. Convert the
+      // update to asked_unknown and drop the quoted non-answer.
+      if (
+        (status === "filled" || status === "partial") &&
+        isNonAnswerSlotExtraction(value, options.utteranceType)
+      ) {
+        status = "asked_unknown";
+        value = undefined;
+      }
+      // Task 3 rule 3: `filled` requires the value to satisfy the slot's
+      // expected shape; otherwise demote to partial.
+      if (
+        status === "filled" &&
+        missingFilledSlotComponents(slotUpdate.slot_path, value).length > 0
+      ) {
+        status = "partial";
+      }
+      // Task 3 rule 2: inferred values are capped at 0.45 by code.
+      if (
+        isInferredExtractionRecord(
+          (slotUpdate as Record<string, unknown>).metadata,
+          value,
+        )
+      ) {
+        confidence = Math.min(confidence, INFERRED_EXTRACTION_CONFIDENCE_CAP);
+      }
+      return {
+        slot_path: slotUpdate.slot_path,
+        ...(slotUpdate.candidate_process_id
+          ? { candidate_process_id: slotUpdate.candidate_process_id }
+          : {}),
+        ...(value !== undefined ? { value } : {}),
+        status,
+        confidence,
+        evidence_ids: normalizeAssertionEvidenceIds(slotUpdate.evidence_ids, allowedEvidenceIds, {
+          fallbackToCurrentTurn: true,
+        }),
+        ...(slotUpdate.last_asked_at ? { last_asked_at: slotUpdate.last_asked_at } : {}),
+        priority: slotUpdate.priority,
+        ...(slotUpdate.candidates ? { candidates: slotUpdate.candidates } : {}),
+      };
+    });
   const normalizedClaims: DirectorTurnPlan["claims"] = extraction.claims.map((claim) => ({
     subject_type: claim.subject_type,
     subject_id: claim.subject_id,
     field: claim.field,
     value: claim.value,
-    confidence: claim.confidence,
+    confidence: isInferredExtractionRecord(claim.metadata, claim.value)
+      ? Math.min(claim.confidence, INFERRED_EXTRACTION_CONFIDENCE_CAP)
+      : claim.confidence,
     evidence_ids: normalizeAssertionEvidenceIds(claim.evidence_ids, allowedEvidenceIds, {
       fallbackToCurrentTurn: false,
     }),
@@ -835,6 +872,58 @@ function normalizeSlotExtractionEvidence(
     tool_calls: normalizedToolCalls,
     contradiction_signals: extraction.contradiction_signals,
   };
+}
+
+const INFERRED_EXTRACTION_CONFIDENCE_CAP = 0.45;
+
+const NON_ANSWER_VALUE_PATTERN =
+  /\b(?:not (?:really |entirely |quite )?sure|i don'?t (?:really |actually )?know|no idea|hard to say|you(?:'d| would) have to ask|i(?:'d| would) have to (?:ask|check)|couldn'?t (?:tell|say)|i'?m not certain|don'?t quote me)\b/i;
+
+function isNonAnswerSlotExtraction(
+  value: unknown,
+  utteranceType?: DirectorUtteranceType,
+) {
+  if (value === undefined) return false;
+  if (utteranceType === "dont_know" || utteranceType === "non_answer") {
+    return true;
+  }
+  const text = extractionValueText(value);
+  return text.length > 0 && NON_ANSWER_VALUE_PATTERN.test(text);
+}
+
+function extractionValueText(value: unknown, depth = 0): string {
+  if (depth > 3 || value === undefined || value === null) return "";
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => extractionValueText(entry, depth + 1))
+      .filter(Boolean)
+      .join(" ");
+  }
+  if (typeof value === "object") {
+    return Object.values(value as Record<string, unknown>)
+      .map((entry) => extractionValueText(entry, depth + 1))
+      .filter(Boolean)
+      .join(" ");
+  }
+  return "";
+}
+
+function isInferredExtractionRecord(metadata: unknown, value: unknown) {
+  if (
+    metadata &&
+    typeof metadata === "object" &&
+    !Array.isArray(metadata) &&
+    (metadata as Record<string, unknown>).inferred === true
+  ) {
+    return true;
+  }
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      (value as Record<string, unknown>).inferred === true,
+  );
 }
 
 function normalizeAssertionEvidenceIds(

@@ -42,7 +42,7 @@ const synthesisConcurrency: [
   { limit: number },
 ] = [
   { limit: 1, key: "event.data.orgId" },
-  { limit: 8 },
+  { limit: 5 },
 ];
 
 const synthesisOrgThrottle = {

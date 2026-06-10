@@ -16,6 +16,7 @@ export async function GET(request: Request) {
   try {
     const url = new URL(request.url);
     const code = url.searchParams.get("code");
+    const returnTo = safeReturnPath(url.searchParams.get("state"));
     if (!code) {
       return NextResponse.json(
         { error: { code: "bad_request", message: "Missing code." } },
@@ -72,7 +73,9 @@ export async function GET(request: Request) {
       return { org, user };
     });
 
-    const response = NextResponse.redirect(new URL("/onboarding", request.url));
+    const response = NextResponse.redirect(
+      new URL(returnTo ?? "/onboarding", request.url),
+    );
     response.headers.append(
       "set-cookie",
       sessionCookieHeader({
@@ -89,4 +92,11 @@ export async function GET(request: Request) {
   } catch (error) {
     return apiError(error);
   }
+}
+
+function safeReturnPath(value: string | null) {
+  if (!value) return null;
+  if (!value.startsWith("/") || value.startsWith("//")) return null;
+  if (value.includes("://")) return null;
+  return value;
 }

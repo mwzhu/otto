@@ -132,6 +132,12 @@ export function VoicePreStartClient() {
       );
       router.push("/onboarding/voice/live");
     } catch (err) {
+      if (err instanceof AuthenticationRequiredError) {
+        window.location.assign(
+          `/api/auth/login?return_to=${encodeURIComponent("/onboarding/voice")}`,
+        );
+        return;
+      }
       setError(
         err instanceof Error ? err.message : "Could not start the interview.",
       );
@@ -262,6 +268,9 @@ async function postJson<T>(url: string, body: unknown, idempotencyKey?: string) 
     body: JSON.stringify(body),
   });
   const payload = await response.json();
+  if (response.status === 401) {
+    throw new AuthenticationRequiredError();
+  }
   if (!response.ok) {
     throw new Error(
       payload?.error?.message ?? `Request failed (${response.status})`,
@@ -273,10 +282,19 @@ async function postJson<T>(url: string, body: unknown, idempotencyKey?: string) 
 async function getJson<T>(url: string) {
   const response = await fetch(url);
   const payload = await response.json();
+  if (response.status === 401) {
+    throw new AuthenticationRequiredError();
+  }
   if (!response.ok) {
     throw new Error(
       payload?.error?.message ?? `Request failed (${response.status})`,
     );
   }
   return payload as T;
+}
+
+class AuthenticationRequiredError extends Error {
+  constructor() {
+    super("Authentication required.");
+  }
 }

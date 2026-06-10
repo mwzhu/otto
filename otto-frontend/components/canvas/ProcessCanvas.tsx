@@ -42,13 +42,15 @@ const edgeTypes = {
   labeled: LabeledEdge,
 };
 
+export type ProcessCanvasProps = {
+  graph: ProcessGraph;
+  onNodeEvidenceOpen?: (input: { title: string; evidenceIds: string[] }) => void;
+};
+
 export function ProcessCanvas({
   graph,
   onNodeEvidenceOpen,
-}: {
-  graph: ProcessGraph;
-  onNodeEvidenceOpen?: (input: { title: string; evidenceIds: string[] }) => void;
-}) {
+}: ProcessCanvasProps) {
   const correctedNodeIds = useWorkspaceStore((s) => s.correctedNodeIds);
   const setSelected = useWorkspaceStore((s) => s.setSelectedNodeId);
   const openEvidence = useWorkspaceStore((s) => s.openEvidence);

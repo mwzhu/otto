@@ -14,8 +14,9 @@ import type { ProcessGraph } from "@/lib/types";
 import type { ProcessFollowUpTask } from "@/lib/processes/follow-up-queries";
 import type { ProcessGraphVersionSummary } from "@/lib/processes/graph-queries";
 import type { WorkspaceTab } from "@/lib/store/workspace";
+import type { ProcessCanvasProps } from "@/components/canvas/ProcessCanvas";
 
-const ProcessCanvas = dynamic(
+const ProcessCanvas = dynamic<ProcessCanvasProps>(
   () => import("@/components/canvas/ProcessCanvas").then((m) => m.ProcessCanvas),
   { ssr: false, loading: () => <div className="size-full bg-canvas" /> },
 );
@@ -48,6 +49,11 @@ export default function WorkspaceClient({
     stepTitle: string;
     evidenceIds: string[];
   } | null>(null);
+  const handleCanvasNodeEvidenceOpen: NonNullable<
+    ProcessCanvasProps["onNodeEvidenceOpen"]
+  > = ({ title, evidenceIds }) => {
+    setCanvasEvidence({ stepTitle: title, evidenceIds });
+  };
 
   useEffect(() => {
     // No-op; URL drives state.
@@ -59,9 +65,7 @@ export default function WorkspaceClient({
       <div className="relative h-full border-r border-subtle">
         <ProcessCanvas
           graph={graph}
-          onNodeEvidenceOpen={({ title, evidenceIds }) =>
-            setCanvasEvidence({ stepTitle: title, evidenceIds })
-          }
+          onNodeEvidenceOpen={handleCanvasNodeEvidenceOpen}
         />
       </div>
 

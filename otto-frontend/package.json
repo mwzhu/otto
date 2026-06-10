@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "../scripts/with-env.sh .env.local -- next dev",
-    "build": "../scripts/with-env.sh .env.local -- next build",
+    "build": "if [ -x ../scripts/with-env.sh ]; then ../scripts/with-env.sh .env.local -- next build; else next build; fi",
     "start": "../scripts/with-env.sh .env.local -- next start",
     "lint": "eslint",
     "test": "../scripts/with-env.sh .env.local -- vitest run tests/phase0 tests/phase1",
@@ -58,5 +58,9 @@
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^4.1.7"
+  },
+  "optionalDependencies": {
+    "@tailwindcss/oxide-linux-x64-gnu": "4.3.0",
+    "lightningcss-linux-x64-gnu": "1.32.0"
   }
 }

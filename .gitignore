@@ -6,3 +6,4 @@ node_modules/
 *.tsbuildinfo
 frontend-mockups/
 otto-frontend/screenshots/
+.vercel

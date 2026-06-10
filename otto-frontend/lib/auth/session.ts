@@ -34,6 +34,7 @@ export type AuthContext = {
 };
 
 const SESSION_COOKIE = "otto_session";
+const DEMO_OPEN_ACCESS = true;
 
 type SessionPayload = {
   orgId: string;
@@ -52,7 +53,10 @@ export function getWorkOS() {
 export async function requireAuth(request: Request): Promise<AuthContext> {
   assertSafeRuntimeEnv();
   const env = getServerEnv();
-  if (env.OTTO_DEV_AUTH_BYPASS) {
+  // DEMO ONLY: keep the app open for trial/demo traffic without requiring
+  // WorkOS login. Future implementation should set DEMO_OPEN_ACCESS=false and
+  // restore the cookie-backed auth path below as the required production path.
+  if (DEMO_OPEN_ACCESS || env.OTTO_DEV_AUTH_BYPASS) {
     return ensureDevPrincipal();
   }
 
@@ -72,11 +76,14 @@ export async function requireAuth(request: Request): Promise<AuthContext> {
 export async function requirePageAuth(): Promise<AuthContext> {
   assertSafeRuntimeEnv();
   const env = getServerEnv();
-  if (env.OTTO_DEV_AUTH_BYPASS) {
+  const cookie = (await cookies()).get(SESSION_COOKIE)?.value;
+  // DEMO ONLY: keep the app open for trial/demo traffic without requiring
+  // WorkOS login. Future implementation should set DEMO_OPEN_ACCESS=false and
+  // restore the cookie-backed auth path below as the required production path.
+  if (DEMO_OPEN_ACCESS || env.OTTO_DEV_AUTH_BYPASS) {
     return ensureDevPrincipal();
   }
 
-  const cookie = (await cookies()).get(SESSION_COOKIE)?.value;
   if (!cookie) {
     throw new ApiError(401, "unauthorized", "Authentication required.");
   }

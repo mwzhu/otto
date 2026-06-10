@@ -405,11 +405,17 @@ export async function buildDirectorSteeringPlan(
     ...pendingWindows.slotPaths,
   ]);
   const probeFiringSummaries = probeFiringSummariesFromRows(probeFiringRows);
-  const provisionallyAnsweredSlots = provisionallyAnsweredSlotPaths({
-    latestUtterance: input.latestUtterance,
-    pendingExtractionTurns,
-    recentFirings: probeFiringRows,
-  });
+  const provisionallyAnsweredSlots = uniqueStrings([
+    ...provisionallyAnsweredSlotPaths({
+      latestUtterance: input.latestUtterance,
+      pendingExtractionTurns,
+      recentFirings: probeFiringRows,
+    }),
+    // pending_re_extract means the question was asked and answered but the
+    // extraction failed. The answer exists in the transcript; re-asking it
+    // burns director trust. Keep these excluded until a re-extract succeeds.
+    ...pendingReExtractSlotPaths(currentSlots),
+  ]);
   const plan = deterministicTurnPlan({
     latestUtterance: input.latestUtterance,
     evidenceIds: input.evidenceIds,
@@ -736,6 +742,14 @@ function orderProbeFiringsByRecency(rows: DirectorProbeFiringRow[]) {
   });
 }
 
+export function pendingReExtractSlotPaths(
+  currentSlots: Map<string, { status: string }>,
+): string[] {
+  return [...currentSlots.entries()]
+    .filter(([, slot]) => slot.status === "pending_re_extract")
+    .map(([slotPath]) => slotPath);
+}
+
 function uniqueNumbers(values: number[]) {
   return [...new Set(values)];
 }
@@ -867,15 +881,21 @@ async function planDirectorTurnWithExtractionPlanner(
   } catch (error) {
     degradedQuality = true;
     degradedReasons.push(structuredExtractionFailureReason(error));
+    // Mark the slot that was actually asked this turn (not a hardcoded
+    // scope.boundaries) so the steering planner knows the answer exists but
+    // is uncommitted — otherwise the chooser re-asks a question the director
+    // already answered every time extraction fails.
+    const askedSlotPath =
+      deterministicPlan.chosen_intent?.target_slot ?? "scope.boundaries";
     plan = {
       ...deterministicPlan,
       utterance_type: "partial_answer",
       slot_updates: input.evidenceIds.map((evidenceId) => ({
-        slot_path: "scope.boundaries",
+        slot_path: askedSlotPath,
         status: "pending_re_extract" as const,
         confidence: 0,
         evidence_ids: [evidenceId],
-        priority: slotPriority("scope.boundaries"),
+        priority: slotPriority(askedSlotPath),
       })),
       claims: [],
       tool_calls: [],

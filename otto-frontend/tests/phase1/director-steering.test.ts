@@ -8,6 +8,7 @@ import {
   deterministicTurnPlan,
   directorIntentDirective,
   probeFiringSummariesFromRows,
+  pendingReExtractSlotPaths,
   provisionallyAnsweredSlotPaths,
   type DirectorProbeFiringRow,
 } from "@/lib/interview/director/brain";
@@ -464,5 +465,35 @@ describe("verbatim phrasing fallback (Task 1)", () => {
     expect(
       (phrased.metadata as { utterance_source?: string }).utterance_source,
     ).toBe("deterministic_phrase_fallback");
+  });
+});
+
+describe("extraction-failure re-ask guard (pending_re_extract)", () => {
+  test("pending_re_extract slots are exposed for chooser exclusion", () => {
+    const slots = new Map([
+      ["ownership.roles", { status: "pending_re_extract" }],
+      ["process.inventory", { status: "filled" }],
+      ["metrics.kpis", { status: "empty" }],
+    ]);
+    expect(pendingReExtractSlotPaths(slots)).toEqual(["ownership.roles"]);
+  });
+
+  test("the chooser skips a pending_re_extract slot supplied as provisionally answered", () => {
+    const baseInput = {
+      latestUtterance:
+        "There is a lot happening across the department right now, more than I can list quickly.",
+      evidenceIds: [evidenceId],
+      currentSlots: new Map([["function.name", { status: "filled", confidence: 0.9 }]]),
+      currentPhase: "inventory" as const,
+      candidateProcessNames: [],
+    };
+    const unguarded = deterministicTurnPlan(baseInput);
+    const blockedSlot = unguarded.chosen_intent.target_slot;
+    expect(blockedSlot).toBeTruthy();
+    const guarded = deterministicTurnPlan({
+      ...baseInput,
+      provisionallyAnsweredSlots: [blockedSlot!],
+    });
+    expect(guarded.chosen_intent.target_slot).not.toBe(blockedSlot);
   });
 });

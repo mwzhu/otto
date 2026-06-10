@@ -90,6 +90,7 @@ async function extractWorkflowSemanticModelWithLimits(
       description:
         "Emit a compact, evidence-grounded business workflow semantic model from the operator screenshare interview pack.",
       input_schema: workflowSemanticModelAnthropicToolSchema,
+      strict: true,
     },
     mock: input.mock,
   });

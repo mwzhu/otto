@@ -21,6 +21,14 @@ export type GenerateOpts = PromptedCall & {
     name: string;
     description: string;
     input_schema: Record<string, unknown>;
+    /**
+     * Opt into API-enforced structured outputs for this tool call.
+     * When true, the input schema is passed through `scrubForStrict` (strict
+     * mode rejects several JSON Schema keywords) and `strict: true` is sent
+     * on the tool definition. Client-side Zod keeps enforcing the scrubbed
+     * constraints.
+     */
+    strict?: boolean;
   };
 };
 
@@ -44,6 +52,7 @@ export type Generation = {
   streaming?: boolean;
   stream_cutoff?: "first_question" | "message_stop";
   stop_reason?: string;
+  strict?: boolean;
 };
 
 export const PROMPT_CACHE_MIN_STATIC_CHARS = 4096;
@@ -283,6 +292,137 @@ export async function structuredStream<T>(
   );
 }
 
+/**
+ * JSON Schema keywords the Anthropic structured-outputs strict mode rejects.
+ * Constraints stripped here remain enforced client-side by the Zod schemas.
+ * (`format` is stripped wholesale — the claim schemas use `format: "uuid"`
+ * on subject/evidence references, but claim subjects must also accept plain
+ * entity names, so the wire schema cannot pin them to UUIDs.)
+ */
+const STRICT_UNSUPPORTED_SCHEMA_KEYWORDS = new Set([
+  "$id",
+  "$schema",
+  "contains",
+  "dependentRequired",
+  "dependentSchemas",
+  "else",
+  "exclusiveMaximum",
+  "exclusiveMinimum",
+  "format",
+  "if",
+  "maxContains",
+  "maxItems",
+  "maxLength",
+  "maxProperties",
+  "minContains",
+  "minItems",
+  "minLength",
+  "minProperties",
+  "minimum",
+  "maximum",
+  "multipleOf",
+  "not",
+  "pattern",
+  "patternProperties",
+  "propertyNames",
+  "then",
+  "unevaluatedItems",
+  "unevaluatedProperties",
+  "uniqueItems",
+]);
+
+const SCHEMA_MAP_KEYWORDS = new Set(["properties", "$defs", "definitions"]);
+const SCHEMA_LIST_KEYWORDS = new Set(["anyOf", "allOf", "oneOf", "prefixItems"]);
+
+/**
+ * Deterministically rewrite a JSON Schema so the Anthropic strict mode
+ * accepts it:
+ * - strip keywords strict mode rejects (string/numeric/array/object
+ *   constraints, conditionals, `format`, ...);
+ * - rewrite `oneOf` to the supported `anyOf`;
+ * - force `additionalProperties: false` on every object schema that declares
+ *   `properties` (free-form object schemas without `properties` are left
+ *   open — closing them would make them unsatisfiable);
+ * - when an object is closed, drop `required` entries that have no matching
+ *   property (e.g. left behind by a stripped `if`/`then` branch).
+ *
+ * The output is byte-stable for a given input (key order preserved, forced
+ * keys appended at a fixed position) so it participates safely in the prompt
+ * cache prefix, and the function is idempotent.
+ */
+export function scrubForStrict(
+  schema: Record<string, unknown>,
+): Record<string, unknown> {
+  return scrubSchemaNode(schema) as Record<string, unknown>;
+}
+
+function scrubSchemaNode(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(scrubSchemaNode);
+  if (!node || typeof node !== "object") return node;
+  const input = node as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+  let hadAdditionalPropertiesFalse = false;
+  for (const [key, value] of Object.entries(input)) {
+    if (STRICT_UNSUPPORTED_SCHEMA_KEYWORDS.has(key)) continue;
+    if (key === "additionalProperties") {
+      hadAdditionalPropertiesFalse = value === false;
+      continue;
+    }
+    if (SCHEMA_MAP_KEYWORDS.has(key) && value && typeof value === "object" && !Array.isArray(value)) {
+      output[key] = Object.fromEntries(
+        Object.entries(value as Record<string, unknown>).map(([name, sub]) => [
+          name,
+          scrubSchemaNode(sub),
+        ]),
+      );
+      continue;
+    }
+    if (SCHEMA_LIST_KEYWORDS.has(key) && Array.isArray(value)) {
+      const scrubbed = value
+        .map(scrubSchemaNode)
+        .filter(
+          (entry) =>
+            !entry ||
+            typeof entry !== "object" ||
+            Array.isArray(entry) ||
+            Object.keys(entry).length > 0,
+        );
+      if (scrubbed.length === 0) continue;
+      output[key === "oneOf" ? "anyOf" : key] = scrubbed;
+      continue;
+    }
+    if (key === "items") {
+      output[key] = scrubSchemaNode(value);
+      continue;
+    }
+    output[key] = value;
+  }
+  const properties =
+    output.properties && typeof output.properties === "object" && !Array.isArray(output.properties)
+      ? (output.properties as Record<string, unknown>)
+      : undefined;
+  if (properties) {
+    if (Array.isArray(output.required)) {
+      output.required = output.required.filter(
+        (item) => typeof item === "string" && item in properties,
+      );
+    }
+    output.additionalProperties = false;
+  } else if (hadAdditionalPropertiesFalse) {
+    output.additionalProperties = false;
+  }
+  return output;
+}
+
+function anthropicToolPayload(tool: NonNullable<GenerateOpts["anthropic_tool"]>) {
+  return {
+    name: tool.name,
+    description: tool.description,
+    input_schema: tool.strict ? scrubForStrict(tool.input_schema) : tool.input_schema,
+    ...(tool.strict ? { strict: true } : {}),
+  };
+}
+
 function validateStructuredValue<T>(
   value: unknown,
   schema?: z.ZodType<T>,
@@ -322,13 +462,7 @@ async function generateAnthropic(
       messages: [{ role: "user", content }],
       ...(opts.anthropic_tool
         ? {
-            tools: [
-              {
-                name: opts.anthropic_tool.name,
-                description: opts.anthropic_tool.description,
-                input_schema: opts.anthropic_tool.input_schema,
-              },
-            ],
+            tools: [anthropicToolPayload(opts.anthropic_tool)],
             tool_choice: {
               type: "tool",
               name: opts.anthropic_tool.name,
@@ -392,6 +526,7 @@ async function generateAnthropic(
     cache_hit: cacheReadTokens > 0,
     mocked: false,
     stop_reason: body.stop_reason,
+    ...(opts.anthropic_tool ? { strict: opts.anthropic_tool.strict === true } : {}),
   };
 }
 
@@ -498,13 +633,7 @@ async function generateAnthropicToolStream(
       max_tokens: anthropicMaxTokensForPrompt(opts.prompt_template_id),
       stream: true,
       messages: [{ role: "user", content }],
-      tools: [
-        {
-          name: opts.anthropic_tool.name,
-          description: opts.anthropic_tool.description,
-          input_schema: opts.anthropic_tool.input_schema,
-        },
-      ],
+      tools: [anthropicToolPayload(opts.anthropic_tool)],
       tool_choice: {
         type: "tool",
         name: opts.anthropic_tool.name,
@@ -565,6 +694,7 @@ async function generateAnthropicToolStream(
     streaming: true,
     stream_cutoff: plannedUtteranceEmitted ? "first_question" : "message_stop",
     stop_reason: stopReason,
+    strict: opts.anthropic_tool.strict === true,
   };
 }
 

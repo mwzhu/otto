@@ -58,6 +58,15 @@ export function anthropicModelForPrompt(
   if (promptTemplateId.startsWith("director.voice.")) {
     return env.DIRECTOR_VOICE_MODEL ?? FAST_VOICE_MODEL;
   }
+  if (
+    promptTemplateId.startsWith("director.checker.") ||
+    promptTemplateId.startsWith("operator.checker.")
+  ) {
+    // Post-hoc spoken-output checkers. Deliberately outside the `*.voice.`
+    // namespace: the voice prefixes carry a 200-token speech budget that
+    // cannot fit a checker verdict (see anthropicMaxTokensForPrompt).
+    return FAST_VOICE_MODEL;
+  }
   if (promptTemplateId.startsWith("operator.turn.plan")) {
     return env.OPERATOR_BRAIN_MODEL ?? env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6";
   }
@@ -94,8 +103,10 @@ export function anthropicMaxTokensForPrompt(promptTemplateId: string) {
   if (promptTemplateId.startsWith("director.turn.plan")) return 8000;
   if (promptTemplateId.startsWith("director.turn.extract")) return 8000;
   if (promptTemplateId.startsWith("director.voice.")) return 200;
-  if (promptTemplateId.startsWith("operator.turn.plan")) return 700;
+  if (promptTemplateId.startsWith("director.checker.")) return 1500;
+  if (promptTemplateId.startsWith("operator.turn.plan")) return 2000;
   if (promptTemplateId.startsWith("operator.voice.")) return 200;
+  if (promptTemplateId.startsWith("operator.checker.")) return 1500;
   if (isOperatorWorkflowPrompt(promptTemplateId)) return 16000;
   if (promptTemplateId.startsWith("synthesis.opportunities")) return 4000;
   if (promptTemplateId.startsWith("synthesis.director_automation")) return 6000;

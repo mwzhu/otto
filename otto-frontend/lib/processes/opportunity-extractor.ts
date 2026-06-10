@@ -52,6 +52,7 @@ export async function extractAutomationOpportunities(input: {
       description:
         "Emit evidence-grounded automation opportunity proposals without any dollar values or ROI scores.",
       input_schema: automationOpportunityAnthropicToolSchema,
+      strict: true,
     },
     mock: input.mock,
   });

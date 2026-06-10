@@ -152,7 +152,7 @@ cost, and latency, so cost and speed are observable per call.
 ### Guardrails
 
 The claim allowlist and `.strict()` structured-output schemas bound what a model can write. Both
-interview agents run a non-blocking output checker on the spoken turn (`*.voice.output-checker`),
+interview agents run a non-blocking output checker on the spoken turn (`*.checker.output`),
 off the critical path. PII redaction (`lib/redactions/`) gates screen and recording evidence before
 it ever reaches a model.
 

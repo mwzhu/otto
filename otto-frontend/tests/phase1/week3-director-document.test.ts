@@ -1050,6 +1050,7 @@ describe("Week 3 director brain and document pipeline", () => {
         expected_shape: string;
         base_priority: number;
         phrasings: string[];
+        directive: string;
       }>;
     };
     const expected = yamlDocument.probes.map((probe) => ({
@@ -1057,6 +1058,8 @@ describe("Week 3 director brain and document pipeline", () => {
       targetSlot: probe.target_slots[0],
       intent: probe.intent,
       phrasing: probe.phrasings[0],
+      phrasings: probe.phrasings,
+      directive: probe.directive,
       score: probe.base_priority,
       reason: probe.expected_shape,
       cooldownSeconds: probe.cooldown_seconds,

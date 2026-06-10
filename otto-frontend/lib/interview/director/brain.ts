@@ -1,7 +1,7 @@
 import "server-only";
 
 import { createHash } from "node:crypto";
-import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 import { getDb, setOrgContext } from "@/lib/db/client";
 import {
@@ -23,7 +23,9 @@ import {
 } from "@/lib/interview/director/slot-schema";
 import {
   probeConfigForIntent,
+  probeDirectiveForIntent,
   probeLibrary,
+  probePhrasingsForIntent,
 } from "@/lib/interview/director/probe-library";
 import {
   deterministicPhrase,
@@ -207,6 +209,37 @@ const looseSlotExtractionSchema = z.object({
 
 type LooseSlotExtraction = z.infer<typeof looseSlotExtractionSchema>;
 
+export type DirectorSteeringContext = {
+  /** Imperative instruction for the chosen intent (kept equal to `directive`). */
+  next_objective: string;
+  /** Imperative instruction telling the phraser exactly what to ask next. */
+  directive: string;
+  /** Canonical probe phrasings from probes/director.yaml for the chosen intent. */
+  anchor_phrasings: string[];
+  /**
+   * True when the same intent has been chosen on >=2 consecutive turns without
+   * its target slot filling, or the prior turn's output-checker verdict flagged
+   * ignored steering / a stale question. The phraser must speak an anchor
+   * phrasing verbatim (after a brief acknowledgment).
+   */
+  verbatim_required: boolean;
+  /** Consecutive turns (including this one) that chose the current intent. */
+  consecutive_intent_count: number;
+  target_slots: string[];
+  do_not_ask: string[];
+  forbidden_claims: string[];
+  required_style: string;
+  pending_extraction_turns: number[];
+  pending_slot_paths: string[];
+  pending_transcript_windows: number[];
+  pending_steering_targets: string[];
+  /** Slots whose probe was asked and substantively answered while extraction is uncommitted. */
+  provisionally_answered_slots: string[];
+  last_spoken_intent?: string;
+  last_spoken_objective?: string;
+  focus_candidate_process_id?: string;
+};
+
 export type DirectorSteeringPlanResult = {
   plan: DirectorTurnPlan;
   current_slots: Map<string, { status: string; confidence: string | number | null }>;
@@ -215,20 +248,7 @@ export type DirectorSteeringPlanResult = {
   focus_process_name?: string;
   metadata: DirectorModelMetadata;
   started_at: Date;
-  steering_context: {
-    next_objective: string;
-    target_slots: string[];
-    do_not_ask: string[];
-    forbidden_claims: string[];
-    required_style: string;
-    pending_extraction_turns: number[];
-    pending_slot_paths: string[];
-    pending_transcript_windows: number[];
-    pending_steering_targets: string[];
-    last_spoken_intent?: string;
-    last_spoken_objective?: string;
-    focus_candidate_process_id?: string;
-  };
+  steering_context: DirectorSteeringContext;
 };
 
 export type DirectorOutputCheckViolation = {
@@ -316,14 +336,45 @@ export async function buildDirectorSteeringPlan(
   const statePromise = readInterviewState(context);
   const recentTurnsPromise = readRecentTurns(context);
   const candidateSummariesPromise = readCandidateSummaries(context);
+  const probeFiringRowsPromise = readRecentProbeFiringRows(context);
+  const priorTurnDeliveryPromise = readPriorDirectorTurnDelivery(context, input.turnIndex);
+  const pendingWindowsPromise = readPendingDirectorExtractionWindows(context);
   const state = await statePromise;
-  const [currentSlots, recentTurns, candidateSummaries] = await Promise.all([
+  const [
+    currentSlots,
+    recentTurns,
+    candidateSummaries,
+    probeFiringRows,
+    priorTurnDelivery,
+    pendingWindows,
+  ] = await Promise.all([
     readCurrentSlots(context, {
       candidateProcessId: state.focusCandidateProcessId,
     }),
     recentTurnsPromise,
     candidateSummariesPromise,
+    probeFiringRowsPromise,
+    priorTurnDeliveryPromise,
+    pendingWindowsPromise,
   ]);
+  // The LiveKit worker threads pending_extraction_turns / pending_slot_paths,
+  // but its bookkeeping is in-memory; union with the server-side pending
+  // extraction windows so the guard survives worker restarts.
+  const pendingExtractionTurns = uniqueNumbers([
+    ...(input.pendingExtractionTurns ?? []),
+    ...pendingWindows.turnIndexes,
+  ]);
+  const pendingSlotPaths = uniqueStrings([
+    ...(input.pendingSlotPaths ?? []),
+    ...pendingWindows.slotPaths,
+  ]);
+  const probeFiringSummaries = probeFiringSummariesFromRows(probeFiringRows);
+  const provisionallyAnsweredSlots = provisionallyAnsweredSlotPaths({
+    latestUtterance: input.latestUtterance,
+    pendingExtractionTurns,
+    pendingSlotPaths,
+    recentFirings: probeFiringRows,
+  });
   const plan = deterministicTurnPlan({
     latestUtterance: input.latestUtterance,
     evidenceIds: input.evidenceIds,
@@ -334,6 +385,8 @@ export async function buildDirectorSteeringPlan(
     lowInfoTurnCount: state.lowInfoTurnCount,
     lastNewSlotTurnIndex: state.lastNewSlotTurnIndex,
     turnIndex: input.turnIndex,
+    probeFiringSummaries,
+    provisionallyAnsweredSlots,
   });
   const rankedIntents = plan.ranked_intents.length
     ? plan.ranked_intents
@@ -347,10 +400,6 @@ export async function buildDirectorSteeringPlan(
   const filledSlots = Array.from(currentSlots.entries())
     .filter(([, slot]) => ["filled", "asked_unknown"].includes(slot.status))
     .map(([slotPath]) => slotPath);
-  const targetSlots = [
-    chosenIntent.target_slot,
-    ...rankedIntents.slice(0, 3).map((intent) => intent.target_slot),
-  ].filter((slotPath): slotPath is string => Boolean(slotPath));
   const focusProcessName =
     chosenIntent.target_process ?? candidateSummaries[0]?.proposedName;
   const metadata = fallbackMetadata("director.turn.steering", started);
@@ -366,28 +415,290 @@ export async function buildDirectorSteeringPlan(
       source: "deterministic_steering",
     },
     started_at: started,
-    steering_context: {
-      next_objective: chosenIntent.reason,
-      target_slots: targetSlots,
-      do_not_ask: uniqueStrings([
-        ...filledSlots,
-        ...(input.pendingSlotPaths ?? []),
-      ]),
-      forbidden_claims: [
-        "Do not invent systems, owners, frequencies, risks, metrics, or process names.",
-        "Do not claim Operations Notes are complete until extraction confirms them.",
-      ],
-      required_style:
-        "Acknowledge briefly, ask one concrete follow-up, and keep the response under 45 words.",
-      pending_extraction_turns: input.pendingExtractionTurns ?? [],
-      pending_slot_paths: input.pendingSlotPaths ?? [],
-      pending_transcript_windows: input.pendingExtractionTurns ?? [],
-      pending_steering_targets: input.pendingSlotPaths ?? [],
-      last_spoken_intent: input.lastSpokenIntent,
-      last_spoken_objective: input.lastSpokenIntent,
-      focus_candidate_process_id: state.focusCandidateProcessId,
-    },
+    steering_context: buildDirectorSteeringContext({
+      chosenIntent,
+      rankedIntents,
+      filledSlotPaths: filledSlots,
+      currentSlots,
+      recentTurns,
+      pendingExtractionTurns,
+      pendingSlotPaths,
+      provisionallyAnsweredSlots,
+      priorConsecutiveIntentFirings: consecutivePriorIntentFirings(
+        probeFiringRows,
+        chosenIntent.intent,
+      ),
+      checkerSignal: checkerVerdictSignalFromDeliveryJson(priorTurnDelivery?.deliveryJson),
+      lastSpokenIntent: input.lastSpokenIntent,
+      focusCandidateProcessId: state.focusCandidateProcessId,
+      focusProcessName,
+    }),
   };
+}
+
+/**
+ * Assembles the steering context handed to the voice phraser and the output
+ * checker. Pure so steering behavior is unit-testable without a database.
+ */
+export function buildDirectorSteeringContext(input: {
+  chosenIntent: DirectorIntent;
+  rankedIntents: DirectorIntent[];
+  filledSlotPaths: string[];
+  currentSlots: Map<string, { status: string; confidence: string | number | null }>;
+  recentTurns: string[];
+  pendingExtractionTurns: number[];
+  pendingSlotPaths: string[];
+  provisionallyAnsweredSlots: string[];
+  priorConsecutiveIntentFirings: number;
+  checkerSignal?: DirectorCheckerVerdictSignal;
+  lastSpokenIntent?: string;
+  focusCandidateProcessId?: string;
+  focusProcessName?: string;
+}): DirectorSteeringContext {
+  const chosenIntent = input.chosenIntent;
+  const directive = directorIntentDirective(chosenIntent, input.focusProcessName);
+  const anchorPhrasings = probePhrasingsForIntent(
+    chosenIntent.intent,
+    chosenIntent.target_slot,
+  );
+  const targetSlots = [
+    chosenIntent.target_slot,
+    ...input.rankedIntents.slice(0, 3).map((intent) => intent.target_slot),
+  ].filter((slotPath): slotPath is string => Boolean(slotPath));
+  const consecutiveIntentCount = input.priorConsecutiveIntentFirings + 1;
+  const targetSlotStatus = chosenIntent.target_slot
+    ? input.currentSlots.get(chosenIntent.target_slot)?.status ?? "empty"
+    : undefined;
+  const targetSlotUnfilled =
+    targetSlotStatus !== undefined &&
+    ["empty", "partial", "conflicting", "pending_re_extract"].includes(targetSlotStatus);
+  const checkerSignal = input.checkerSignal;
+  const verbatimRequired =
+    anchorPhrasings.length > 0 &&
+    ((consecutiveIntentCount >= 2 && targetSlotUnfilled) ||
+      Boolean(checkerSignal?.ignoredSteering) ||
+      Boolean(checkerSignal?.staleQuestion));
+  // Verbatim utterances Otto already spoke; the phraser must not re-ask
+  // paraphrases of these.
+  const recentAgentQuestions = input.recentTurns
+    .filter((turn) => turn.startsWith("Otto: "))
+    .slice(-3)
+    .map((turn) => turn.slice("Otto: ".length).trim())
+    .filter(Boolean);
+  return {
+    next_objective: directive,
+    directive,
+    anchor_phrasings: anchorPhrasings,
+    verbatim_required: verbatimRequired,
+    consecutive_intent_count: consecutiveIntentCount,
+    target_slots: targetSlots,
+    do_not_ask: uniqueStrings([
+      ...input.filledSlotPaths,
+      ...input.pendingSlotPaths,
+      ...input.provisionallyAnsweredSlots,
+      ...recentAgentQuestions,
+      ...(checkerSignal?.offendingUtterance ? [checkerSignal.offendingUtterance] : []),
+    ]),
+    forbidden_claims: [
+      "Do not invent systems, owners, frequencies, risks, metrics, or process names.",
+      "Do not claim Operations Notes are complete until extraction confirms them.",
+    ],
+    required_style:
+      "Acknowledge briefly, ask one concrete follow-up, and keep the response under 45 words.",
+    pending_extraction_turns: input.pendingExtractionTurns,
+    pending_slot_paths: input.pendingSlotPaths,
+    pending_transcript_windows: input.pendingExtractionTurns,
+    pending_steering_targets: input.pendingSlotPaths,
+    provisionally_answered_slots: input.provisionallyAnsweredSlots,
+    last_spoken_intent: input.lastSpokenIntent,
+    last_spoken_objective: input.lastSpokenIntent,
+    focus_candidate_process_id: input.focusCandidateProcessId,
+  };
+}
+
+/**
+ * Imperative instructions for intents that are not probe-library probes.
+ * Probe intents resolve through probes/director.yaml (`directive` /
+ * curated/derived fallbacks in probe-library.ts).
+ */
+const nonProbeIntentDirectives: Record<string, string> = {
+  orient_interview:
+    "Orient the director: explain in one sentence that you are mapping how their function operates, then ask what part of the business they oversee.",
+  select_process_to_expand:
+    "Ask the director which of their named processes to zoom into first — the most important or most painful one. Do not start drilling into steps.",
+  clarify_previous_question:
+    "Briefly answer the director's clarification, then re-ask the active question in plainer words.",
+  reconcile_conflict:
+    "Point out that what the director just said differs from what was captured earlier, and ask which version to trust.",
+  capture_correction:
+    "Acknowledge the correction and ask what the corrected fact should be.",
+  playback_summary:
+    "Play back a short summary of the processes captured so far and ask the director what is missing or wrong.",
+  open_questions_closeout:
+    "Tell the director a few gaps remain and ask to cover the most important one before wrapping up.",
+};
+
+/** Imperative instruction for the chosen intent (replaces the old status-string objective). */
+export function directorIntentDirective(
+  chosenIntent: DirectorIntent,
+  focusProcessName?: string,
+): string {
+  const base =
+    nonProbeIntentDirectives[chosenIntent.intent] ??
+    probeDirectiveForIntent(chosenIntent.intent, chosenIntent.target_slot) ??
+    `Ask the director one question that advances the "${chosenIntent.intent}" objective` +
+      (chosenIntent.target_slot
+        ? ` and fills the "${chosenIntent.target_slot}" slot.`
+        : ".") +
+      " Stay at the process level; do not ask for step-by-step detail.";
+  const target = chosenIntent.target_process ?? focusProcessName;
+  if (target && base.includes("focus process")) {
+    return `${base} The focus process is "${target}".`;
+  }
+  return base;
+}
+
+export type DirectorCheckerVerdictSignal = {
+  ignoredSteering: boolean;
+  staleQuestion: boolean;
+  offendingUtterance?: string;
+};
+
+/**
+ * Task 4b feedback loop: interpret the prior turn's async output-checker
+ * verdict (recorded into agent_decision_log.delivery_json by
+ * recordDirectorOutputCheck) so an "ignored steering" / "stale question"
+ * verdict on turn N escalates turn N+1 to verbatim-probe mode.
+ */
+export function checkerVerdictSignalFromDeliveryJson(
+  deliveryJson: unknown,
+): DirectorCheckerVerdictSignal {
+  if (!deliveryJson || typeof deliveryJson !== "object") {
+    return { ignoredSteering: false, staleQuestion: false };
+  }
+  const record = deliveryJson as Record<string, unknown>;
+  const violationTypes = new Set(
+    (Array.isArray(record.checker_violations) ? record.checker_violations : [])
+      .map((violation) =>
+        violation && typeof violation === "object"
+          ? (violation as Record<string, unknown>).type
+          : undefined,
+      )
+      .filter((type): type is string => typeof type === "string"),
+  );
+  const staleQuestionCount =
+    typeof record.stale_question_count === "number" ? record.stale_question_count : 0;
+  const ignoredSteering =
+    violationTypes.has("ignored_next_objective") ||
+    violationTypes.has("contradicted_steering");
+  const staleQuestion =
+    staleQuestionCount > 0 || violationTypes.has("asked_do_not_ask");
+  const offendingUtterance = [
+    record.spoken_agent_utterance,
+    record.delivered_utterance,
+    record.planned_utterance,
+  ].find(
+    (value): value is string => typeof value === "string" && value.trim().length > 0,
+  );
+  return {
+    ignoredSteering,
+    staleQuestion,
+    offendingUtterance:
+      ignoredSteering || staleQuestion ? offendingUtterance : undefined,
+  };
+}
+
+export type DirectorProbeFiringRow = {
+  probeId: string;
+  targetSlot: string | null;
+  turnIndex: number | null;
+  firedAt: Date;
+};
+
+export function probeFiringSummariesFromRows(
+  rows: DirectorProbeFiringRow[],
+): Map<string, ProbeFiringSummary> {
+  const summaries = new Map<string, ProbeFiringSummary>();
+  for (const row of rows) {
+    bumpProbeSummary(summaries, `intent:${row.probeId}`, row.firedAt);
+    if (row.targetSlot) {
+      bumpProbeSummary(summaries, `slot:${row.targetSlot}`, row.firedAt);
+    }
+  }
+  return summaries;
+}
+
+/**
+ * How many of the most recent consecutive spoken turns fired the given intent
+ * (probe_firings.probe_id records the chosen intent per spoken turn).
+ */
+export function consecutivePriorIntentFirings(
+  rows: DirectorProbeFiringRow[],
+  intentName: string,
+): number {
+  const ordered = orderProbeFiringsByRecency(rows);
+  let count = 0;
+  let lastTurnIndex: number | null | undefined;
+  for (const row of ordered) {
+    if (lastTurnIndex !== undefined && row.turnIndex === lastTurnIndex) continue;
+    lastTurnIndex = row.turnIndex;
+    if (row.probeId !== intentName) break;
+    count += 1;
+  }
+  return count;
+}
+
+/**
+ * Task 2 provisional-answer guard: a probe asked at turn N whose reply was
+ * substantive is treated as provisionally answered while the extraction for
+ * that exchange is uncommitted. If extraction later leaves the slot empty,
+ * the pending sets clear and the probe becomes eligible again.
+ */
+export function provisionallyAnsweredSlotPaths(input: {
+  latestUtterance: string;
+  pendingExtractionTurns: number[];
+  pendingSlotPaths: string[];
+  recentFirings: DirectorProbeFiringRow[];
+}): string[] {
+  const pendingTurns = new Set(input.pendingExtractionTurns);
+  const provisional = new Set(input.pendingSlotPaths);
+  const ordered = orderProbeFiringsByRecency(input.recentFirings);
+  for (const firing of ordered) {
+    if (!firing.targetSlot || firing.turnIndex === null) continue;
+    // The reply to the probe spoken at turn N arrives as turn N+1's utterance;
+    // either turn pending means the exchange has not committed yet.
+    if (pendingTurns.has(firing.turnIndex) || pendingTurns.has(firing.turnIndex + 1)) {
+      provisional.add(firing.targetSlot);
+    }
+  }
+  const latestFiring = ordered[0];
+  if (latestFiring?.targetSlot) {
+    const utteranceType = classifyUtterance(input.latestUtterance);
+    const substantiveReply =
+      utteranceType === "substantive_answer" || utteranceType === "partial_answer";
+    if (substantiveReply) {
+      // The utterance being answered right now responds to the most recent
+      // probe; its extraction has not even started yet.
+      provisional.add(latestFiring.targetSlot);
+    } else {
+      // A don't-know / non-answer does not provisionally answer the probe;
+      // keep it eligible so the planner can pivot or re-approach.
+      provisional.delete(latestFiring.targetSlot);
+    }
+  }
+  return [...provisional];
+}
+
+function orderProbeFiringsByRecency(rows: DirectorProbeFiringRow[]) {
+  return [...rows].sort((a, b) => {
+    const turnDelta = (b.turnIndex ?? -1) - (a.turnIndex ?? -1);
+    if (turnDelta !== 0) return turnDelta;
+    return b.firedAt.getTime() - a.firedAt.getTime();
+  });
+}
+
+function uniqueNumbers(values: number[]) {
+  return [...new Set(values)];
 }
 
 export function nonAuthoritativeDirectorSteeringPlan(
@@ -407,18 +718,24 @@ export async function phraseDirectorSteeringTurn(
     onTextDelta?: (delta: string, textSoFar: string) => void | Promise<void>;
   } = {},
 ) {
+  // TODO(operator): mirror the directive/anchor/verbatim steering sections in
+  // lib/interview/operator/brain.ts once the director version is verified.
   return phraseDirectorTurnDetailed({
     plan: {
       ...input.plan,
       planned_agent_utterance: undefined,
     },
-    recentTurns: [
-      ...input.recent_turns,
-      `Steering: ${JSON.stringify(input.steering_context)}`,
-    ],
+    recentTurns: input.recent_turns,
     coverageSummary: input.coverage_summary,
     focusProcessName: input.focus_process_name,
     forceSeparateVoiceLlm: true,
+    steering: {
+      directive: input.steering_context.directive,
+      anchorPhrasings: input.steering_context.anchor_phrasings,
+      doNotAsk: input.steering_context.do_not_ask,
+      verbatimRequired: input.steering_context.verbatim_required,
+      requiredStyle: input.steering_context.required_style,
+    },
     onTextDelta: options.onTextDelta,
   });
 }
@@ -1843,9 +2160,14 @@ function heuristicDirectorOutputCheck(input: {
     });
   }
   const doNotAsk = arrayOfStrings(input.steeringContext.do_not_ask);
-  const staleQuestions = doNotAsk.filter((slotPath) =>
-    slotPathQuestionTerms(slotPath).some((term) => lower.includes(term)),
-  );
+  // do_not_ask mixes slot paths with verbatim prior utterances; only slot
+  // paths go through term matching (single common words from an utterance
+  // would false-positive on nearly every question).
+  const staleQuestions = doNotAsk
+    .filter(isSlotPathLike)
+    .filter((slotPath) =>
+      slotPathQuestionTerms(slotPath).some((term) => lower.includes(term)),
+    );
   for (const slotPath of staleQuestions.slice(0, 3)) {
     violations.push({
       type: "asked_do_not_ask",
@@ -1853,12 +2175,31 @@ function heuristicDirectorOutputCheck(input: {
       message: `The spoken response may have re-asked covered or pending slot ${slotPath}.`,
     });
   }
+  const repeatedUtterances = doNotAsk
+    .filter((entry) => !isSlotPathLike(entry))
+    .filter((entry) => normalizedUtteranceKey(entry) === normalizedUtteranceKey(utterance))
+    .slice(0, 1);
+  for (const repeated of repeatedUtterances) {
+    violations.push({
+      type: "asked_do_not_ask",
+      severity: "medium",
+      message: `The spoken response repeated a prior question verbatim: ${repeated}`,
+    });
+  }
   return {
     checker_status: "complete" as const,
     violations,
     checker_violation_count: violations.length,
-    stale_question_count: staleQuestions.length,
+    stale_question_count: staleQuestions.length + repeatedUtterances.length,
   };
+}
+
+function isSlotPathLike(value: string) {
+  return /^[a-z0-9_]+(\.[a-z0-9_]+)+$/i.test(value.trim());
+}
+
+function normalizedUtteranceKey(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
 function normalizeDirectorOutputCheck(
@@ -4025,13 +4366,54 @@ function applyProbeControls(
     .sort((a, b) => b.score - a.score);
 }
 
-async function readProbeFiringSummaries(context: DirectorToolContext) {
-  const rows = await getDb().transaction(async (tx) => {
+/**
+ * Task 2: hard exclusion pass for the deterministic intent chooser.
+ * Enforces cooldown_seconds/max_fires from probes/director.yaml against
+ * probe_firings, and skips probes whose target slot is provisionally answered
+ * (asked + substantively answered while extraction is uncommitted). Falls back
+ * to a non-repeating bridge intent when every candidate is excluded.
+ */
+export function applySteeringIntentExclusions(
+  rankedIntents: DirectorIntent[],
+  input: {
+    probeFiringSummaries?: Map<string, ProbeFiringSummary>;
+    provisionallyAnsweredSlots?: string[];
+    proposedNextPhase: DirectorInterviewPhase;
+    candidateProcessNames: string[];
+  },
+): DirectorIntent[] {
+  const provisional = new Set(input.provisionallyAnsweredSlots ?? []);
+  let eligible = input.probeFiringSummaries
+    ? applyProbeControls(rankedIntents, input.probeFiringSummaries)
+    : rankedIntents;
+  if (provisional.size > 0) {
+    eligible = eligible.filter(
+      (candidate) =>
+        isControllerExemptIntent(candidate) ||
+        !candidate.target_slot ||
+        !provisional.has(candidate.target_slot),
+    );
+  }
+  if (eligible.length > 0 || rankedIntents.length === 0) return eligible;
+  return [
+    cooldownBridgeIntent(
+      input.proposedNextPhase,
+      rankedIntents[0],
+      input.candidateProcessNames.map((proposedName) => ({ id: "", proposedName })),
+    ),
+  ];
+}
+
+async function readRecentProbeFiringRows(
+  context: DirectorToolContext,
+): Promise<DirectorProbeFiringRow[]> {
+  return getDb().transaction(async (tx) => {
     await setOrgContext(tx, context.orgId);
     return tx
       .select({
         probeId: probeFirings.probeId,
         targetSlot: probeFirings.targetSlot,
+        turnIndex: probeFirings.turnIndex,
         firedAt: probeFirings.firedAt,
       })
       .from(probeFirings)
@@ -4045,14 +4427,81 @@ async function readProbeFiringSummaries(context: DirectorToolContext) {
       .orderBy(desc(probeFirings.firedAt))
       .limit(200);
   });
-  const summaries = new Map<string, ProbeFiringSummary>();
+}
+
+async function readProbeFiringSummaries(context: DirectorToolContext) {
+  return probeFiringSummariesFromRows(await readRecentProbeFiringRows(context));
+}
+
+async function readPriorDirectorTurnDelivery(
+  context: DirectorToolContext,
+  turnIndex: number,
+): Promise<{ turnIndex: number | null; deliveryJson: unknown } | undefined> {
+  if (turnIndex <= 0) return undefined;
+  const rows = await getDb().transaction(async (tx) => {
+    await setOrgContext(tx, context.orgId);
+    return tx
+      .select({
+        turnIndex: agentDecisionLog.turnIndex,
+        deliveryJson: agentDecisionLog.deliveryJson,
+      })
+      .from(agentDecisionLog)
+      .where(
+        and(
+          eq(agentDecisionLog.captureSessionId, context.captureSessionId),
+          eq(agentDecisionLog.stageName, "director.turn"),
+          lt(agentDecisionLog.turnIndex, turnIndex),
+        ),
+      )
+      .orderBy(desc(agentDecisionLog.turnIndex))
+      .limit(1);
+  });
+  return rows[0];
+}
+
+/**
+ * Server-side recovery of in-flight extraction state: every spoken turn
+ * upserts a director_extraction_windows row with status "pending" until its
+ * extraction commits, with the steering target slots in metadata_json.
+ */
+async function readPendingDirectorExtractionWindows(
+  context: DirectorToolContext,
+): Promise<{ turnIndexes: number[]; slotPaths: string[] }> {
+  const rows = await getDb().transaction(async (tx) => {
+    await setOrgContext(tx, context.orgId);
+    return tx
+      .select({
+        turnIndex: directorExtractionWindows.turnIndex,
+        metadataJson: directorExtractionWindows.metadataJson,
+      })
+      .from(directorExtractionWindows)
+      .where(
+        and(
+          eq(directorExtractionWindows.captureSessionId, context.captureSessionId),
+          eq(directorExtractionWindows.status, "pending"),
+        ),
+      )
+      .orderBy(desc(directorExtractionWindows.openedAt))
+      .limit(20);
+  });
+  const turnIndexes = new Set<number>();
+  const slotPaths = new Set<string>();
   for (const row of rows) {
-    bumpProbeSummary(summaries, `intent:${row.probeId}`, row.firedAt);
-    if (row.targetSlot) {
-      bumpProbeSummary(summaries, `slot:${row.targetSlot}`, row.firedAt);
+    if (typeof row.turnIndex === "number") turnIndexes.add(row.turnIndex);
+    const metadata =
+      row.metadataJson && typeof row.metadataJson === "object"
+        ? (row.metadataJson as Record<string, unknown>)
+        : undefined;
+    const steering =
+      metadata?.steering_context && typeof metadata.steering_context === "object"
+        ? (metadata.steering_context as Record<string, unknown>)
+        : undefined;
+    const targets = Array.isArray(steering?.target_slots) ? steering.target_slots : [];
+    for (const target of targets) {
+      if (typeof target === "string" && target.trim()) slotPaths.add(target);
     }
   }
-  return summaries;
+  return { turnIndexes: [...turnIndexes], slotPaths: [...slotPaths] };
 }
 
 function bumpProbeSummary(
@@ -4333,6 +4782,10 @@ export function deterministicTurnPlan(input: {
   lowInfoTurnCount?: number;
   lastNewSlotTurnIndex?: number | null;
   turnIndex?: number;
+  /** Hard cooldown/max_fires enforcement from probe_firings (Task 2). */
+  probeFiringSummaries?: Map<string, ProbeFiringSummary>;
+  /** Slots whose probe was asked and answered while extraction is uncommitted (Task 2). */
+  provisionallyAnsweredSlots?: string[];
 }): DirectorTurnPlan {
   const slotUpdates: Array<{
     slot_path: string;
@@ -4604,19 +5057,27 @@ export function deterministicTurnPlan(input: {
     candidateProcessNames: input.candidateProcessNames,
     slotUpdates,
   });
-  const rankedIntents = deterministicIntents({
-    utteranceType,
-    currentPhase,
-    proposedNextPhase,
-    currentSlots: input.currentSlots,
-    processNames,
-    candidateProcessNames: input.candidateProcessNames,
-    focusProcess,
-    functionName,
-    unknownSlot,
-    conflictingSlot,
-    lowInfoTurnCount: input.lowInfoTurnCount ?? 0,
-  });
+  const rankedIntents = applySteeringIntentExclusions(
+    deterministicIntents({
+      utteranceType,
+      currentPhase,
+      proposedNextPhase,
+      currentSlots: input.currentSlots,
+      processNames,
+      candidateProcessNames: input.candidateProcessNames,
+      focusProcess,
+      functionName,
+      unknownSlot,
+      conflictingSlot,
+      lowInfoTurnCount: input.lowInfoTurnCount ?? 0,
+    }),
+    {
+      probeFiringSummaries: input.probeFiringSummaries,
+      provisionallyAnsweredSlots: input.provisionallyAnsweredSlots,
+      proposedNextPhase,
+      candidateProcessNames: input.candidateProcessNames,
+    },
+  );
   const forceCloseout = shouldForceDirectorCloseout({
     utteranceType,
     lowInfoTurnCount: input.lowInfoTurnCount ?? 0,

@@ -2265,12 +2265,66 @@ function formatTime(seconds: number) {
   return `${minutes}:${secs}`;
 }
 
-function summarizeSlotValue(value: unknown) {
+// Slot values are arbitrarily nested objects/arrays (e.g. pain_points is
+// {items:[{description,affected_role},...]}). A flat String() on nested entries
+// renders "[object Object]", so recurse and pull a human-readable headline from
+// each object instead.
+const SLOT_HEADLINE_KEYS = [
+  "description",
+  "detail",
+  "note",
+  "notes",
+  "summary",
+  "reason",
+  "signal",
+  "name",
+  "person",
+  "title",
+  "label",
+  "text",
+  "span",
+  "maturity",
+];
+const SLOT_QUALIFIER_KEYS = [
+  "role",
+  "affected_role",
+  "process",
+  "system",
+  "owner",
+  "top_process",
+];
+
+function summarizeSlotValue(value: unknown, depth = 0): string {
+  if (value === null || value === undefined) return "";
   if (typeof value === "string") return value;
-  if (Array.isArray(value)) return value.map(String).join(", ");
-  if (value && typeof value === "object") {
-    return Object.entries(value)
-      .map(([key, entry]) => `${key.replaceAll("_", " ")}: ${String(entry)}`)
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => summarizeSlotValue(entry, depth + 1))
+      .filter(Boolean)
+      .join("; ");
+  }
+  if (typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    // For nested items, render a readable "headline (qualifier)" rather than a
+    // key:value dump.
+    if (depth > 0) {
+      const headlineKey = SLOT_HEADLINE_KEYS.find(
+        (key) => typeof obj[key] === "string" && obj[key],
+      );
+      if (headlineKey) {
+        const qualifier = SLOT_QUALIFIER_KEYS.map((key) => obj[key]).find(
+          (entry) => typeof entry === "string" && entry,
+        );
+        return qualifier
+          ? `${obj[headlineKey] as string} (${qualifier as string})`
+          : (obj[headlineKey] as string);
+      }
+    }
+    return Object.entries(obj)
+      .filter(([, entry]) => entry !== null && entry !== undefined && entry !== "")
+      .map(([key, entry]) => `${key.replaceAll("_", " ")}: ${summarizeSlotValue(entry, depth + 1)}`)
+      .filter((line) => !line.endsWith(": "))
       .join(" · ");
   }
   return String(value);

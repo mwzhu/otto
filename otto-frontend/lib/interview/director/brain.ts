@@ -60,7 +60,11 @@ import {
   allowedDirectorClaimSubjects,
   validateDirectorPlanClaim,
 } from "@/lib/interview/director/claim-allowlist";
-import { readSharedSchemaArtifact } from "@/lib/interview/director/schema-artifacts";
+import {
+  directorClaimZodSchema,
+  directorClaimsAnthropicSchema,
+  readSharedSchemaArtifact,
+} from "@/lib/interview/director/schema-artifacts";
 import {
   assertDirectorCaptureAcceptsTurns,
   lockDirectorTurnSequence,
@@ -156,6 +160,11 @@ export type DirectorTurnPlanResult = {
   started_at: Date;
 };
 
+// Client-side mirror of the extraction tool schema. No `.passthrough()` —
+// unknown keys are stripped so validation matches what the (strict) tool
+// schema allows. Claims reuse the discriminated union generated from
+// schemas/claim-subject-fields.json; `subject_id` stays permissive enough to
+// carry a plain entity name instead of a UUID (dispatch resolves names).
 const looseSlotExtractionSchema = z.object({
   slot_updates: z
     .array(
@@ -176,28 +185,16 @@ const looseSlotExtractionSchema = z.object({
         last_asked_at: z.string().optional(),
         priority: z.number().int().min(0),
         candidates: z.array(z.unknown()).optional(),
-      }).passthrough(),
+      }),
     )
     .default([]),
-  claims: z
-    .array(
-      z.object({
-        subject_type: z.string().min(1),
-        subject_id: z.string().min(1),
-        field: z.string().min(1),
-        value: z.unknown(),
-        confidence: z.number().min(0).max(1),
-        evidence_ids: z.array(z.string()).default([]),
-        metadata: z.record(z.string(), z.unknown()).optional(),
-      }).passthrough(),
-    )
-    .default([]),
+  claims: z.array(directorClaimZodSchema()).default([]),
   tool_calls: z
     .array(
       z.object({
         name: z.string().min(1),
         arguments: z.record(z.string(), z.unknown()),
-      }).passthrough(),
+      }),
     )
     .default([]),
   contradiction_signals: z.array(z.string()).default([]),
@@ -520,7 +517,8 @@ async function planDirectorTurnWithExtractionPlanner(
         name: "emit_director_slot_extraction",
         description:
           "Emit only evidence-backed director interview extraction fields: slot updates, claims, tool calls, and contradiction signals. Do not plan speech or rank next intents.",
-        input_schema: directorSlotExtractionAnthropicToolSchema(),
+        input_schema: directorSlotExtractionAnthropicToolSchema(state.currentPhase),
+        strict: true,
       },
       mock: deterministicSlotExtraction(deterministicPlan),
     });
@@ -1935,14 +1933,21 @@ export function directorTurnPlanAnthropicToolSchema() {
   ));
 }
 
-export function directorSlotExtractionAnthropicToolSchema() {
-  return constrainDirectorSlotExtractionToolSchema(withRequiredAnthropicFields(
+export function directorSlotExtractionAnthropicToolSchema(
+  phase?: DirectorInterviewPhase,
+) {
+  const schema = constrainDirectorSlotExtractionToolSchema(withRequiredAnthropicFields(
     inlineJsonSchemaRefs(readSharedSchemaArtifact("slot-extraction.schema.json"), {
       "slot-state.schema.json": readSharedSchemaArtifact("slot-state.schema.json"),
       "claim.schema.json": readSharedSchemaArtifact("claim.schema.json"),
     }) as Record<string, unknown>,
     ["slot_updates", "claims", "tool_calls", "contradiction_signals"],
   ));
+  // Replace the unconstrained claim.schema.json shape (string subject_type,
+  // free-form value) with the phase-aware discriminated union generated from
+  // schemas/claim-subject-fields.json.
+  objectProperty(schema, "properties").claims = directorClaimsAnthropicSchema(phase);
+  return schema;
 }
 
 function inlineJsonSchemaRefs(schema: unknown, refs: Record<string, unknown>): unknown {

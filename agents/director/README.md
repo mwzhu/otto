@@ -79,6 +79,64 @@ that the Python planner reads at runtime. Set the same required environment vari
 deployment target, and keep the server-side `LIVEKIT_AGENT_NAME` in sync with the worker so room
 dispatches land on this process.
 
+### Cloud hosting (LiveKit Cloud Agents)
+
+The director worker is hosted on **LiveKit Cloud Agents**, co-located with the
+`otto-gcbsujid` project so it auto-registers as `otto-director` on boot and auto-restarts. This is
+what answers the explicit agent dispatch from prod (`https://otto-pi-sandy.vercel.app`); without a
+registered worker the browser hangs on "Otto is about to start speaking".
+
+One-time CLI + project setup (non-interactive, uses the project API key/secret — no browser needed;
+`lk cloud auth` is the interactive alternative):
+
+```bash
+brew install livekit-cli
+lk project add otto \
+  --url https://otto-gcbsujid.livekit.cloud \
+  --api-key "$LIVEKIT_API_KEY" --api-secret "$LIVEKIT_API_SECRET" --default
+```
+
+Secrets live in the git-ignored `agents/director/.env.cloud` (`--secrets-file` input). It mirrors the
+worker's merged local env (root `.env.local` + `agents/director/.env`) **minus** `LIVEKIT_URL` /
+`LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` (auto-injected by LiveKit Cloud) and the database URLs (the
+worker does no direct DB writes).
+
+Build and deploy with the shared wrapper, which deploys from the **repository root** (the Dockerfile
+needs repo-root context) and stages `agents/director/Dockerfile` as the build's root Dockerfile.
+LiveKit's source build builds the image on its side; Bring Your Own Container (`lk agent --image`) is
+Enterprise-only and is not used here. The root `.dockerignore` keeps the upload lean:
+
+```bash
+# First deploy creates the agent and writes livekit.director.toml;
+# subsequent runs ship a new version.
+scripts/deploy-livekit-agent.sh director
+
+# Rotate secrets only (restarts the worker, no rebuild)
+lk agent update --project otto --config livekit.director.toml \
+  --secrets-file agents/director/.env.cloud
+```
+
+Under the hood the wrapper runs `lk agent {create,deploy} --project otto --config
+livekit.director.toml --secrets-file agents/director/.env.cloud --skip-sdk-check --yes .` from the
+repo root (`--skip-sdk-check` because repo-root detection sees the Node monorepo manifest). To smoke
+the image locally before shipping: `docker build -f agents/director/Dockerfile -t otto-director-agent .`.
+
+Operations and log access (the agent id is read from `livekit.director.toml`; pass `--id CA_…`
+explicitly from another checkout):
+
+```bash
+lk agent status   --project otto --config livekit.director.toml
+lk agent logs     --project otto --config livekit.director.toml   # live tail; shows "registered worker"
+lk agent versions --project otto --config livekit.director.toml
+lk agent rollback --project otto --config livekit.director.toml   # revert to previous version
+lk agent list     --project otto
+```
+
+The worker's `agent_name` (`LIVEKIT_AGENT_NAME=otto-director` in the secrets file) **must** match the
+server-side dispatch name in `otto-frontend` (`lib/adapters/livekit.ts`, env `LIVEKIT_AGENT_NAME`),
+or dispatched jobs never reach the worker. Roll back a bad deploy with `lk agent rollback`, or remove
+the deployment entirely with `lk agent delete --project otto --config livekit.director.toml`.
+
 Required environment:
 
 - `LIVEKIT_URL`

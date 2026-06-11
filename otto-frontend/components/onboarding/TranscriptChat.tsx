@@ -20,11 +20,9 @@ import {
   Square,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
-import { Pill } from "@/components/ui/Pill";
 import { AnimatedDots } from "@/components/common/AnimatedDots";
 import { BRAND } from "@/lib/brand";
 import { cn } from "@/lib/cn";
-import { computeCoverageSummary } from "@/lib/interview/director/coverage-meter";
 import { DIRECTOR_SESSION_KEY } from "@/app/onboarding/voice/VoicePreStartClient";
 
 type DirectorSession = {
@@ -205,7 +203,9 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
     () => null,
   );
   const [messages, setMessages] = useState<TranscriptMessage[]>([]);
-  const [coverage, setCoverage] = useState<CoverageSlot[]>([]);
+  // Coverage is still tracked server-side via the data channel; the in-progress
+  // notes panel was removed from the interview UI, so we only keep the setter.
+  const [, setCoverage] = useState<CoverageSlot[]>([]);
   const [draft, setDraft] = useState("");
   const [interim, setInterim] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -312,13 +312,6 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
     return () => window.clearInterval(timer);
   }, [listening, paused]);
 
-  // Weighted coverage (Task 13): partial slots carry real extracted data, so
-  // they earn fractional credit instead of reading as empty. See
-  // computeCoverageSummary for the weighting.
-  const { filledSlots, partialSlots, totalSlots, coveragePercent } = useMemo(
-    () => computeCoverageSummary(coverage),
-    [coverage],
-  );
   const displayMessages = useMemo(
     () =>
       listening
@@ -326,6 +319,14 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
         : messages.filter((message) => !isDirectorOpeningMessage(message)),
     [listening, messages],
   );
+  // Keep the newest message in view: the chat area scrolls internally now, so
+  // pin it to the bottom whenever a message arrives or the typing dots appear.
+  const messagesScrollRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = messagesScrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [displayMessages, submitting]);
+
   const waitingForFirstAgentMessage = Boolean(
     session && displayMessages.length === 0 && listening,
   );
@@ -768,8 +769,8 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
   }
 
   return (
-    <div className="mx-auto grid w-full max-w-[1040px] gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
-      <section className="flex min-h-[620px] flex-col rounded-lg border border-subtle bg-surface shadow-card">
+    <div className="mx-auto w-full max-w-[720px]">
+      <section className="flex h-[620px] flex-col rounded-lg border border-subtle bg-surface shadow-card">
         <header className="flex flex-wrap items-center justify-between gap-3 border-b border-subtle px-4 py-3">
           <div className="flex items-center gap-2">
             <span
@@ -877,7 +878,10 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
           </div>
         </header>
 
-        <div className="flex-1 space-y-4 overflow-y-auto px-4 py-5">
+        <div
+          ref={messagesScrollRef}
+          className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-5"
+        >
           {showStartInterviewPrompt ? (
             <div className="flex min-h-full flex-col items-center justify-center text-center">
               <div className="flex h-11 w-11 items-center justify-center rounded-full bg-solid text-canvas shadow-[0_12px_30px_rgba(24,24,27,0.18)]">
@@ -1013,56 +1017,6 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
           )}
         </footer>
       </section>
-
-      <aside className="rounded-lg border border-subtle bg-surface shadow-card">
-        <header className="border-b border-subtle px-4 py-3">
-          <p className="text-[12px] font-semibold text-ink">Operations Notes</p>
-          <p className="mt-1 text-[11.5px] text-ink-muted">
-            {filledSlots} filled
-            {partialSlots > 0 ? ` · ${partialSlots} partial` : ""} of{" "}
-            {totalSlots} slots · {coveragePercent}%
-          </p>
-          <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted">
-            <div
-              className="h-full rounded-full bg-solid transition-[width]"
-              style={{ width: `${coveragePercent}%` }}
-            />
-          </div>
-        </header>
-        <div className="max-h-[548px] overflow-y-auto p-3">
-          {coverage.length === 0 ? (
-            <div className="rounded-md border border-dashed border-subtle px-3 py-8 text-center text-[12.5px] leading-relaxed text-ink-secondary">
-              Notes will fill in as the interview captures process names,
-              owners, systems, frequency, pain points, and risk.
-            </div>
-          ) : (
-            <ul className="space-y-2">
-              {coverage.map((slot) => (
-                <li
-                  key={`${slot.candidate_process_id ?? "global"}:${slot.slot_path}`}
-                  className="rounded-md border border-subtle bg-canvas px-3 py-2.5"
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <p className="text-[12px] font-medium leading-snug text-ink">
-                      {slot.label}
-                    </p>
-                    <StatusPill status={slot.status} />
-                  </div>
-                  <p className="mt-1 text-[11.5px] text-ink-muted">
-                    {slot.evidence_count} evidence link
-                    {slot.evidence_count === 1 ? "" : "s"}
-                  </p>
-                  {slot.value ? (
-                    <p className="mt-2 line-clamp-2 text-[11.5px] leading-relaxed text-ink-secondary">
-                      {summarizeSlotValue(slot.value)}
-                    </p>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      </aside>
     </div>
   );
 }
@@ -1121,20 +1075,6 @@ function transcriptMessageIdentity(message: TranscriptMessage) {
     ].join(":");
   }
   return [message.speaker, message.stage_name ?? "", message.text].join(":");
-}
-
-function StatusPill({ status }: { status: CoverageSlot["status"] }) {
-  const tone =
-    status === "filled" || status === "asked_unknown"
-      ? "success"
-      : status === "conflicting" || status === "pending_re_extract"
-        ? "warn"
-        : "neutral";
-  return (
-    <Pill tone={tone} className="shrink-0">
-      {status.replaceAll("_", " ")}
-    </Pill>
-  );
 }
 
 async function refreshCoverage(
@@ -2264,71 +2204,6 @@ function formatTime(seconds: number) {
     .padStart(2, "0");
   const secs = (seconds % 60).toString().padStart(2, "0");
   return `${minutes}:${secs}`;
-}
-
-// Slot values are arbitrarily nested objects/arrays (e.g. pain_points is
-// {items:[{description,affected_role},...]}). A flat String() on nested entries
-// renders "[object Object]", so recurse and pull a human-readable headline from
-// each object instead.
-const SLOT_HEADLINE_KEYS = [
-  "description",
-  "detail",
-  "note",
-  "notes",
-  "summary",
-  "reason",
-  "signal",
-  "name",
-  "person",
-  "title",
-  "label",
-  "text",
-  "span",
-  "maturity",
-];
-const SLOT_QUALIFIER_KEYS = [
-  "role",
-  "affected_role",
-  "process",
-  "system",
-  "owner",
-  "top_process",
-];
-
-function summarizeSlotValue(value: unknown, depth = 0): string {
-  if (value === null || value === undefined) return "";
-  if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  if (Array.isArray(value)) {
-    return value
-      .map((entry) => summarizeSlotValue(entry, depth + 1))
-      .filter(Boolean)
-      .join("; ");
-  }
-  if (typeof value === "object") {
-    const obj = value as Record<string, unknown>;
-    // For nested items, render a readable "headline (qualifier)" rather than a
-    // key:value dump.
-    if (depth > 0) {
-      const headlineKey = SLOT_HEADLINE_KEYS.find(
-        (key) => typeof obj[key] === "string" && obj[key],
-      );
-      if (headlineKey) {
-        const qualifier = SLOT_QUALIFIER_KEYS.map((key) => obj[key]).find(
-          (entry) => typeof entry === "string" && entry,
-        );
-        return qualifier
-          ? `${obj[headlineKey] as string} (${qualifier as string})`
-          : (obj[headlineKey] as string);
-      }
-    }
-    return Object.entries(obj)
-      .filter(([, entry]) => entry !== null && entry !== undefined && entry !== "")
-      .map(([key, entry]) => `${key.replaceAll("_", " ")}: ${summarizeSlotValue(entry, depth + 1)}`)
-      .filter((line) => !line.endsWith(": "))
-      .join(" · ");
-  }
-  return String(value);
 }
 
 function labelForSlot(slotPath: string) {

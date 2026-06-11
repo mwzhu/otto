@@ -1,0 +1,23 @@
+# Fly.io config for the Otto operator LiveKit worker.
+#
+# The worker registers with LiveKit Cloud (otto-gcbsujid) over an OUTBOUND
+# WebSocket and exposes no public ports, so there is no [http_service]; one
+# always-on machine keeps it registered and Fly restarts it on crash.
+#
+# The Dockerfile needs repo-root build context (it COPYs prompts/, schemas/,
+# probes/, agents/realtime_core), so deploy from the REPOSITORY ROOT:
+#
+#   fly deploy . --config agents/operator/fly.toml --dockerfile agents/operator/Dockerfile
+#
+# Secrets (LIVEKIT_* + provider/service keys) are set with `fly secrets import`;
+# see agents/operator/README.md. Unlike LiveKit Cloud Agents, Fly does NOT
+# auto-inject LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET — they are part
+# of the imported secrets.
+
+app = "otto-operator"
+primary_region = "iad"   # Ashburn — closest Fly region to LiveKit us-east
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 2
+  memory = "4gb"

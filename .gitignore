@@ -7,3 +7,7 @@ node_modules/
 frontend-mockups/
 otto-frontend/screenshots/
 .vercel
+
+# Transient root Dockerfile staged by scripts/deploy-livekit-agent.sh during a
+# LiveKit Cloud Agents source build (the canonical Dockerfiles live in agents/*/).
+/Dockerfile

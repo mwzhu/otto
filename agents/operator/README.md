@@ -52,3 +52,49 @@ file and will miss shared values such as `LIVEKIT_URL` unless they are also
 present in the shell environment.
 In local development, the frontend can fall back to typed operator turns if
 LiveKit or audio provider credentials are missing.
+
+## Cloud hosting (Fly.io)
+
+The operator worker is hosted on **Fly.io**. (The director worker runs on LiveKit
+Cloud Agents, which on the current LiveKit plan is capped at a single agent — see
+`agents/director/README.md` — so the operator is deployed to Fly instead.) The
+worker registers with LiveKit Cloud (`otto-gcbsujid`) over an outbound WebSocket
+as `otto-operator`, exposes no public ports, and Fly keeps one machine running so
+it stays registered and restarts on crash. The app config is `agents/operator/fly.toml`.
+
+One-time setup:
+
+```bash
+brew install flyctl
+fly auth login                 # or: fly auth signup  (Fly account + payment method required)
+fly apps create otto-operator  # once; or `fly launch --no-deploy --copy-config --name otto-operator`
+```
+
+Secrets live in the git-ignored `agents/operator/.env.fly`. Unlike LiveKit Cloud
+Agents, Fly does **not** auto-inject the LiveKit project credentials, so
+`LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` are part of this file.
+The worker does no direct DB writes, so DB URLs are omitted; it uses LiveKit
+Inference, so no direct Deepgram/Cartesia keys are needed.
+
+```bash
+# Load secrets (encrypted on Fly)
+fly secrets import --config agents/operator/fly.toml < agents/operator/.env.fly
+
+# Build + deploy from the REPOSITORY ROOT (the Dockerfile needs repo-root context)
+fly deploy . --config agents/operator/fly.toml --dockerfile agents/operator/Dockerfile
+```
+
+Operations and log access:
+
+```bash
+fly status   --config agents/operator/fly.toml
+fly logs     --config agents/operator/fly.toml   # live tail; shows "registered worker · otto-operator"
+fly machine list --config agents/operator/fly.toml
+fly deploy . --config agents/operator/fly.toml --dockerfile agents/operator/Dockerfile  # ship a new version
+fly apps destroy otto-operator                    # remove the deployment
+```
+
+The worker's `agent_name` (`LIVEKIT_OPERATOR_AGENT_NAME=otto-operator` in
+`.env.fly`) **must** match the server-side dispatch name in `otto-frontend`
+(`lib/adapters/livekit.ts`, env `LIVEKIT_OPERATOR_AGENT_NAME`), or dispatched
+jobs never reach the worker.

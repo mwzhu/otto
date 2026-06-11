@@ -193,7 +193,11 @@ const looseSlotExtractionSchema = z.object({
       }),
     )
     .default([]),
-  claims: z.array(directorClaimZodSchema()).default([]),
+  // z.lazy defers directorClaimZodSchema() (which reads claim-subject-fields.json
+  // off disk) to first parse instead of running it when this top-level schema
+  // const is evaluated at import — otherwise Next's build-time "collect page
+  // data" throws `Missing shared schema artifact` resolving the cwd-relative path.
+  claims: z.array(z.lazy(() => directorClaimZodSchema())).default([]),
   tool_calls: z
     .array(
       z.object({

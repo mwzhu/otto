@@ -39,20 +39,47 @@ export type ClaimValidationResult =
   | { ok: true }
   | { ok: false; reason: string };
 
-const parsedAllowlist = claimSubjectFieldsSchema.parse(
-  readSharedSchemaArtifact("claim-subject-fields.json"),
-);
-const fieldsBySubject = new Map(
-  parsedAllowlist.allowed.map((subject) => [
-    subject.subject_type,
-    new Map(subject.fields.map((field) => [field.field, field])),
-  ]),
-);
+type ParsedAllowlist = z.infer<typeof claimSubjectFieldsSchema>;
+type AllowlistField = ParsedAllowlist["allowed"][number]["fields"][number];
+
+// Loaded lazily, not at module import. readSharedSchemaArtifact reads a
+// cwd-relative file off disk; evaluating it at top-level made merely importing
+// this module (which Next's "collect page data" build phase does for any route
+// in the import graph) throw `Missing shared schema artifact` when the build
+// worker's cwd differs from the runtime cwd. Deferring to first use keeps the
+// build's static analysis filesystem-free while preserving runtime behavior
+// (the result is memoized after the first call). Mirrors how schema-artifacts.ts
+// already loads the same file lazily inside its functions.
+let parsedAllowlistCache: ParsedAllowlist | undefined;
+let fieldsBySubjectCache:
+  | Map<string, Map<string, AllowlistField>>
+  | undefined;
+
+function getParsedAllowlist(): ParsedAllowlist {
+  if (!parsedAllowlistCache) {
+    parsedAllowlistCache = claimSubjectFieldsSchema.parse(
+      readSharedSchemaArtifact("claim-subject-fields.json"),
+    );
+  }
+  return parsedAllowlistCache;
+}
+
+function getFieldsBySubject(): Map<string, Map<string, AllowlistField>> {
+  if (!fieldsBySubjectCache) {
+    fieldsBySubjectCache = new Map(
+      getParsedAllowlist().allowed.map((subject) => [
+        subject.subject_type,
+        new Map(subject.fields.map((field) => [field.field, field])),
+      ]),
+    );
+  }
+  return fieldsBySubjectCache;
+}
 
 export function validateDirectorPlanClaim(
   claim: DirectorPlanClaim,
 ): ClaimValidationResult {
-  const field = fieldsBySubject.get(claim.subject_type)?.get(claim.field);
+  const field = getFieldsBySubject().get(claim.subject_type)?.get(claim.field);
   if (!field) {
     return {
       ok: false,
@@ -85,7 +112,7 @@ export function validateDirectorPlanClaim(
 }
 
 export function allowedDirectorClaimSubjects() {
-  return parsedAllowlist.allowed.map((subject) => ({
+  return getParsedAllowlist().allowed.map((subject) => ({
     subject_type: subject.subject_type,
     fields: subject.fields.map((field) => field.field),
   }));

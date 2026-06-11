@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 import {
   generate,
@@ -18,6 +18,7 @@ import {
   followUpTasks,
   interviewState,
   operatorExtractionWindows,
+  probeFirings,
   redactions,
   screenEvents,
   slotStates,
@@ -28,6 +29,12 @@ import { writeAgentDecisionInTransaction } from "@/lib/db/write-agent-decision";
 import { inngest, operatorRedactionRequestedEventName } from "@/lib/inngest/client";
 import { limitToSingleQuestion } from "@/lib/interview/_core/utterance";
 import { readSharedSchemaArtifact } from "@/lib/interview/director/schema-artifacts";
+import { isNonAnswerSlotExtraction } from "@/lib/interview/director/slot-non-answer";
+import {
+  operatorProbeConfigForIntent,
+  operatorProbeDirectiveForIntent,
+  operatorProbePhrasingsForIntent,
+} from "@/lib/interview/operator/probe-library";
 import { parseOperatorToolCall, type OperatorToolCall } from "@/lib/interview/operator/tools";
 import {
   insertOperatorProvisionalStep,
@@ -61,21 +68,28 @@ export type OperatorTurnPlanResult = {
   started_at: Date;
 };
 
+export type OperatorSteeringContext = {
+  next_objective: string;
+  directive: string;
+  anchor_phrasings: string[];
+  verbatim_required: boolean;
+  consecutive_intent_count: number;
+  target_slots: string[];
+  do_not_ask: string[];
+  required_style: string;
+  recent_screen_events: OperatorPlanningContext["recentScreenEvents"];
+  live_reconciliation_signals: string[];
+  pending_extraction_turns: number[];
+  pending_slot_paths: string[];
+  provisionally_answered_slots: string[];
+  last_spoken_intent?: string;
+};
+
 export type OperatorSteeringPlanResult = OperatorTurnPlanResult & {
   input: OperatorTurnInput;
   planning_context: OperatorPlanningContext;
   live_reconciliation_signals: LiveReconciliationSignal[];
-  steering_context: {
-    next_objective: string;
-    target_slots: string[];
-    do_not_ask: string[];
-    required_style: string;
-    recent_screen_events: OperatorPlanningContext["recentScreenEvents"];
-    live_reconciliation_signals: string[];
-    pending_extraction_turns?: number[];
-    pending_slot_paths?: string[];
-    last_spoken_intent?: string;
-  };
+  steering_context: OperatorSteeringContext;
 };
 
 export type OperatorPlanMetadata = {
@@ -104,6 +118,7 @@ export type OperatorOutputCheckViolation = {
   type:
     | "asked_do_not_ask"
     | "unsupported_claim"
+    | "ignored_next_objective"
     | "multiple_questions"
     | "too_verbose"
     | "internal_mechanics"
@@ -130,6 +145,7 @@ const operatorOutputCheckSchema = z
             type: z.enum([
               "asked_do_not_ask",
               "unsupported_claim",
+              "ignored_next_objective",
               "multiple_questions",
               "too_verbose",
               "internal_mechanics",
@@ -160,6 +176,7 @@ const operatorOutputCheckAnthropicToolSchema = {
             enum: [
               "asked_do_not_ask",
               "unsupported_claim",
+              "ignored_next_objective",
               "multiple_questions",
               "too_verbose",
               "internal_mechanics",
@@ -231,24 +248,59 @@ export async function buildOperatorSteeringPlan(
   },
 ): Promise<OperatorSteeringPlanResult> {
   const startedAt = new Date();
-  const planningContext = await readOperatorPlanningContext(input);
+  const [planningContext, steeringSignals] = await Promise.all([
+    readOperatorPlanningContext(input),
+    readOperatorSteeringSignals(input),
+  ]);
+  // The LiveKit worker threads pending_extraction_turns / pending_slot_paths,
+  // but its bookkeeping is in-memory; union with the server-side pending
+  // extraction windows so the guard survives worker restarts.
+  const pendingExtractionTurns = uniqueNumbers([
+    ...(input.pendingExtractionTurns ?? []),
+    ...steeringSignals.pendingWindows.turnIndexes,
+  ]);
+  const pendingSlotPaths = uniqueStrings([
+    ...(input.pendingSlotPaths ?? []),
+    ...steeringSignals.pendingWindows.slotPaths,
+  ]);
+  const probeFiringSummaries = probeFiringSummariesFromRows(
+    steeringSignals.probeFiringRows,
+  );
+  const provisionallyAnsweredSlots = uniqueStrings([
+    ...provisionallyAnsweredSlotPaths({
+      latestUtterance: input.latestUtterance,
+      pendingExtractionTurns,
+      recentFirings: steeringSignals.probeFiringRows,
+    }),
+    // pending_re_extract means the question was asked and answered but the
+    // extraction failed. The answer exists in the transcript; re-asking it
+    // burns operator trust. Keep these excluded until a re-extract succeeds.
+    ...pendingReExtractSlotPaths(planningContext.currentSlots),
+  ]);
   let plan = operatorTurnPlanSchema.parse(
     deterministicOperatorTurnPlan({
       ...input,
       currentPhase: planningContext.currentPhase,
+      probeFiringSummaries,
+      provisionallyAnsweredSlots,
     }),
   );
-  const liveReconciliationSignals = detectLiveReconciliationSignals(planningContext);
+  // Live signals persist while the same screen events stay in the window, so
+  // enforce the YAML cooldown/max_fires on them like any other probe.
+  const liveReconciliationSignals = detectLiveReconciliationSignals(
+    planningContext,
+  ).filter(
+    (signal) => applyProbeControls([signal.intent], probeFiringSummaries).length > 0,
+  );
   plan = applyLiveReconciliationSignals(plan, liveReconciliationSignals);
   const normalized = normalizeOperatorPlan(plan, plan, input.evidenceIds);
   plan = normalized.plan;
-  const targetSlots = uniqueStrings([
-    plan.chosen_intent.target_slot,
-    ...plan.ranked_intents.slice(0, 3).map((intent) => intent.target_slot),
-  ].filter((slot): slot is string => Boolean(slot)));
   const filledSlots = planningContext.currentSlots
     .filter((slot) => ["filled", "asked_unknown"].includes(slot.status))
     .map((slot) => slot.slotPath);
+  const checkerSignal = checkerVerdictSignalFromDeliveryJson(
+    steeringSignals.priorTurnDeliveries[0]?.deliveryJson,
+  );
   const metadata = deterministicPlannerMetadata(startedAt, input, plan, {
     source: "deterministic_operator_steering",
     utteranceSource: "fast_steering_phrase_pending",
@@ -269,18 +321,24 @@ export async function buildOperatorSteeringPlan(
     input,
     planning_context: planningContext,
     live_reconciliation_signals: liveReconciliationSignals,
-    steering_context: {
-      next_objective: plan.chosen_intent.reason,
-      target_slots: targetSlots,
-      do_not_ask: uniqueStrings([...filledSlots, ...(input.pendingSlotPaths ?? [])]),
-      required_style:
-        "Be sparing. Let the operator narrate, acknowledge briefly, and ask at most one concrete workflow follow-up only when it fills a blocking gap or resolves ambiguity.",
-      recent_screen_events: planningContext.recentScreenEvents,
-      live_reconciliation_signals: liveReconciliationSignals.map((item) => item.signal),
-      pending_extraction_turns: input.pendingExtractionTurns ?? [],
-      pending_slot_paths: input.pendingSlotPaths ?? [],
-      last_spoken_intent: input.lastSpokenIntent,
-    },
+    steering_context: buildOperatorSteeringContext({
+      chosenIntent: plan.chosen_intent,
+      rankedIntents: plan.ranked_intents,
+      filledSlotPaths: filledSlots,
+      currentSlots: planningContext.currentSlots,
+      recentAgentUtterances: steeringSignals.recentAgentUtterances,
+      pendingExtractionTurns,
+      pendingSlotPaths,
+      provisionallyAnsweredSlots,
+      priorConsecutiveIntentFirings: consecutivePriorIntentFirings(
+        steeringSignals.probeFiringRows,
+        plan.chosen_intent.intent,
+      ),
+      checkerSignal,
+      lastSpokenIntent: input.lastSpokenIntent,
+      recentScreenEvents: planningContext.recentScreenEvents,
+      liveReconciliationSignals: liveReconciliationSignals.map((item) => item.signal),
+    }),
   };
 }
 
@@ -294,6 +352,13 @@ export async function phraseOperatorSteeringTurn(
     liveReconciliationSignals: steering.live_reconciliation_signals,
     fallbackUtterance: steering.planned_agent_utterance,
     fallbackUtteranceSource: "deterministic_operator_steering",
+    steering: {
+      directive: steering.steering_context.directive,
+      anchorPhrasings: steering.steering_context.anchor_phrasings,
+      doNotAsk: steering.steering_context.do_not_ask,
+      verbatimRequired: steering.steering_context.verbatim_required,
+      requiredStyle: steering.steering_context.required_style,
+    },
   });
 }
 
@@ -307,6 +372,513 @@ export function nonAuthoritativeOperatorSteeringPlan(
     claims: [],
     tool_calls: [],
   };
+}
+
+/**
+ * Explicit steering sections for the voice phraser. Passed as labeled prompt
+ * sections (not a JSON pseudo-turn) so the fast model treats the directive as
+ * binding rather than background noise. Mirrors DirectorVoiceSteering.
+ */
+export type OperatorVoiceSteering = {
+  directive: string;
+  anchorPhrasings: string[];
+  doNotAsk: string[];
+  verbatimRequired: boolean;
+  requiredStyle?: string;
+};
+
+/**
+ * Imperative instructions for intents that are not operator probes. Probe
+ * intents resolve through probes/operator.yaml (`directive` / curated/derived
+ * fallbacks in probe-library.ts).
+ */
+const nonProbeIntentDirectives: Record<string, string> = {
+  clarify_operator_step:
+    "Ask the operator to walk through the next concrete step in the workflow. One step, not the whole process.",
+  clarify_observed_workaround:
+    "Ask the operator whether the manual or duplicate-entry work just observed on screen is an expected part of the process or a workaround.",
+};
+
+/** Imperative instruction for the chosen intent (replaces the old status-string objective). */
+export function operatorIntentDirective(chosenIntent: OperatorIntent): string {
+  return (
+    nonProbeIntentDirectives[chosenIntent.intent] ??
+    operatorProbeDirectiveForIntent(chosenIntent.intent, chosenIntent.target_slot) ??
+    `Ask the operator one concrete question that advances the "${chosenIntent.intent}" objective` +
+      (chosenIntent.target_slot
+        ? ` and fills the "${chosenIntent.target_slot}" slot.`
+        : ".") +
+      " Stay on the step being discussed."
+  );
+}
+
+export type OperatorCheckerVerdictSignal = {
+  ignoredSteering: boolean;
+  staleQuestion: boolean;
+  offendingUtterance?: string;
+};
+
+/**
+ * Task 4b feedback loop: interpret the prior turn's async output-checker
+ * verdict (recorded into agent_decision_log.delivery_json by
+ * recordOperatorOutputCheck) so an "ignored steering" / "stale question"
+ * verdict on turn N escalates turn N+1 to verbatim-probe mode.
+ */
+export function checkerVerdictSignalFromDeliveryJson(
+  deliveryJson: unknown,
+): OperatorCheckerVerdictSignal {
+  if (!deliveryJson || typeof deliveryJson !== "object") {
+    return { ignoredSteering: false, staleQuestion: false };
+  }
+  const record = deliveryJson as Record<string, unknown>;
+  const violationTypes = new Set(
+    (Array.isArray(record.checker_violations) ? record.checker_violations : [])
+      .map((violation) =>
+        violation && typeof violation === "object"
+          ? (violation as Record<string, unknown>).type
+          : undefined,
+      )
+      .filter((type): type is string => typeof type === "string"),
+  );
+  const staleQuestionCount =
+    typeof record.stale_question_count === "number" ? record.stale_question_count : 0;
+  const ignoredSteering =
+    violationTypes.has("ignored_next_objective") ||
+    violationTypes.has("contradicted_reconciliation");
+  const staleQuestion =
+    staleQuestionCount > 0 || violationTypes.has("asked_do_not_ask");
+  const offendingUtterance = [
+    record.spoken_agent_utterance,
+    record.delivered_utterance,
+    record.planned_utterance,
+  ].find(
+    (value): value is string => typeof value === "string" && value.trim().length > 0,
+  );
+  return {
+    ignoredSteering,
+    staleQuestion,
+    offendingUtterance:
+      ignoredSteering || staleQuestion ? offendingUtterance : undefined,
+  };
+}
+
+export type OperatorProbeFiringRow = {
+  probeId: string;
+  targetSlot: string | null;
+  turnIndex: number | null;
+  firedAt: Date;
+};
+
+type ProbeFiringSummary = {
+  count: number;
+  lastFiredAt?: Date;
+};
+
+export function probeFiringSummariesFromRows(
+  rows: OperatorProbeFiringRow[],
+): Map<string, ProbeFiringSummary> {
+  const summaries = new Map<string, ProbeFiringSummary>();
+  for (const row of rows) {
+    bumpProbeSummary(summaries, `intent:${row.probeId}`, row.firedAt);
+    if (row.targetSlot) {
+      bumpProbeSummary(summaries, `slot:${row.targetSlot}`, row.firedAt);
+    }
+  }
+  return summaries;
+}
+
+/**
+ * How many of the most recent consecutive spoken turns fired the given intent
+ * (probe_firings.probe_id records the chosen intent per spoken turn).
+ */
+export function consecutivePriorIntentFirings(
+  rows: OperatorProbeFiringRow[],
+  intentName: string,
+): number {
+  const ordered = orderProbeFiringsByRecency(rows);
+  let count = 0;
+  let lastTurnIndex: number | null | undefined;
+  for (const row of ordered) {
+    if (lastTurnIndex !== undefined && row.turnIndex === lastTurnIndex) continue;
+    lastTurnIndex = row.turnIndex;
+    if (row.probeId !== intentName) break;
+    count += 1;
+  }
+  return count;
+}
+
+/**
+ * Task 2 provisional-answer guard: a probe asked at turn N whose reply was
+ * substantive is treated as provisionally answered while the extraction for
+ * that exchange is uncommitted. If extraction later leaves the slot empty,
+ * the pending sets clear and the probe becomes eligible again.
+ */
+export function provisionallyAnsweredSlotPaths(input: {
+  latestUtterance: string;
+  pendingExtractionTurns: number[];
+  recentFirings: OperatorProbeFiringRow[];
+}): string[] {
+  const pendingTurns = new Set(input.pendingExtractionTurns);
+  const provisional = new Set<string>();
+  const ordered = orderProbeFiringsByRecency(input.recentFirings);
+  for (const firing of ordered) {
+    if (!firing.targetSlot || firing.turnIndex === null) continue;
+    // The reply to the probe spoken at turn N arrives as turn N+1's utterance;
+    // either turn pending means the exchange has not committed yet.
+    if (pendingTurns.has(firing.turnIndex) || pendingTurns.has(firing.turnIndex + 1)) {
+      provisional.add(firing.targetSlot);
+    }
+  }
+  const latestFiring = ordered[0];
+  if (latestFiring?.targetSlot) {
+    const latestUtteranceType = utteranceType(input.latestUtterance);
+    const substantiveReply =
+      latestUtteranceType === "substantive_answer" ||
+      latestUtteranceType === "partial_answer";
+    if (substantiveReply) {
+      // The utterance being answered right now responds to the most recent
+      // probe; its extraction has not even started yet.
+      provisional.add(latestFiring.targetSlot);
+    } else {
+      // A don't-know / non-answer does not provisionally answer the probe;
+      // keep it eligible so the planner can pivot or re-approach.
+      provisional.delete(latestFiring.targetSlot);
+    }
+  }
+  return [...provisional];
+}
+
+function orderProbeFiringsByRecency(rows: OperatorProbeFiringRow[]) {
+  return [...rows].sort((a, b) => {
+    const turnDelta = (b.turnIndex ?? -1) - (a.turnIndex ?? -1);
+    if (turnDelta !== 0) return turnDelta;
+    return b.firedAt.getTime() - a.firedAt.getTime();
+  });
+}
+
+export function pendingReExtractSlotPaths(
+  currentSlots: Array<{ slotPath: string; status: string }>,
+): string[] {
+  return uniqueStrings(
+    currentSlots
+      .filter((slot) => slot.status === "pending_re_extract")
+      .map((slot) => slot.slotPath),
+  );
+}
+
+function bumpProbeSummary(
+  summaries: Map<string, ProbeFiringSummary>,
+  key: string,
+  firedAt: Date,
+) {
+  const prior = summaries.get(key) ?? { count: 0 };
+  summaries.set(key, {
+    count: prior.count + 1,
+    lastFiredAt:
+      prior.lastFiredAt && prior.lastFiredAt > firedAt
+        ? prior.lastFiredAt
+        : firedAt,
+  });
+}
+
+function mergedProbeSummary(
+  candidate: OperatorIntent,
+  summaries: Map<string, ProbeFiringSummary>,
+) {
+  const byIntent = summaries.get(`intent:${candidate.intent}`);
+  const bySlot = candidate.target_slot
+    ? summaries.get(`slot:${candidate.target_slot}`)
+    : undefined;
+  return {
+    count: Math.max(byIntent?.count ?? 0, bySlot?.count ?? 0),
+    lastFiredAt: latestDate(byIntent?.lastFiredAt, bySlot?.lastFiredAt),
+  };
+}
+
+function latestDate(a?: Date, b?: Date) {
+  if (!a) return b;
+  if (!b) return a;
+  return a > b ? a : b;
+}
+
+function appendStyleHint(styleHint: string | undefined, hint: string) {
+  if (!styleHint) return hint;
+  return styleHint.includes(hint) ? styleHint : `${styleHint},${hint}`;
+}
+
+function isControllerExemptIntent(candidate: OperatorIntent) {
+  // The chooser's terminal fallback; always eligible so exclusions can never
+  // leave the agent with nothing to say.
+  return candidate.intent === "clarify_operator_step";
+}
+
+/**
+ * Step-advance intents re-fire by design — each ask targets the NEXT step, a
+ * new fact every time — so the provisional-answer guard must not exclude
+ * them. YAML cooldowns/max_fires still apply via applyProbeControls. (This is
+ * the deliberate divergence from the director's Task 11 answered-probe guard:
+ * director probes each target one fact, operator probes drive a step loop.)
+ */
+const STEP_ADVANCE_INTENTS = new Set(["capture_next_step", "clarify_operator_step"]);
+
+function applyProbeControls(
+  intents: OperatorIntent[],
+  summaries: Map<string, ProbeFiringSummary>,
+) {
+  const now = Date.now();
+  return intents
+    .flatMap((candidate) => {
+      if (isControllerExemptIntent(candidate)) return [candidate];
+      const probeConfig = operatorProbeConfigForIntent(
+        candidate.intent,
+        candidate.target_slot,
+      );
+      const maxFires = probeConfig?.maxFires ?? 3;
+      const cooldownSeconds = probeConfig?.cooldownSeconds ?? 60;
+      const summary = mergedProbeSummary(candidate, summaries);
+      if (summary.count >= maxFires) return [];
+      if (
+        summary.lastFiredAt &&
+        now - summary.lastFiredAt.getTime() < cooldownSeconds * 1000
+      ) {
+        return [];
+      }
+      const nearMaxFire = summary.count === maxFires - 1;
+      return [
+        {
+          ...candidate,
+          score: nearMaxFire ? candidate.score * 0.5 : candidate.score,
+          style_hint: nearMaxFire
+            ? appendStyleHint(candidate.style_hint, "last_attempt")
+            : candidate.style_hint,
+        },
+      ];
+    })
+    .sort((a, b) => b.score - a.score);
+}
+
+/**
+ * Task 2 hard exclusion pass for the deterministic intent chooser. Enforces
+ * cooldown_seconds/max_fires from probes/operator.yaml against probe_firings
+ * and skips probes whose target slot is provisionally answered (asked +
+ * substantively answered while extraction is uncommitted). Falls back to the
+ * step-walkthrough bridge when every candidate is excluded.
+ */
+export function applySteeringIntentExclusions(
+  rankedIntents: OperatorIntent[],
+  input: {
+    probeFiringSummaries?: Map<string, ProbeFiringSummary>;
+    provisionallyAnsweredSlots?: string[];
+  },
+): OperatorIntent[] {
+  const provisional = new Set(input.provisionallyAnsweredSlots ?? []);
+  let eligible = input.probeFiringSummaries
+    ? applyProbeControls(rankedIntents, input.probeFiringSummaries)
+    : rankedIntents;
+  if (provisional.size > 0) {
+    eligible = eligible.filter((candidate) => {
+      if (isControllerExemptIntent(candidate)) return true;
+      if (STEP_ADVANCE_INTENTS.has(candidate.intent)) return true;
+      if (candidate.target_slot && provisional.has(candidate.target_slot)) {
+        return false;
+      }
+      return true;
+    });
+  }
+  if (eligible.length > 0 || rankedIntents.length === 0) return eligible;
+  return [
+    {
+      intent: "clarify_operator_step",
+      target_slot: "step.action_object",
+      score: 650,
+      reason:
+        "All matching probes are in cooldown or provisionally answered; advance the step walkthrough instead of repeating.",
+      style_hint: appendStyleHint(rankedIntents[0]?.style_hint, "broaden_low_info"),
+    },
+  ];
+}
+
+/**
+ * Assembles the steering context handed to the voice phraser and the output
+ * checker. Pure so steering behavior is unit-testable without a database.
+ */
+export function buildOperatorSteeringContext(input: {
+  chosenIntent: OperatorIntent;
+  rankedIntents: OperatorIntent[];
+  filledSlotPaths: string[];
+  currentSlots: Array<{ slotPath: string; status: string }>;
+  recentAgentUtterances: string[];
+  pendingExtractionTurns: number[];
+  pendingSlotPaths: string[];
+  provisionallyAnsweredSlots: string[];
+  priorConsecutiveIntentFirings: number;
+  checkerSignal?: OperatorCheckerVerdictSignal;
+  lastSpokenIntent?: string;
+  recentScreenEvents?: OperatorPlanningContext["recentScreenEvents"];
+  liveReconciliationSignals?: string[];
+}): OperatorSteeringContext {
+  const chosenIntent = input.chosenIntent;
+  const directive = operatorIntentDirective(chosenIntent);
+  const anchorPhrasings = operatorProbePhrasingsForIntent(
+    chosenIntent.intent,
+    chosenIntent.target_slot,
+  );
+  const targetSlots = uniqueStrings(
+    [
+      chosenIntent.target_slot,
+      ...input.rankedIntents.slice(0, 3).map((intent) => intent.target_slot),
+    ].filter((slotPath): slotPath is string => Boolean(slotPath)),
+  );
+  const consecutiveIntentCount = input.priorConsecutiveIntentFirings + 1;
+  const targetSlotUnfilled = chosenIntent.target_slot
+    ? !input.currentSlots.some(
+        (slot) =>
+          slot.slotPath === chosenIntent.target_slot &&
+          ["filled", "asked_unknown"].includes(slot.status),
+      )
+    : false;
+  const checkerSignal = input.checkerSignal;
+  const verbatimRequired =
+    anchorPhrasings.length > 0 &&
+    ((consecutiveIntentCount >= 2 && targetSlotUnfilled) ||
+      Boolean(checkerSignal?.ignoredSteering) ||
+      Boolean(checkerSignal?.staleQuestion));
+  return {
+    next_objective: directive,
+    directive,
+    anchor_phrasings: anchorPhrasings,
+    verbatim_required: verbatimRequired,
+    consecutive_intent_count: consecutiveIntentCount,
+    target_slots: targetSlots,
+    do_not_ask: uniqueStrings([
+      ...input.filledSlotPaths,
+      ...input.pendingSlotPaths,
+      ...input.provisionallyAnsweredSlots,
+      // Verbatim utterances Otto already spoke; the phraser must not re-ask
+      // paraphrases of these.
+      ...input.recentAgentUtterances.slice(-3),
+      ...(checkerSignal?.offendingUtterance ? [checkerSignal.offendingUtterance] : []),
+    ]),
+    required_style:
+      "Be sparing. Let the operator narrate, acknowledge briefly, and ask at most one concrete workflow follow-up only when it fills a blocking gap or resolves ambiguity.",
+    recent_screen_events: input.recentScreenEvents ?? [],
+    live_reconciliation_signals: input.liveReconciliationSignals ?? [],
+    pending_extraction_turns: input.pendingExtractionTurns,
+    pending_slot_paths: input.pendingSlotPaths,
+    provisionally_answered_slots: input.provisionallyAnsweredSlots,
+    last_spoken_intent: input.lastSpokenIntent,
+  };
+}
+
+/**
+ * One-transaction read of the steering signals the deterministic plan needs:
+ * probe firings (cooldowns, consecutive-intent count), the prior turns'
+ * delivery rows (checker feedback loop + recent Otto questions), and pending
+ * extraction windows (provisional-answer guard across worker restarts).
+ */
+async function readOperatorSteeringSignals(
+  input: Pick<OperatorTurnInput, "orgId" | "workspaceId" | "captureSessionId" | "turnIndex">,
+): Promise<{
+  probeFiringRows: OperatorProbeFiringRow[];
+  priorTurnDeliveries: Array<{ turnIndex: number | null; deliveryJson: unknown }>;
+  recentAgentUtterances: string[];
+  pendingWindows: { turnIndexes: number[]; slotPaths: string[] };
+}> {
+  return getDb().transaction(async (tx) => {
+    await setOrgContext(tx, input.orgId);
+    const probeFiringRows = await tx
+      .select({
+        probeId: probeFirings.probeId,
+        targetSlot: probeFirings.targetSlot,
+        turnIndex: probeFirings.turnIndex,
+        firedAt: probeFirings.firedAt,
+      })
+      .from(probeFirings)
+      .where(
+        and(
+          eq(probeFirings.orgId, input.orgId),
+          eq(probeFirings.workspaceId, input.workspaceId),
+          eq(probeFirings.captureSessionId, input.captureSessionId),
+        ),
+      )
+      .orderBy(desc(probeFirings.firedAt))
+      .limit(200);
+    const priorTurnDeliveries =
+      input.turnIndex > 0
+        ? await tx
+            .select({
+              turnIndex: agentDecisionLog.turnIndex,
+              deliveryJson: agentDecisionLog.deliveryJson,
+            })
+            .from(agentDecisionLog)
+            .where(
+              and(
+                eq(agentDecisionLog.orgId, input.orgId),
+                eq(agentDecisionLog.workspaceId, input.workspaceId),
+                eq(agentDecisionLog.captureSessionId, input.captureSessionId),
+                eq(agentDecisionLog.stageName, "operator.turn"),
+                lt(agentDecisionLog.turnIndex, input.turnIndex),
+              ),
+            )
+            .orderBy(desc(agentDecisionLog.turnIndex))
+            .limit(3)
+        : [];
+    const pendingWindowRows = await tx
+      .select({
+        turnIndex: operatorExtractionWindows.turnIndex,
+        metadataJson: operatorExtractionWindows.metadataJson,
+      })
+      .from(operatorExtractionWindows)
+      .where(
+        and(
+          eq(operatorExtractionWindows.orgId, input.orgId),
+          eq(operatorExtractionWindows.workspaceId, input.workspaceId),
+          eq(operatorExtractionWindows.captureSessionId, input.captureSessionId),
+          eq(operatorExtractionWindows.status, "pending"),
+        ),
+      )
+      .orderBy(desc(operatorExtractionWindows.openedAt))
+      .limit(20);
+    const turnIndexes = new Set<number>();
+    const slotPaths = new Set<string>();
+    for (const row of pendingWindowRows) {
+      if (typeof row.turnIndex === "number") turnIndexes.add(row.turnIndex);
+      const metadata =
+        row.metadataJson && typeof row.metadataJson === "object"
+          ? (row.metadataJson as Record<string, unknown>)
+          : undefined;
+      const steering =
+        metadata?.steering_context && typeof metadata.steering_context === "object"
+          ? (metadata.steering_context as Record<string, unknown>)
+          : undefined;
+      const targets = Array.isArray(steering?.target_slots) ? steering.target_slots : [];
+      for (const target of targets) {
+        if (typeof target === "string" && target.trim()) slotPaths.add(target);
+      }
+    }
+    const recentAgentUtterances = [...priorTurnDeliveries]
+      .reverse()
+      .map((row) => agentUtteranceFromDeliveryJson(row.deliveryJson))
+      .filter((value): value is string => Boolean(value));
+    return {
+      probeFiringRows,
+      priorTurnDeliveries,
+      recentAgentUtterances,
+      pendingWindows: { turnIndexes: [...turnIndexes], slotPaths: [...slotPaths] },
+    };
+  });
+}
+
+function agentUtteranceFromDeliveryJson(deliveryJson: unknown): string | undefined {
+  if (!deliveryJson || typeof deliveryJson !== "object") return undefined;
+  const record = deliveryJson as Record<string, unknown>;
+  return [
+    record.delivered_utterance,
+    record.spoken_agent_utterance,
+    record.planned_utterance,
+  ].find(
+    (value): value is string => typeof value === "string" && value.trim().length > 0,
+  );
 }
 
 export async function planOperatorTurnStreamed(
@@ -557,6 +1129,24 @@ export async function dispatchOperatorTurnPlan(
         },
         tx,
       );
+      // Task 2: spoken turns record a probe firing so cooldown/max_fires
+      // enforcement, the provisional-answer guard, and the consecutive-intent
+      // count have data to read. The extraction dispatch passes
+      // advanceConversationState: false and does not record one.
+      await tx
+        .insert(probeFirings)
+        .values({
+          orgId: input.orgId,
+          workspaceId: input.workspaceId,
+          captureSessionId: input.captureSessionId,
+          probeId: input.plan.chosen_intent.intent,
+          targetSlot: isControllerExemptIntent(input.plan.chosen_intent)
+            ? undefined
+            : input.plan.chosen_intent.target_slot,
+          turnIndex: input.turnIndex,
+          styleHint: input.plan.chosen_intent.style_hint,
+        })
+        .onConflictDoNothing();
     }
     const decision = await writeAgentDecisionInTransaction(tx, {
       orgId: input.orgId,
@@ -625,7 +1215,7 @@ export async function checkOperatorSpokenOutput(input: {
       static_input: [
         "You are checking one spoken Otto operator-interview utterance after it was already delivered.",
         "Record your verdict with the emit_operator_output_check tool. Do not rewrite the utterance.",
-        "Flag unsupported factual claims, stale questions, ignored workflow steering, multiple questions, verbosity, internal mechanics, and contradictions with live reconciliation signals.",
+        "Flag unsupported factual claims, stale questions, an ignored steering objective (ignored_next_objective), multiple questions, verbosity, internal mechanics, and contradictions with live reconciliation signals.",
       ].join("\n"),
       dynamic_input: JSON.stringify(
         {
@@ -1383,7 +1973,24 @@ async function phraseOperatorTurnWithSeparateVoice(input: {
   liveReconciliationSignals: LiveReconciliationSignal[];
   fallbackUtterance: string;
   fallbackUtteranceSource: string;
+  steering?: OperatorVoiceSteering;
 }): Promise<OperatorVoicePhraseResult> {
+  // Verbatim escalation exists because the phraser ignored steering; asking
+  // the same phraser to comply via prompt would re-trust the failing
+  // component. Bypass generation entirely and speak the canonical probe
+  // phrasing.
+  const verbatimAnchor =
+    input.steering?.verbatimRequired && input.steering.anchorPhrasings[0]
+      ? input.steering.anchorPhrasings[0]
+      : undefined;
+  if (verbatimAnchor) {
+    return {
+      utterance: limitToSingleQuestion(verbatimAnchor),
+      utteranceSource: "verbatim_escalation",
+      reason: "verbatim_escalation",
+      fallback: false,
+    };
+  }
   const env = getServerEnv();
   if (!env.ANTHROPIC_API_KEY) {
     return {
@@ -1400,6 +2007,10 @@ async function phraseOperatorTurnWithSeparateVoice(input: {
       static_input: [
         "You are Otto, a calm workflow partner speaking live with an operator.",
         "Phrase exactly one next thing to say for a workflow deep-dive interview.",
+        "HARD RULES:",
+        "- Your question MUST target the OBJECTIVE below. Never substitute a different topic.",
+        "- The ANCHOR PHRASINGS show what to ask; adapt the wording to the conversation, never the target.",
+        "- Never re-ask anything in DO NOT ASK, including paraphrases of it.",
         "Be sparing. Let the operator narrate, and ask only when a blocking workflow gap or ambiguity needs a concrete answer.",
         "If a question is not needed, use a brief acknowledgement that invites the operator to keep going.",
         "Sound practical and curious, not like a survey.",
@@ -1407,23 +2018,28 @@ async function phraseOperatorTurnWithSeparateVoice(input: {
         "If a screen/SOP contradiction is present, ask a clarification question without treating the SOP as more true than observed behavior.",
       ].join("\n"),
       dynamic_input: [
-        `Current phase: ${input.plan.current_phase}`,
-        `Proposed phase: ${input.plan.proposed_next_phase}`,
-        `Utterance type: ${input.plan.utterance_type}`,
-        `Chosen intent: ${JSON.stringify(input.plan.chosen_intent)}`,
-        `Fallback utterance: ${input.fallbackUtterance}`,
-        "Recent operator turns:",
-        ...(input.planningContext.recentTurns.length
-          ? input.planningContext.recentTurns.slice(-4).map((turn) => `- ${turn}`)
-          : ["- none"]),
-        "Known workspace context:",
-        ...formatWorkspaceMemory(input.planningContext.workspaceMemory),
-        "Live reconciliation signals:",
-        ...(input.liveReconciliationSignals.length
-          ? input.liveReconciliationSignals.map((item) => `- ${item.signal}`)
-          : ["- none"]),
-        `Latest operator utterance: ${input.input.latestUtterance}`,
-      ].join("\n"),
+        operatorSteeringPromptSections(input.steering),
+        [
+          `Current phase: ${input.plan.current_phase}`,
+          `Proposed phase: ${input.plan.proposed_next_phase}`,
+          `Utterance type: ${input.plan.utterance_type}`,
+          `Chosen intent: ${JSON.stringify(input.plan.chosen_intent)}`,
+          `Fallback utterance: ${input.fallbackUtterance}`,
+          "Recent operator turns:",
+          ...(input.planningContext.recentTurns.length
+            ? input.planningContext.recentTurns.slice(-4).map((turn) => `- ${turn}`)
+            : ["- none"]),
+          "Known workspace context:",
+          ...formatWorkspaceMemory(input.planningContext.workspaceMemory),
+          "Live reconciliation signals:",
+          ...(input.liveReconciliationSignals.length
+            ? input.liveReconciliationSignals.map((item) => `- ${item.signal}`)
+            : ["- none"]),
+          `Latest operator utterance: ${input.input.latestUtterance}`,
+        ].join("\n"),
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
       input: "Return only Otto's next spoken sentence or short pair of sentences. No JSON.",
     });
     const utterance = limitToSingleQuestion(result.text.trim());
@@ -1450,6 +2066,36 @@ async function phraseOperatorTurnWithSeparateVoice(input: {
       fallback: true,
     };
   }
+}
+
+function operatorSteeringPromptSections(steering?: OperatorVoiceSteering) {
+  if (!steering) return "";
+  const sections = [
+    "## OBJECTIVE (your question MUST target this)",
+    steering.directive,
+  ];
+  if (steering.anchorPhrasings.length > 0) {
+    sections.push(
+      "## ANCHOR PHRASINGS (adapt wording to the conversation, never the target)",
+      ...steering.anchorPhrasings.map((phrasing) => `- ${phrasing}`),
+    );
+  }
+  sections.push(
+    "## VERBATIM REQUIRED",
+    steering.verbatimRequired
+      ? "Yes. Speak the first anchor phrasing verbatim after a brief acknowledgment."
+      : "No. Adapt the anchors naturally.",
+  );
+  if (steering.doNotAsk.length > 0) {
+    sections.push(
+      "## DO NOT ASK (already covered, pending, or just asked)",
+      ...steering.doNotAsk.slice(0, 12).map((item) => `- ${item}`),
+    );
+  }
+  if (steering.requiredStyle) {
+    sections.push("## STYLE", steering.requiredStyle);
+  }
+  return sections.join("\n");
 }
 
 async function readOperatorPlanningContext(
@@ -1966,7 +2612,7 @@ function dedupeLiveSignals(signals: LiveReconciliationSignal[]) {
   });
 }
 
-function normalizeOperatorPlan(
+export function normalizeOperatorPlan(
   plan: OperatorTurnPlan,
   deterministicPlan: OperatorTurnPlan,
   allowedEvidenceIds: string[],
@@ -1992,14 +2638,46 @@ function normalizeOperatorPlan(
         return false;
       }
     })
-    .map((slot) => ({
-      ...slot,
-      evidence_ids: sanitizeEvidence(slot.evidence_ids),
-    }));
+    .map((slot) => {
+      let status = slot.status;
+      let value = slot.value;
+      let confidence = slot.confidence;
+      // Task 3 rule 1 (operator mirror): a don't-know reply is never a slot
+      // value. Convert the update to asked_unknown and drop the quoted
+      // non-answer.
+      if (
+        (status === "filled" || status === "partial") &&
+        isNonAnswerSlotExtraction(
+          value,
+          plan.utterance_type === "dont_know" ? "dont_know" : undefined,
+        )
+      ) {
+        status = "asked_unknown";
+        value = undefined;
+      }
+      // Task 3 rule 2: inferred values are capped at 0.45 by code.
+      if (isInferredExtractionRecord(undefined, value)) {
+        confidence = Math.min(confidence, INFERRED_EXTRACTION_CONFIDENCE_CAP);
+      }
+      return {
+        ...slot,
+        value,
+        status,
+        confidence,
+        evidence_ids: sanitizeEvidence(slot.evidence_ids),
+      };
+    });
+  const claims = plan.claims.map((claim) => ({
+    ...claim,
+    confidence: isInferredExtractionRecord(claim.metadata, claim.value)
+      ? Math.min(claim.confidence, INFERRED_EXTRACTION_CONFIDENCE_CAP)
+      : claim.confidence,
+  }));
   const normalized = operatorTurnPlanSchema.safeParse({
     ...plan,
     step_updates: stepUpdates,
     slot_updates: slotUpdates,
+    claims,
   });
   if (normalized.success) {
     return { plan: normalized.data, degradedReasons: uniqueStrings(degradedReasons) };
@@ -2009,6 +2687,25 @@ function normalizeOperatorPlan(
     plan: deterministicPlan,
     degradedReasons: uniqueStrings(degradedReasons),
   };
+}
+
+const INFERRED_EXTRACTION_CONFIDENCE_CAP = 0.45;
+
+function isInferredExtractionRecord(metadata: unknown, value: unknown) {
+  if (
+    metadata &&
+    typeof metadata === "object" &&
+    !Array.isArray(metadata) &&
+    (metadata as Record<string, unknown>).inferred === true
+  ) {
+    return true;
+  }
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      (value as Record<string, unknown>).inferred === true,
+  );
 }
 
 export function operatorTurnPlanAnthropicToolSchema() {
@@ -2258,11 +2955,22 @@ function slotPathQuestionTerms(slotPath: string) {
 }
 
 export function deterministicOperatorTurnPlan(
-  input: OperatorTurnInput & { currentPhase?: OperatorInterviewPhase },
+  input: OperatorTurnInput & {
+    currentPhase?: OperatorInterviewPhase;
+    probeFiringSummaries?: Map<string, ProbeFiringSummary>;
+    provisionallyAnsweredSlots?: string[];
+  },
 ): OperatorTurnPlan {
   const stepText = firstActionSentence(input.latestUtterance);
   const title = stepText ? titleCase(trimText(stepText, 72)) : "Captured operator step";
-  const intent = chooseOperatorIntent(input.latestUtterance, Boolean(stepText));
+  const rankedIntents = applySteeringIntentExclusions(
+    rankedOperatorIntentCandidates(input.latestUtterance, Boolean(stepText)),
+    {
+      probeFiringSummaries: input.probeFiringSummaries,
+      provisionallyAnsweredSlots: input.provisionallyAnsweredSlots,
+    },
+  );
+  const intent = rankedIntents[0];
   const currentPhase = input.currentPhase ?? "orient";
   const proposedNextPhase = nextOperatorPhase({
     currentPhase,
@@ -2300,45 +3008,47 @@ export function deterministicOperatorTurnPlan(
     current_phase: currentPhase,
     proposed_next_phase: proposedNextPhase,
     phase_transition_ready: proposedNextPhase !== currentPhase,
-    ranked_intents: [intent],
+    ranked_intents: rankedIntents,
     chosen_intent: intent,
     planned_agent_utterance: deterministicOperatorUtterance(intent),
   };
 }
 
-function chooseOperatorIntent(text: string, hasStep: boolean): OperatorIntent {
+function rankedOperatorIntentCandidates(text: string, hasStep: boolean): OperatorIntent[] {
+  const candidates: OperatorIntent[] = [];
   if (/exception|error|fail|reject|stuck|blocked|workaround|manual/i.test(text)) {
-    return {
+    candidates.push({
       intent: "capture_exception_or_workaround",
       target_slot: /workaround|manual/i.test(text)
         ? "step.workarounds"
         : "step.exceptions",
       score: 1000,
       reason: "The operator mentioned an exception or workaround.",
-    };
+    });
   }
   if (/approve|decide|if |unless|when /i.test(text)) {
-    return {
+    candidates.push({
       intent: "capture_decision_rule",
       target_slot: "step.decision_criteria",
       score: 900,
       reason: "The operator described a branch or decision.",
-    };
+    });
   }
   if (hasStep) {
-    return {
+    candidates.push({
       intent: "capture_next_step",
       target_slot: "step.action_object",
       score: 820,
       reason: "The operator described an executable step.",
-    };
+    });
   }
-  return {
+  candidates.push({
     intent: "clarify_operator_step",
     target_slot: "step.action_object",
     score: 700,
     reason: "The last operator turn needs a concrete next step.",
-  };
+  });
+  return candidates;
 }
 
 function deterministicOperatorUtterance(intent: OperatorIntent) {
@@ -2434,6 +3144,10 @@ function estimateTokens(text: string) {
 
 function uniqueStrings(values: string[]) {
   return [...new Set(values.filter(Boolean))];
+}
+
+function uniqueNumbers(values: number[]) {
+  return [...new Set(values)];
 }
 
 export function voiceMetadataDegrades(

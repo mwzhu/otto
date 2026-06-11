@@ -19,6 +19,9 @@ probes:
     max_fires: 2
     expected_shape: Business outcome, object being processed, and completion signal.
     base_priority: 105
+    directive: >-
+      Ask the operator what this workflow is trying to get done and what
+      result tells them it is complete.
     phrasings:
       - What is this workflow trying to get done?
       - What result tells you this process is complete?
@@ -37,6 +40,9 @@ probes:
     max_fires: 20
     expected_shape: Action verb plus object, with start/end cue when available.
     base_priority: 120
+    directive: >-
+      Ask the operator what happens next — the next concrete action after the
+      step they just described.
     phrasings:
       - What happens next?
       - What do you do right after that?
@@ -55,6 +61,9 @@ probes:
     max_fires: 3
     expected_shape: System of record, shadow spreadsheet, or communication tool.
     base_priority: 100
+    directive: >-
+      Ask the operator which system is the source of truth for this step:
+      the official system or a working tracker.
     phrasings:
       - Which system is the source of truth for this step?
       - Are you updating the official system here, or a working tracker?
@@ -73,6 +82,9 @@ probes:
     max_fires: 3
     expected_shape: Input artifact/data and output artifact/data for the step.
     base_priority: 90
+    directive: >-
+      Ask the operator what input this step needs before it can start, or
+      what gets created or changed when it is done.
     phrasings:
       - What input do you need before you can do this step?
       - What gets created or changed when this step is done?
@@ -90,6 +102,9 @@ probes:
     max_fires: 3
     expected_shape: Condition, branch choices, and who or what decides.
     base_priority: 95
+    directive: >-
+      Ask the operator how they decide which path to take at this point —
+      the condition and who or what decides.
     phrasings:
       - How do you decide which path to take here?
       - What condition makes you send it back instead of moving forward?
@@ -107,6 +122,9 @@ probes:
     max_fires: 3
     expected_shape: Sender, receiver, handoff medium, and acceptance cue.
     base_priority: 86
+    directive: >-
+      Ask the operator who gets the work after they finish this part and how
+      the next person knows it is ready.
     phrasings:
       - Who gets this after you finish your part?
       - How do you know the next person has everything they need?
@@ -124,6 +142,9 @@ probes:
     max_fires: 4
     expected_shape: Failure condition, frequency, impact, and recovery path.
     base_priority: 102
+    directive: >-
+      Ask the operator when this step fails or gets stuck and what usually
+      causes it.
     phrasings:
       - When does this step fail or get stuck?
       - What usually causes an exception here?
@@ -141,6 +162,9 @@ probes:
     max_fires: 4
     expected_shape: Unofficial workaround, why it exists, and whether it is normal.
     base_priority: 104
+    directive: >-
+      Ask the operator whether what they just did is the normal workflow or
+      a workaround, and why it exists.
     phrasings:
       - Is that the normal workflow, or a workaround?
       - What makes you leave the official system and do it manually?
@@ -157,6 +181,10 @@ probes:
     max_fires: 5
     expected_shape: Current real behavior, whether SOP is outdated, and exception status.
     base_priority: 115
+    directive: >-
+      Point out that the SOP describes this differently and ask which version
+      is current — without treating the SOP as more true than observed
+      behavior.
     phrasings:
       - The SOP says something different here. Which version is current?
       - Is this different from the SOP because the document is outdated, or because this case is unusual?

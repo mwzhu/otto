@@ -13,6 +13,7 @@ import {
   workspaces,
 } from "@/lib/db/schema";
 import { ApiError } from "@/lib/http/json";
+import { isNonAnswerSlotExtraction } from "@/lib/interview/director/slot-non-answer";
 import {
   assertOperatorSlotPath,
   operatorSlotPriority,
@@ -418,7 +419,7 @@ export async function upsertOperatorSlotState(
   assertOperatorSlotPath(input.slotPath);
   const existing = (
     await tx
-      .select({ id: slotStates.id })
+      .select()
       .from(slotStates)
       .where(
         and(
@@ -435,6 +436,18 @@ export async function upsertOperatorSlotState(
       .limit(1)
       .for("update")
   )[0];
+  // Task 9 (operator mirror): do not let a non-answer or a strictly weaker
+  // extraction clobber an already-`filled` slot. When the guard fires the
+  // stored value, status, and confidence stay untouched.
+  if (
+    existing &&
+    shouldBlockSlotDowngrade(
+      { status: existing.status, confidence: existing.confidence ?? 0 },
+      { value: input.value, confidence: input.confidence },
+    )
+  ) {
+    return existing;
+  }
   const values = {
     provisionalStepId: input.provisionalStepId,
     value: input.value,
@@ -466,6 +479,25 @@ export async function upsertOperatorSlotState(
       })
       .returning()
   )[0];
+}
+
+// Task 9 downgrade guard (pure decision, unit-tested). Block a slot write that
+// would weaken an already-`filled` slot: either the incoming value is a
+// non-answer, or it is strictly lower confidence than what is stored. Empty,
+// partial, asked_unknown, and conflicting slots are not protected (they can be
+// freely refined), and an equal-or-higher-confidence real answer still
+// overwrites (legitimate corrections/refreshes). Mirrors the director guard in
+// lib/interview/director/tools.ts.
+export function shouldBlockSlotDowngrade(
+  existing: { status: string; confidence: string | number },
+  incoming: { value: unknown; confidence: number },
+): boolean {
+  if (existing.status !== "filled") return false;
+  if (isNonAnswerSlotExtraction(incoming.value)) return true;
+  const existingConfidence = Number(existing.confidence);
+  return (
+    Number.isFinite(existingConfidence) && incoming.confidence < existingConfidence
+  );
 }
 
 async function nextOperatorTurnIndex(

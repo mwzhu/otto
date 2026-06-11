@@ -896,8 +896,6 @@ export async function phraseDirectorSteeringTurn(
     onTextDelta?: (delta: string, textSoFar: string) => void | Promise<void>;
   } = {},
 ) {
-  // TODO(operator): mirror the directive/anchor/verbatim steering sections in
-  // lib/interview/operator/brain.ts once the director version is verified.
   return phraseDirectorTurnDetailed({
     plan: {
       ...input.plan,

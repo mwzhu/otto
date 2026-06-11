@@ -498,6 +498,21 @@ director version is verified — the operator demo (live screenshare) hits the
 same code shapes, and its speech is still synchronously gated on the turn-plan
 call, making it *more* sensitive to these failures, not less.
 
+> **Operator mirrors landed (2026-06-10):** Tasks 1, 2, 3, 4b, and 9 are
+> mirrored in the operator path (`lib/interview/operator/brain.ts`,
+> `probe-library.ts`, `turn-transaction.ts`, `probes/operator.yaml`,
+> `prompts/operator.voice.phrase-intent.md`; tests in
+> `tests/phase1/operator-steering.test.ts`). Operator turns now record
+> `probe_firings` rows, so cooldowns/max_fires are enforceable. Two deliberate
+> divergences: (a) Task 11's answered-probe guard is not mirrored — operator
+> probes are repeatable by design (the step loop), so cooldowns plus the
+> provisional guard cover the repeat class, and the step-advance intents
+> (`capture_next_step`, `clarify_operator_step`) are exempt from the
+> provisional guard; (b) Task 3's filled-requires-shape demotion is skipped —
+> no per-slot shape table exists for operator slots. Tasks 4a and 6 operator
+> items shipped with Round 1 (checker routing/budget, strict tool use,
+> turn-plan budget).
+
 ---
 
 ## Parallel execution lanes (for agent-based implementation)

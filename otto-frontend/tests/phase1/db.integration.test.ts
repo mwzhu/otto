@@ -128,6 +128,8 @@ const demoClaimReplayCaptureId = "e0e0e0e0-e0e0-5e0e-8e0e-e0e0e0e0e0e0";
 const demoClaimReplayEvidenceId = "e1e1e1e1-e1e1-5e1e-8e1e-e1e1e1e1e1e1";
 const drainRetryCaptureId = "e2e2e2e2-e2e2-5e2e-8e2e-e2e2e2e2e2e2";
 const drainRetryEvidenceId = "e3e3e3e3-e3e3-5e3e-8e3e-e3e3e3e3e3e3";
+const functionNameClobberCaptureId = "e4e4e4e4-e4e4-5e4e-8e4e-e4e4e4e4e4e4";
+const functionNameClobberEvidenceId = "e5e5e5e5-e5e5-5e5e-8e5e-e5e5e5e5e5e5";
 
 let connectionString = "";
 let appClient: Client;
@@ -5258,6 +5260,74 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
     expect(afterMetadata.acceptance.has_configured_tts_runtime).toBe(true);
     expect(afterMetadata.acceptance.has_privacy_configured_tts_runtime).toBe(true);
   });
+
+  // Task 9: replaying session 83fdd5a6's two function.name turns — the good
+  // "VP of operations" answer followed by the garbled deflection "those
+  // employees I just mentioned" — must leave the stored slot value as
+  // "VP of operations" (the deflection is blocked by the downgrade guard).
+  test("a non-answer does not clobber a filled function.name slot", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [functionNameClobberCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO evidence (id, org_id, workspace_id, source_type, evidence_label, quote)
+        VALUES ($1, $2, $3, 'transcript_segment', 'stated_director', 'I am the VP of operations.')
+        ON CONFLICT (id) DO NOTHING
+      `,
+      [functionNameClobberEvidenceId, orgId, workspaceId],
+    );
+
+    const { updateSlotState } = await import("@/lib/interview/director/tools");
+    const toolContext = {
+      orgId,
+      workspaceId,
+      captureSessionId: functionNameClobberCaptureId,
+      userId,
+    };
+
+    // Turn 1: the correct answer lands filled.
+    await updateSlotState(toolContext, {
+      slotPath: "function.name",
+      value: { function_name: "VP of operations" },
+      status: "filled",
+      confidence: 0.9,
+      evidenceIds: [functionNameClobberEvidenceId],
+    });
+
+    // Turn 2: the garbled deflection tries to overwrite it.
+    await updateSlotState(toolContext, {
+      slotPath: "function.name",
+      value: { function_name: "Those Peep Those Employees I Just Mentioned" },
+      status: "filled",
+      confidence: 0.78,
+      evidenceIds: [functionNameClobberEvidenceId],
+    });
+
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    const rows = await appClient.query(
+      `
+        SELECT value, status, confidence
+        FROM slot_states
+        WHERE capture_session_id = $1
+          AND slot_path = 'function.name'
+          AND candidate_process_id IS NULL
+      `,
+      [functionNameClobberCaptureId],
+    );
+
+    expect(rows.rows).toHaveLength(1);
+    expect(rows.rows[0].value).toEqual({ function_name: "VP of operations" });
+    expect(rows.rows[0].status).toBe("filled");
+    expect(Number(rows.rows[0].confidence)).toBe(0.9);
+  }, 30_000);
 });
 
 async function seedWeek2Graph(client: Client) {

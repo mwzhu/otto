@@ -60,6 +60,7 @@ import {
   ownershipRolesValue,
   processBoundaryValue,
 } from "@/lib/interview/director/slot-values";
+import { isNonAnswerSlotExtraction } from "@/lib/interview/director/slot-non-answer";
 import {
   allowedDirectorClaimSubjects,
   validateDirectorPlanClaim,
@@ -956,10 +957,31 @@ export function materializeDirectorProcessInventory(
       normalizeCandidateProcessName(candidate.name),
     ),
   );
+  // The recordProcess tools below already emit a proposed_name claim for each
+  // materialized candidate (see recordProcess in tools.ts). Drop the original
+  // proposed_name claim tools that fed materialization: an exact survivor is
+  // redundant with its recordProcess, and a collapsed atom (Task 7 dedup) must
+  // not survive — re-emitting "Purchasing" here would resurface the duplicate
+  // candidate that the dedup just merged into "purchasing and replenishment".
+  const materializedTokenSets = materializedCandidates.map((candidate) =>
+    candidateNameTokenSet(candidate.name),
+  );
+  const isCoveredByMaterializedCandidate = (processName: string) => {
+    const normalized = normalizeCandidateProcessName(processName);
+    if (materializedNames.has(normalized)) return true;
+    const tokens = candidateNameTokenSet(processName);
+    if (tokens.size === 0) return false;
+    return materializedTokenSets.some(
+      (survivorTokens) =>
+        survivorTokens.size > 0 &&
+        (isTokenSubset(tokens, survivorTokens) ||
+          isTokenSubset(survivorTokens, tokens)),
+    );
+  };
   const retainedToolCalls = plan.tool_calls.filter((tool) => {
     if (!isProposedNameCandidateTool(tool)) return true;
     const processName = processNameFromProposedNameTool(tool);
-    return !processName || !materializedNames.has(normalizeCandidateProcessName(processName));
+    return !processName || !isCoveredByMaterializedCandidate(processName);
   });
   const seenRecordProcesses = new Set(
     retainedToolCalls
@@ -1031,7 +1053,103 @@ function directorProcessCandidatesFromPlan(plan: DirectorTurnPlan) {
     addCandidate(processName, numberArg(tool.arguments.confidence) ?? 0.74);
   }
 
-  return candidates;
+  return collapseRelatedCandidateProcesses(candidates);
+}
+
+// Task 7: deterministic dedup guard at candidate creation. The extractor still
+// sometimes splits a compound name ("purchasing and replenishment") into atoms
+// ("Purchasing", "Replenishment") while keeping the original phrase, producing
+// duplicate, fragmented candidates. Collapse a candidate whose significant-word
+// set is a subset/superset of another same-turn candidate's into a single row.
+// When one name contains the other we keep the fuller (superset) phrasing — the
+// director's compound name is their intent, while the split atoms are exactly
+// the over-extraction artifact we are suppressing (so "purchasing and
+// replenishment" survives, "Purchasing"/"Replenishment" collapse into it). When
+// the significant-word sets are equal (pure case/whitespace dupes) the
+// higher-confidence row wins. This only collapses true containment pairs —
+// "Order Picking" and "Order Intake" share a word but neither contains the
+// other, so they are NOT merged here; the prompt rules are responsible for not
+// promoting sub-steps into candidates in the first place.
+//
+// NOTE (deviation from BUG_FIXES.md Task 7): the plan says "keeping the
+// director's phrasing and the higher-confidence row", but in the session-83fdd5a6
+// evidence those two criteria conflict — the compound carries the director's
+// phrasing at 0.74 while the split atoms sit at 0.93. We prioritize the
+// director's phrasing (superset) over raw confidence for containment pairs so a
+// compound name stays a single candidate, which is the stated desired outcome.
+function collapseRelatedCandidateProcesses<
+  T extends { name: string; confidence: number },
+>(candidates: T[]): T[] {
+  const kept: Array<{ candidate: T; tokens: Set<string> }> = [];
+  for (const candidate of candidates) {
+    const tokens = candidateNameTokenSet(candidate.name);
+    if (tokens.size === 0) {
+      kept.push({ candidate, tokens });
+      continue;
+    }
+    const relatedIndex = kept.findIndex(
+      (entry) =>
+        entry.tokens.size > 0 &&
+        (isTokenSubset(tokens, entry.tokens) || isTokenSubset(entry.tokens, tokens)),
+    );
+    if (relatedIndex === -1) {
+      kept.push({ candidate, tokens });
+      continue;
+    }
+    const existing = kept[relatedIndex];
+    if (preferIncomingCandidate(candidate, tokens, existing.candidate, existing.tokens)) {
+      kept[relatedIndex] = { candidate, tokens };
+    }
+  }
+  return kept.map((entry) => entry.candidate);
+}
+
+const CANDIDATE_NAME_STOPWORDS = new Set([
+  "and",
+  "or",
+  "the",
+  "a",
+  "an",
+  "of",
+  "for",
+  "to",
+  "with",
+  "plus",
+]);
+
+function candidateNameTokenSet(name: string): Set<string> {
+  const tokens = normalizeCandidateProcessName(name)
+    .replace(/[^a-z0-9\s]+/g, " ")
+    .split(/\s+/)
+    .filter((token) => token.length > 0 && !CANDIDATE_NAME_STOPWORDS.has(token));
+  return new Set(tokens);
+}
+
+function isTokenSubset(subset: Set<string>, superset: Set<string>): boolean {
+  if (subset.size === 0 || subset.size > superset.size) return false;
+  for (const token of subset) {
+    if (!superset.has(token)) return false;
+  }
+  return true;
+}
+
+function preferIncomingCandidate(
+  incoming: { name: string; confidence: number },
+  incomingTokens: Set<string>,
+  existing: { name: string; confidence: number },
+  existingTokens: Set<string>,
+): boolean {
+  // Containment pair: keep the fuller (superset) phrasing, which is the
+  // director's compound name, over the split atom — regardless of confidence.
+  if (incomingTokens.size !== existingTokens.size) {
+    return incomingTokens.size > existingTokens.size;
+  }
+  // Equal significant-word sets (pure case/whitespace duplicates): the
+  // higher-confidence row wins; ties keep the longer literal phrasing.
+  if (incoming.confidence !== existing.confidence) {
+    return incoming.confidence > existing.confidence;
+  }
+  return incoming.name.trim().length > existing.name.trim().length;
 }
 
 function processNamesFromInventoryValue(value: unknown): string[] {
@@ -1265,39 +1383,6 @@ export function normalizeSlotExtractionEvidence(
 }
 
 const INFERRED_EXTRACTION_CONFIDENCE_CAP = 0.45;
-
-const NON_ANSWER_VALUE_PATTERN =
-  /\b(?:not (?:really |entirely |quite )?sure|i don'?t (?:really |actually )?know|no idea|hard to say|you(?:'d| would) have to ask|i(?:'d| would) have to (?:ask|check)|couldn'?t (?:tell|say)|i'?m not certain|don'?t quote me)\b/i;
-
-function isNonAnswerSlotExtraction(
-  value: unknown,
-  utteranceType?: DirectorUtteranceType,
-) {
-  if (value === undefined) return false;
-  if (utteranceType === "dont_know" || utteranceType === "non_answer") {
-    return true;
-  }
-  const text = extractionValueText(value);
-  return text.length > 0 && NON_ANSWER_VALUE_PATTERN.test(text);
-}
-
-function extractionValueText(value: unknown, depth = 0): string {
-  if (depth > 3 || value === undefined || value === null) return "";
-  if (typeof value === "string") return value;
-  if (Array.isArray(value)) {
-    return value
-      .map((entry) => extractionValueText(entry, depth + 1))
-      .filter(Boolean)
-      .join(" ");
-  }
-  if (typeof value === "object") {
-    return Object.values(value as Record<string, unknown>)
-      .map((entry) => extractionValueText(entry, depth + 1))
-      .filter(Boolean)
-      .join(" ");
-  }
-  return "";
-}
 
 function isInferredExtractionRecord(metadata: unknown, value: unknown) {
   if (

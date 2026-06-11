@@ -417,18 +417,32 @@ export async function buildDirectorSteeringPlan(
     // burns director trust. Keep these excluded until a re-extract succeeds.
     ...pendingReExtractSlotPaths(currentSlots),
   ]);
+  const candidateProcessNames = candidateSummaries.map(
+    (candidate) => candidate.proposedName,
+  );
+  // Task 11: probes the director substantively answered this session are
+  // excluded even if their slot landed partial or mis-scoped, with focus
+  // selection / inventory firing at most once once satisfied.
+  const answeredProbeIntents = answeredProbeIntentsThisSession({
+    recentFirings: probeFiringRows,
+    latestUtterance: input.latestUtterance,
+    currentSlots,
+    candidateProcessNames,
+    focusCandidateProcessId: state.focusCandidateProcessId,
+  });
   const plan = deterministicTurnPlan({
     latestUtterance: input.latestUtterance,
     evidenceIds: input.evidenceIds,
     currentSlots,
     currentPhase: state.currentPhase,
-    candidateProcessNames: candidateSummaries.map((candidate) => candidate.proposedName),
+    candidateProcessNames,
     priorIntent: state.priorIntent,
     lowInfoTurnCount: state.lowInfoTurnCount,
     lastNewSlotTurnIndex: state.lastNewSlotTurnIndex,
     turnIndex: input.turnIndex,
     probeFiringSummaries,
     provisionallyAnsweredSlots,
+    answeredProbeIntents,
   });
   const rankedIntents = plan.ranked_intents.length
     ? plan.ranked_intents
@@ -442,8 +456,19 @@ export async function buildDirectorSteeringPlan(
   const filledSlots = Array.from(currentSlots.entries())
     .filter(([, slot]) => ["filled", "asked_unknown"].includes(slot.status))
     .map(([slotPath]) => slotPath);
+  // Task 10: when a focus candidate is recorded, its name is the authoritative
+  // focus process — the spoken probe must target it, not whatever process the
+  // chooser inferred from the latest answer (which is how session 83fdd5a6
+  // drifted to "returns and credit memos" while focused on "order intake").
+  const focusCandidateName = state.focusCandidateProcessId
+    ? candidateSummaries.find(
+        (candidate) => candidate.id === state.focusCandidateProcessId,
+      )?.proposedName
+    : undefined;
   const focusProcessName =
-    chosenIntent.target_process ?? candidateSummaries[0]?.proposedName;
+    focusCandidateName ??
+    chosenIntent.target_process ??
+    candidateSummaries[0]?.proposedName;
   const metadata = fallbackMetadata("director.turn.steering", started);
   return {
     plan: normalizedPlan,
@@ -593,7 +618,11 @@ export function directorIntentDirective(
         ? ` and fills the "${chosenIntent.target_slot}" slot.`
         : ".") +
       " Stay at the process level; do not ask for step-by-step detail.";
-  const target = chosenIntent.target_process ?? focusProcessName;
+  // Task 10: the recorded focus process is authoritative — prefer it over the
+  // chooser's inferred target_process so the spoken probe stays on the focus.
+  // (When no focus name is supplied, e.g. unit calls, fall back to the intent's
+  // own target_process so focus-selection directives still name a candidate.)
+  const target = focusProcessName ?? chosenIntent.target_process;
   if (target && base.includes("focus process")) {
     return `${base} The focus process is "${target}".`;
   }
@@ -749,6 +778,97 @@ export function pendingReExtractSlotPaths(
   return [...currentSlots.entries()]
     .filter(([, slot]) => slot.status === "pending_re_extract")
     .map(([slotPath]) => slotPath);
+}
+
+function directorSlotHasValue(
+  currentSlots: Map<string, { status: string }>,
+  slotPath: string,
+): boolean {
+  const status = currentSlots.get(slotPath)?.status;
+  // "partial" counts: the director substantively answered even if extraction
+  // only landed a partial value (Task 11's whole point) — as does a committed
+  // value or an explicit asked_unknown.
+  return (
+    status === "filled" ||
+    status === "partial" ||
+    status === "asked_unknown" ||
+    status === "conflicting"
+  );
+}
+
+/**
+ * Task 11: probe intents the director has already substantively answered this
+ * session, so the chooser must not re-ask them even if the resulting slot is
+ * `partial` or got scoped to a different candidate (Task 10's failure mode).
+ * This is broader than the Task 2 provisional guard (which only covers in-flight
+ * extractions) — it keys on probe_firings + the reply, independent of the slot's
+ * final status. Returns intent names for applySteeringIntentExclusions.
+ *
+ * - A probe that fired at a turn strictly before the most recent firing has, by
+ *   definition, been replied to and the conversation moved on → answered.
+ * - The most recent firing counts as answered only when the current utterance is
+ *   a substantive/partial reply (mirrors the provisional guard; a don't-know /
+ *   non-answer keeps it eligible to re-approach).
+ * - Focus selection (define_process_boundary) and inventory (discover_processes)
+ *   are special-cased to fire at most once *once satisfied*: a focus is set / the
+ *   boundary slot has a value, or any candidate exists / the inventory slot has a
+ *   value. They stay eligible until satisfied so the breadth sweep still runs.
+ */
+export function answeredProbeIntentsThisSession(input: {
+  recentFirings: DirectorProbeFiringRow[];
+  latestUtterance: string;
+  currentSlots: Map<string, { status: string }>;
+  candidateProcessNames: string[];
+  focusCandidateProcessId?: string;
+}): string[] {
+  const answered = new Set<string>();
+  const ordered = orderProbeFiringsByRecency(input.recentFirings);
+  const latestFiringTurn = ordered[0]?.turnIndex ?? null;
+  const latestUtteranceType = classifyUtterance(input.latestUtterance);
+  const latestReplySubstantive =
+    latestUtteranceType === "substantive_answer" ||
+    latestUtteranceType === "partial_answer";
+
+  for (const firing of ordered) {
+    if (!firing.probeId || firing.turnIndex === null) continue;
+    const isLatestFiring =
+      latestFiringTurn !== null && firing.turnIndex === latestFiringTurn;
+    if (isLatestFiring) {
+      // The current utterance is the reply to the latest probe; only a
+      // substantive reply marks it answered.
+      if (latestReplySubstantive) answered.add(firing.probeId);
+    } else {
+      // An earlier firing was already replied to (a newer probe fired after it).
+      answered.add(firing.probeId);
+    }
+  }
+
+  // Special one-shot probes: keep firing until satisfied, then never again.
+  const firedIntents = new Set(
+    ordered
+      .map((firing) => firing.probeId)
+      .filter((probeId): probeId is string => Boolean(probeId)),
+  );
+  const inventorySatisfied =
+    input.candidateProcessNames.length > 0 ||
+    directorSlotHasValue(input.currentSlots, "process.inventory");
+  if (firedIntents.has("discover_processes") && inventorySatisfied) {
+    answered.add("discover_processes");
+  } else {
+    // Not yet satisfied: the breadth sweep must stay eligible even if it fired
+    // on an earlier turn, so undo the general earlier-firing exclusion.
+    answered.delete("discover_processes");
+  }
+  const focusSelectionSatisfied =
+    Boolean(input.focusCandidateProcessId) ||
+    directorSlotHasValue(input.currentSlots, "scope.boundaries");
+  if (firedIntents.has("define_process_boundary") && focusSelectionSatisfied) {
+    answered.add("define_process_boundary");
+  } else {
+    answered.delete("define_process_boundary");
+  }
+
+  return [...answered];
 }
 
 function uniqueNumbers(values: number[]) {
@@ -1859,10 +1979,15 @@ export async function dispatchDirectorTurnPlan(
       }
     }
 
+    // Task 10: scope enrich-phase slot writes to the focus candidate. The phase
+    // the turn is settling into governs whether focus is authoritative (same
+    // phase written to interview_state and recorded on the probe firing below).
+    const slotScopingPhase = plan.proposed_next_phase;
     const scopedSlotUpdates = await scopeSlotUpdatesToCandidateProcess(
       context,
       plan.slot_updates,
       activeCandidateId,
+      slotScopingPhase,
       tx,
     );
     plan = { ...plan, slot_updates: scopedSlotUpdates };
@@ -1896,6 +2021,14 @@ export async function dispatchDirectorTurnPlan(
     for (const createdEntity of claimResolution.createdEntities) {
       createdClaimEntities.push(createdEntity);
     }
+    // Task 12: a claim that fails subject resolution queues a "Review invalid
+    // director claim subject" follow-up. A *recoverable* failure (a
+    // candidate/person/system/role named in the conversation but not created
+    // this turn) is a deferred retry: drainDirectorRetryClaimTasks replays it
+    // once the entity appears — no data is lost, so it must not set the degrade
+    // flag. Only genuinely-dropped claims (unknown subject type, hallucinated /
+    // out-of-session reference) count toward claim_subject_validation_failed.
+    let droppedSubjectClaims = 0;
     for (const invalidClaim of claimResolution.invalid) {
       await createFollowUpTask(
         context,
@@ -1910,10 +2043,11 @@ export async function dispatchDirectorTurnPlan(
         },
         { tx },
       );
-    }
-    degradedQuality = degradedQuality || claimResolution.invalid.length > 0;
-    if (claimResolution.invalid.length > 0) {
-      degradedReasons.add("claim_subject_validation_failed");
+      // A recoverable invalid stays queued for drainDirectorRetryClaimTasks to
+      // replay once its entity exists in a later turn — it lost no data, so it
+      // does not count toward the degrade flag. Only non-recoverable invalids
+      // are genuinely dropped.
+      if (!invalidClaim.recoverable) droppedSubjectClaims += 1;
     }
     const claimDispatch = await dispatchPlanClaims(
       context,
@@ -1930,6 +2064,12 @@ export async function dispatchDirectorTurnPlan(
     // Task 5: replay queued retry/review claim tasks whose target entity was
     // created by this dispatch (out-of-order extraction windows are real).
     await drainDirectorRetryClaimTasks(context, createdClaimEntities, tx);
+    // Task 12: gate the degrade signal on the genuinely-dropped claims only, so
+    // a turn that merely deferred a recoverable claim does not read as degraded.
+    if (droppedSubjectClaims > 0) {
+      degradedQuality = true;
+      degradedReasons.add("claim_subject_validation_failed");
+    }
 
     if (degradedQuality) {
       if (degradedReasons.size === 0) {
@@ -1956,7 +2096,11 @@ export async function dispatchDirectorTurnPlan(
         chosenIntent.target_slot,
         new Date(),
         { tx },
-        candidateIdForSlot(chosenIntent.target_slot, activeCandidateId),
+        candidateIdForSlot(
+          chosenIntent.target_slot,
+          activeCandidateId,
+          slotScopingPhase,
+        ),
       );
     }
     if (advanceConversationState) {
@@ -2000,7 +2144,11 @@ export async function dispatchDirectorTurnPlan(
               ? await readResolvedSlotStatusAfterProbe(
                   context,
                   chosenIntent.target_slot,
-                  candidateIdForSlot(chosenIntent.target_slot, activeCandidateId),
+                  candidateIdForSlot(
+                    chosenIntent.target_slot,
+                    activeCandidateId,
+                    slotScopingPhase,
+                  ),
                   tx,
                 )
             : undefined,
@@ -3221,18 +3369,37 @@ async function scopeSlotUpdatesToCandidateProcess(
   context: DirectorToolContext,
   slotUpdates: DirectorTurnPlan["slot_updates"],
   activeCandidateId: string | undefined,
+  phase: DirectorInterviewPhase,
   tx: ClaimWriteTx,
 ) {
   const scoped: DirectorTurnPlan["slot_updates"] = [];
   for (const slotUpdate of slotUpdates) {
-    const requestedCandidateId =
-      slotUpdate.candidate_process_id ??
-      candidateIdForSlot(slotUpdate.slot_path, activeCandidateId);
+    const resolution = resolveDirectorSlotCandidateProcessId({
+      slotPath: slotUpdate.slot_path,
+      extractorCandidateId: slotUpdate.candidate_process_id,
+      focusCandidateId: activeCandidateId,
+      phase,
+    });
+    // The focus candidate is read from interview_state and is already
+    // session-validated, so only an extractor-supplied (non-focus) candidate
+    // needs the belongs-to-session guard before it can scope a write.
     const candidateProcessId =
-      requestedCandidateId &&
-      (await candidateProcessBelongsToSession(context, requestedCandidateId, tx))
-        ? requestedCandidateId
-        : undefined;
+      resolution.candidateProcessId === undefined
+        ? undefined
+        : resolution.authoritative
+          ? resolution.candidateProcessId
+          : (await candidateProcessBelongsToSession(
+              context,
+              resolution.candidateProcessId,
+              tx,
+            ))
+            ? resolution.candidateProcessId
+            : // The extractor named a candidate that is not in this session;
+              // fall back to the focus candidate so enrich data still lands on
+              // the process under discussion instead of being silently dropped.
+              activeCandidateId && !isCaptureLevelDirectorSlot(slotUpdate.slot_path)
+              ? activeCandidateId
+              : undefined;
     scoped.push({
       ...slotUpdate,
       ...(candidateProcessId ? { candidate_process_id: candidateProcessId } : {}),
@@ -3241,8 +3408,65 @@ async function scopeSlotUpdatesToCandidateProcess(
   return scoped;
 }
 
-function candidateIdForSlot(slotPath: string, activeCandidateId?: string) {
-  return isCaptureLevelDirectorSlot(slotPath) ? undefined : activeCandidateId;
+/**
+ * Task 10: decide which candidate_process a slot write scopes to. The focus
+ * candidate must be authoritative during expand/enrich so that, while a focus
+ * process is set, enrich data lands on it — not on whichever candidate the
+ * extractor last inferred from the answer content (session 83fdd5a6 chose
+ * "order intake" but enrich slots landed on the "returns and credit memos"
+ * candidate). Pure so the scoping rule is unit-testable without a database.
+ *
+ * - Capture-level slots (function.name, process.inventory) never scope to a
+ *   candidate, in any phase.
+ * - During expand/enrich with a focus set, process-scoped slots are forced onto
+ *   the focus candidate (authoritative), overriding an extractor-supplied
+ *   non-focus candidate. A genuine focus switch is already reflected in
+ *   `focusCandidateId` (resolved upstream by selectActiveCandidateProcessId
+ *   from plan.focus_candidate_process_id), so this does not block switches.
+ * - In other phases (orient/inventory/closeout) or with no focus, an
+ *   extractor-supplied candidate is honored (subject to a session check by the
+ *   caller), falling back to the focus candidate.
+ *
+ * TODO(operator): mirror this focus-authoritative slot scoping in the operator
+ * dispatch once the director version is verified.
+ */
+export function resolveDirectorSlotCandidateProcessId(input: {
+  slotPath: string;
+  extractorCandidateId?: string;
+  focusCandidateId?: string;
+  phase: DirectorInterviewPhase;
+}): { candidateProcessId?: string; authoritative: boolean } {
+  if (isCaptureLevelDirectorSlot(input.slotPath)) {
+    return { candidateProcessId: undefined, authoritative: true };
+  }
+  const focusAuthoritative =
+    (input.phase === "expand" || input.phase === "enrich") &&
+    Boolean(input.focusCandidateId);
+  if (focusAuthoritative) {
+    return { candidateProcessId: input.focusCandidateId, authoritative: true };
+  }
+  if (input.extractorCandidateId) {
+    return { candidateProcessId: input.extractorCandidateId, authoritative: false };
+  }
+  return { candidateProcessId: input.focusCandidateId, authoritative: true };
+}
+
+/**
+ * Task 10: the candidate_process id a slot read/touch should target, matching
+ * where scopeSlotUpdatesToCandidateProcess would write the same slot. Used for
+ * touchSlotAskedAt and the probe-firing resolved-status read so the firing
+ * reflects the slot that actually got written.
+ */
+function candidateIdForSlot(
+  slotPath: string,
+  activeCandidateId: string | undefined,
+  phase: DirectorInterviewPhase,
+) {
+  return resolveDirectorSlotCandidateProcessId({
+    slotPath,
+    focusCandidateId: activeCandidateId,
+    phase,
+  }).candidateProcessId;
 }
 
 async function candidateProcessIdForTool(
@@ -3498,6 +3722,16 @@ function directorClaimFollowUpContext(claim: DirectorPlanClaim) {
  * 3. person/system subjects that resolve to nothing but carry evidence are
  *    created with the same semantics as recordPerson/recordSystem.
  * Unresolvable subjects stay hard-rejected.
+ *
+ * Task 12: each invalid claim is tagged `recoverable`. A recoverable invalid is
+ * one whose subject only failed because its entity does not exist *yet* (a
+ * candidate/person/system/role named in the conversation but not created this
+ * turn). The "Review invalid director claim subject" follow-up it queues is
+ * replayable by drainDirectorRetryClaimTasks once the entity appears in a later
+ * turn — so it is a deferred retry, not a dropped claim, and must not flip the
+ * claim_subject_validation_failed degrade signal. A non-recoverable invalid
+ * (unknown subject type, hallucinated/out-of-session reference) is genuinely
+ * dropped and the only one the flag should report.
  */
 export async function resolveDirectorPlanClaimSubjects(
   context: DirectorToolContext,
@@ -3506,11 +3740,15 @@ export async function resolveDirectorPlanClaimSubjects(
   tx: ClaimWriteTx,
 ): Promise<{
   claims: DirectorTurnPlan["claims"];
-  invalid: Array<{ claim: DirectorPlanClaim; reason: string }>;
+  invalid: Array<{ claim: DirectorPlanClaim; reason: string; recoverable: boolean }>;
   createdEntities: DirectorCreatedClaimEntity[];
 }> {
   const resolved: DirectorTurnPlan["claims"] = [];
-  const invalid: Array<{ claim: DirectorPlanClaim; reason: string }> = [];
+  const invalid: Array<{
+    claim: DirectorPlanClaim;
+    reason: string;
+    recoverable: boolean;
+  }> = [];
   const createdEntities: DirectorCreatedClaimEntity[] = [];
 
   for (const originalClaim of claims) {
@@ -3547,6 +3785,9 @@ export async function resolveDirectorPlanClaimSubjects(
           claim: originalClaim,
           reason:
             "Director Phase 1 claims must target candidate_process subjects until promotion, and no session candidate process was available to remap this claim onto.",
+          // The remap only failed because no candidate exists yet; a later turn
+          // can create it and the queued follow-up drains then.
+          recoverable: directorInvalidClaimRecoverable("candidate_process", claim),
         });
         continue;
       }
@@ -3584,6 +3825,7 @@ export async function resolveDirectorPlanClaimSubjects(
           claim: originalClaim,
           reason:
             "Director candidate_process claims must target a candidate from this capture session.",
+          recoverable: directorInvalidClaimRecoverable("candidate_process", claim),
         });
         continue;
       }
@@ -3600,7 +3842,11 @@ export async function resolveDirectorPlanClaimSubjects(
         tx,
       );
       if (!resolution.id) {
-        invalid.push({ claim: originalClaim, reason: resolution.failureReason });
+        invalid.push({
+          claim: originalClaim,
+          reason: resolution.failureReason,
+          recoverable: directorInvalidClaimRecoverable(claim.subject_type, claim),
+        });
         continue;
       }
       if (resolution.created) createdEntities.push(resolution.created);
@@ -3609,6 +3855,8 @@ export async function resolveDirectorPlanClaimSubjects(
       invalid.push({
         claim: originalClaim,
         reason: `Director claims for subject type ${claim.subject_type} must reference an existing row id.`,
+        // An unknown subject type the drain cannot replay: genuinely dropped.
+        recoverable: false,
       });
       continue;
     }
@@ -3637,6 +3885,9 @@ export async function resolveDirectorPlanClaimSubjects(
         claim: originalClaim,
         reason:
           "Director claims that reference candidate_process_id must reference this capture session.",
+        // The value points at a candidate outside this session: a genuine
+        // hallucination the drain cannot repair.
+        recoverable: false,
       });
       continue;
     }
@@ -3644,6 +3895,38 @@ export async function resolveDirectorPlanClaimSubjects(
     resolved.push(claim);
   }
   return { claims: resolved, invalid, createdEntities };
+}
+
+/**
+ * Task 12: an invalid claim is recoverable when the follow-up it queues can be
+ * replayed later by drainDirectorRetryClaimTasks. That requires (a) a subject
+ * type the drain matches on, (b) a name reference to match a future-created
+ * entity against, and (c) a replayable payload (field + value + evidence). Only
+ * non-recoverable invalids represent genuinely dropped claims, so only they set
+ * the claim_subject_validation_failed degrade flag.
+ */
+export function directorInvalidClaimRecoverable(
+  subjectType: DirectorCreatedClaimEntity["type"] | string,
+  claim: DirectorPlanClaim,
+): boolean {
+  if (
+    subjectType !== "candidate_process" &&
+    subjectType !== "person" &&
+    subjectType !== "system" &&
+    subjectType !== "role"
+  ) {
+    return false;
+  }
+  const nameReference = isUuidString(claim.subject_id)
+    ? claimSubjectNameHint(claim)
+    : claim.subject_id;
+  if (!nameReference || !normalizeDirectorEntityName(nameReference)) return false;
+  const replayableEvidence = claim.evidence_ids.some((evidenceId) =>
+    isUuidString(evidenceId),
+  );
+  return (
+    Boolean(claim.field) && claim.value !== undefined && replayableEvidence
+  );
 }
 
 function claimSubjectNameHint(claim: DirectorPlanClaim) {
@@ -4535,32 +4818,45 @@ function applyProbeControls(
 }
 
 /**
- * Task 2: hard exclusion pass for the deterministic intent chooser.
+ * Task 2 + Task 11: hard exclusion pass for the deterministic intent chooser.
  * Enforces cooldown_seconds/max_fires from probes/director.yaml against
- * probe_firings, and skips probes whose target slot is provisionally answered
- * (asked + substantively answered while extraction is uncommitted). Falls back
- * to a non-repeating bridge intent when every candidate is excluded.
+ * probe_firings, skips probes whose target slot is provisionally answered
+ * (asked + substantively answered while extraction is uncommitted), and (Task
+ * 11) skips intents the director already substantively answered this session —
+ * independent of the slot's final status — so a `partial` or mis-scoped answer
+ * is not re-asked. Falls back to a non-repeating bridge intent when every
+ * candidate is excluded.
+ *
+ * The provisional-slot guard (by slot path) and the answered-intent guard (by
+ * intent name) are applied as a single filter pass so an overlapping probe is
+ * excluded once, not double-counted against the bridge fallback.
  */
 export function applySteeringIntentExclusions(
   rankedIntents: DirectorIntent[],
   input: {
     probeFiringSummaries?: Map<string, ProbeFiringSummary>;
     provisionallyAnsweredSlots?: string[];
+    answeredProbeIntents?: string[];
     proposedNextPhase: DirectorInterviewPhase;
     candidateProcessNames: string[];
   },
 ): DirectorIntent[] {
   const provisional = new Set(input.provisionallyAnsweredSlots ?? []);
+  const answeredIntents = new Set(input.answeredProbeIntents ?? []);
   let eligible = input.probeFiringSummaries
     ? applyProbeControls(rankedIntents, input.probeFiringSummaries)
     : rankedIntents;
-  if (provisional.size > 0) {
-    eligible = eligible.filter(
-      (candidate) =>
-        isControllerExemptIntent(candidate) ||
-        !candidate.target_slot ||
-        !provisional.has(candidate.target_slot),
-    );
+  if (provisional.size > 0 || answeredIntents.size > 0) {
+    eligible = eligible.filter((candidate) => {
+      if (isControllerExemptIntent(candidate)) return true;
+      // Task 11: already substantively answered this session.
+      if (answeredIntents.has(candidate.intent)) return false;
+      // Task 2: target slot provisionally answered (extraction in flight).
+      if (candidate.target_slot && provisional.has(candidate.target_slot)) {
+        return false;
+      }
+      return true;
+    });
   }
   if (eligible.length > 0 || rankedIntents.length === 0) return eligible;
   return [
@@ -4954,6 +5250,8 @@ export function deterministicTurnPlan(input: {
   probeFiringSummaries?: Map<string, ProbeFiringSummary>;
   /** Slots whose probe was asked and answered while extraction is uncommitted (Task 2). */
   provisionallyAnsweredSlots?: string[];
+  /** Intents already substantively answered this session (Task 11). */
+  answeredProbeIntents?: string[];
 }): DirectorTurnPlan {
   const slotUpdates: Array<{
     slot_path: string;
@@ -5242,6 +5540,7 @@ export function deterministicTurnPlan(input: {
     {
       probeFiringSummaries: input.probeFiringSummaries,
       provisionallyAnsweredSlots: input.provisionallyAnsweredSlots,
+      answeredProbeIntents: input.answeredProbeIntents,
       proposedNextPhase,
       candidateProcessNames: input.candidateProcessNames,
     },

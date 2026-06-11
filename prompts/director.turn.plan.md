@@ -84,6 +84,29 @@ For Phase 1 director interviews, attach process-level claims to
 `candidate_process` subjects only. Do not write claims against canonical
 `process` or `process_version` subjects until a candidate has been promoted.
 
+## Candidate Process Rules
+
+When the director lists the processes their team owns, create exactly one
+candidate process per process they actually name. Be conservative:
+
+- Emit the processes the director names and no more. Preserve their phrasing
+  (normalize only obvious capitalization).
+- Never split a compound process name into separate candidates. If the director
+  says "purchasing and replenishment", "returns and credit memos", or "new
+  customer onboarding and credit setup", that is **one** candidate each — keep
+  the full phrase. Do not also emit "Purchasing", "Replenishment", "Returns",
+  etc. as their own candidates.
+- Only split a compound into separate candidates when the director clearly
+  enumerates them as distinct processes (e.g. "we have purchasing, and
+  separately we have replenishment").
+- Never promote a sub-step or workflow stage into a standalone candidate. When
+  describing one process — for example "order intake" — its internal stages
+  (order picking, shipping, invoicing) are steps of that process, not separate
+  candidates, unless the director independently lists them as their own
+  processes.
+- Do not emit near-duplicate candidates that differ only by case or
+  granularity. One named process maps to one candidate.
+
 ## Probe Rules
 
 Use `probes/director.yaml` for intent names, target slots, expected answer shape,

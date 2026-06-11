@@ -25,6 +25,7 @@ import {
   type DirectorSlotStatus,
 } from "@/lib/interview/director/slot-schema";
 import { normalizeDirectorSlotValue } from "@/lib/interview/director/slot-values";
+import { isNonAnswerSlotExtraction } from "@/lib/interview/director/slot-non-answer";
 import { stableStringify } from "@/lib/http/json";
 import { sanitizeForLogs, sanitizeJsonForLogs } from "@/lib/security/sanitize";
 
@@ -159,12 +160,44 @@ export async function updateSlotState(
     );
     const existing = (
       await tx
-        .select({ id: slotStates.id })
+        .select({
+          id: slotStates.id,
+          status: slotStates.status,
+          confidence: slotStates.confidence,
+          value: slotStates.value,
+        })
         .from(slotStates)
         .where(slotIdentityWhere(context, update.slotPath, update.candidateProcessId))
         .limit(1)
         .for("update")
     )[0];
+    // Task 9: do not let a non-answer or a strictly weaker extraction clobber an
+    // already-`filled` slot. The garbled deflection "those employees I just
+    // mentioned" was extracted as a value and overwrote a good "VP of operations"
+    // on function.name. When the guard fires we never downgrade the value,
+    // status, or confidence of the filled slot — only re-stamp last_asked_at if
+    // we were explicitly asked to.
+    if (
+      existing &&
+      shouldBlockSlotDowngrade(
+        { status: existing.status, confidence: existing.confidence },
+        { value, confidence: update.confidence },
+      )
+    ) {
+      if (update.lastAskedAt) {
+        await tx
+          .update(slotStates)
+          .set({ lastAskedAt: update.lastAskedAt, updatedAt: new Date() })
+          .where(eq(slotStates.id, existing.id));
+      }
+      return (
+        await tx
+          .select()
+          .from(slotStates)
+          .where(eq(slotStates.id, existing.id))
+          .limit(1)
+      )[0];
+    }
     const values = {
       value,
       status: update.status,
@@ -198,6 +231,24 @@ export async function updateSlotState(
         .returning()
     )[0];
   });
+}
+
+// Task 9 downgrade guard (pure decision, unit-tested). Block a slot write that
+// would weaken an already-`filled` slot: either the incoming value is a
+// non-answer, or it is strictly lower confidence than what is stored. Empty,
+// partial, asked_unknown, and conflicting slots are not protected (they can be
+// freely refined), and an equal-or-higher-confidence real answer still
+// overwrites (legitimate corrections/refreshes).
+export function shouldBlockSlotDowngrade(
+  existing: { status: DirectorSlotStatus; confidence: string | number },
+  incoming: { value: unknown; confidence: number },
+): boolean {
+  if (existing.status !== "filled") return false;
+  if (isNonAnswerSlotExtraction(incoming.value)) return true;
+  const existingConfidence = Number(existing.confidence);
+  return (
+    Number.isFinite(existingConfidence) && incoming.confidence < existingConfidence
+  );
 }
 
 function slotIdentityWhere(

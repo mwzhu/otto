@@ -116,7 +116,15 @@ export function anthropicMaxTokensForPrompt(promptTemplateId: string) {
   if (promptTemplateId.startsWith("operator.checker.")) return 1500;
   if (isOperatorWorkflowPrompt(promptTemplateId)) return 16000;
   if (promptTemplateId.startsWith("synthesis.opportunities")) return 4000;
-  if (promptTemplateId.startsWith("synthesis.director_automation")) return 6000;
+  // A full department plan emits up to 12 processes, each with an
+  // implementation_plan + expected_result paragraph and 4 assumption ranges
+  // (low/base/high/basis/confidence/evidence_ids), plus the audit block. At
+  // 6000 this truncated at max_tokens for real 18-process departments (prod
+  // session e919bb61), failing the whole run with a StructuredOutputError.
+  // ~9k tokens covers the worst observed plan; 16000 leaves headroom and is
+  // well within the Opus/Sonnet output limit. Runs as a background Inngest
+  // job, so the higher cap costs latency only on genuinely large plans.
+  if (promptTemplateId.startsWith("synthesis.director_automation")) return 16000;
   return 1200;
 }
 

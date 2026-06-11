@@ -952,3 +952,151 @@ touch extraction.
    together, not mid-demo.
 5. **Task 8** (latency) — design task, schedule deliberately.
 6. **Task 12** (claim degrade flag) — low-severity cleanup, last.
+
+---
+
+# Round 3 — synthesis stuck behind one transient extraction failure (2026-06-11)
+
+Source: live director interview on prod (capture session
+`83967b8e-9ba3-4aed-9574-15de733745dd`, 2026-06-11 ~04:55–05:02 UTC, 15 turns).
+After clicking End, the synthesis page sat on "Otto is synthesizing — waiting
+for the latest synthesis run to finish" indefinitely. Diagnosis ran against the
+prod DB (`synthesis_runs`, `agent_decision_log`) and the completion endpoints.
+
+Shared context: director-interview completion is the synthesis trigger. Both
+the browser End flow
+([app/api/director-interviews/[captureSessionId]/complete](../otto-frontend/app/api/director-interviews/%5BcaptureSessionId%5D/complete/route.ts))
+and the worker closeout
+([app/api/internal/director-turns/complete](../otto-frontend/app/api/internal/director-turns/complete/route.ts))
+funnel into `completeDirectorInterviewInTransaction`
+([completion.ts](../otto-frontend/lib/interview/director/completion.ts)), which
+sets `capture_sessions.completed_at` and fires the Inngest event that creates
+the `synthesis_runs` row the UI polls for. Before completing, it runs
+`assertAllDirectorExtractionTerminal`
+([completion.ts:133](../otto-frontend/lib/interview/director/completion.ts)),
+which 409s if any turn's `extraction_status` is `pending`/`running` **or**
+`failed`.
+
+---
+
+## Task 14 — Stop one transient dispatch deadlock from stranding synthesis
+
+### Context
+
+Each director turn runs two concurrent write paths against the same session's
+rows: the fast voice dispatch
+([respond/route.ts:158](../otto-frontend/app/api/internal/director-turns/respond/route.ts))
+and the heavy async extraction dispatch
+([extract/route.ts:106](../otto-frontend/app/api/internal/director-turns/extract/route.ts)).
+The Python worker deliberately runs extractions as fire-and-forget background
+tasks (`_active_extraction_tasks`,
+[agent.py:132](../../agents/director/director_agent/agent.py)), so when the
+user answers quickly, turn N's extraction transaction overlaps turn N+1's
+respond transaction. Both transactions take many row locks (`FOR UPDATE` on
+claims/slots/candidates) plus fine-grained advisory locks
+([tools.ts:277](../otto-frontend/lib/interview/director/tools.ts)) — in
+whatever order the plan content dictates.
+
+### Problem
+
+Three stacked gaps turn one ordinary Postgres deadlock into a stuck product:
+
+1. **Concurrent dispatch transactions can deadlock.** Two long multi-write
+   transactions for the same session acquire row/advisory locks in different
+   orders. Postgres resolves this by killing one victim immediately.
+2. **The dispatch transaction is never retried.** Deadlock victims (SQLSTATE
+   `40P01`) are *expected* to be retried by the caller; the extract route just
+   lets the turn fail permanently. The abort also poisons the transaction, so
+   the in-txn recovery write (a `follow_up_tasks` insert) fails with
+   "transaction is aborted" and that cascade error is what gets recorded —
+   masking the original deadlock.
+3. **The completion guard hard-blocks on any failed turn.**
+   `assertAllDirectorExtractionTerminal` 409s while `failed > 0` with no
+   retry or override path, so completion never runs, `completed_at` stays
+   NULL, the synthesis event never fires, and the UI polls for a run that
+   will never exist.
+
+### Evidence
+
+Session `83967b8e`: 15 turns, `complete=14, failed=1`. Turn 5 failed at
+`04:57:50.606`; turn 6's row was created at `04:57:49.668` — **inside turn 5's
+extraction window** (started ~`04:57:41.7`), proving the overlap. Turn 5
+aborted after 8.9s while neighbors ran 18–22s, with `lock_timeout=0` and
+`statement_timeout=0` (disabled) — a lock *wait* would have hung, so the fast
+abort is the deadlock-victim signature. Stored error (the cascade victim, not
+the root): `Failed query: insert into "follow_up_tasks" …` wrapping
+`Failed query: INSERT INTO claims … candidate_process / business_outcome …`
+([write-claim.ts:119](../otto-frontend/lib/db/write-claim.ts)). Replaying the
+exact claims insert against prod afterwards **succeeded**, confirming the
+failure was transient, not structural. Completion attempts returned:
+`409 {"error":{"code":"conflict","message":"Director interview has failed
+structured extraction (extraction_failed). Retry extraction before opening
+the overview."}}` — and no `synthesis_runs` row exists for the session.
+
+Epistemic status: the deadlock itself is inferred (the original SQLSTATE was
+not persisted — only the cascade error was); the concurrency, missing retry,
+and guard behavior are observed directly.
+
+### Desired outcome
+
+- Dispatch transactions for the same capture session never interleave, so the
+  deadlock class disappears.
+- If a transient DB error (deadlock/serialization) still occurs, the dispatch
+  transaction retries and the turn completes; nothing is recorded as `failed`
+  for a recoverable error.
+- A turn that does end up `failed` no longer blocks completion: the interview
+  completes, synthesis runs, and the failed turn is surfaced as an open
+  `failed_stage` follow-up task instead of a silent dead end. Pending/running
+  extraction still blocks (it resolves on its own within seconds).
+
+### Solution
+
+Three layers, in causal order:
+
+1. **Serialize per session** — take a session-scoped
+   `pg_advisory_xact_lock` at the top of each dispatch transaction (respond +
+   extract). The pattern already exists for the synthesis queue
+   ([completion.ts:536](../otto-frontend/lib/interview/director/completion.ts)).
+   Extraction is already async, so queueing is invisible to the user.
+2. **Retry transient DB errors** — a small classifier (`40P01` deadlock,
+   `40001` serialization, walking drizzle's error `cause` chain) and a
+   `retryTransientDbErrors` wrapper around the dispatch transactions, 2
+   retries with short jittered backoff. Both route closures are fully
+   tx-scoped, so re-running them after rollback is safe.
+3. **Relax the completion guard** — `assertAllDirectorExtractionTerminal`
+   keeps 409ing on pending/running, but failed turns become non-blocking:
+   completion proceeds, records the failed turn indexes in the audit metadata,
+   and opens a deduped `failed_stage` follow-up task (mirroring
+   `createUnresolvedPrioritySlotFollowUps`).
+
+Alternatives rejected: making the End flow auto-retry the failed turn's
+extraction at completion time (needs original utterance/evidence wiring,
+heavier and slower at exactly the moment the user wants the dashboard);
+`lock_timeout` tuning alone (turns deadlocks into different errors without
+fixing recovery).
+
+### Implementation detail
+
+- `lib/db/transient-retry.ts` (new): `isTransientDbError(error)` +
+  `retryTransientDbErrors(fn)`; unit-test the classifier with a fake drizzle
+  error wrapping a `40P01` cause.
+- [extract/route.ts](../otto-frontend/app/api/internal/director-turns/extract/route.ts):
+  advisory lock after `setOrgContext` in the dispatch transaction; wrap that
+  transaction in `retryTransientDbErrors`.
+- [respond/route.ts](../otto-frontend/app/api/internal/director-turns/respond/route.ts):
+  same two changes for the fast-path dispatch transaction.
+- [completion.ts](../otto-frontend/lib/interview/director/completion.ts):
+  rework `assertAllDirectorExtractionTerminal` to return failed-turn info
+  instead of throwing on `failed`; in `completeDirectorInterviewInTransaction`,
+  create the deduped `failed_stage` follow-up and add
+  `failed_extraction_turns` to the completion audit metadata.
+- Verify: replay-style test that a completion with one `failed` turn
+  completes and opens exactly one follow-up; full phase0+phase1 suite.
+- After deploy: re-POST `/complete` for session `83967b8e` (fresh
+  Idempotency-Key) and confirm a `synthesis_runs` row appears and progresses.
+
+Adjacent observation (not fixed here): every recent director session has
+`completed_at IS NULL` — worker closeouts are getting cancelled before
+`/complete` lands ("entrypoint did not exit in time" in worker logs), and the
+browser End path doesn't retry a 409. With this task the 409s become rare and
+short-lived, but worker-side completion reliability deserves its own pass.

@@ -338,3 +338,117 @@ persons evidenced on that candidate (e.g. Order Intake → VP + Marcus = 2, not 
 A1+A2 (one PR, kills 10 of 12 bad cards deterministically) → A3 (kills the remaining
 cross-turn dupes) → C1–C4 (metrics honesty, independent of extraction) → B1–B3 (prompt
 steering, needs eval from E1 first to measure) → D1–D2.
+
+---
+
+# Round 2: E3 verification results (prod session 667b5809, 2026-06-11 22:27–22:34 UTC)
+
+## What got fixed (verified in prod)
+
+The re-run produced **exactly 6 candidates, zero junk, zero duplicates** ("Six Big
+Ones"/"All Of It" gone, no compound/atom splits). The complexity tile is now
+session-scoped: 31 = avg(57 for order intake, 26 × 5) ✓. D1's supersede archived the
+72-candidate backlog automatically when synthesis completed. Round 1 is confirmed
+working end-to-end.
+
+## New findings
+
+### F1 (P0) — the interviewer never moves past the first process
+
+The director asked to switch four times (turns 12, 15, 16, 17: "Can you start asking
+me about the other five processes now?", "Yo. Start asking me about the other
+processes now.", "No. Move on.", "Remember those other ones...?"). The planner chose
+`open_questions_closeout`, `capture_priority`, then `clarify_previous_question` twice
+— every one targeting "Order intake". The other five candidates ended the interview
+with zero slots probed. Turn 3 also re-asked the full inventory after turn 1 had
+answered it (director: "I already told you that, bro").
+
+Root causes, all confirmed in the decision log + code:
+- `probes/director.yaml` has 12 probes; **none for `select_process_to_expand`** — it
+  exists only as a phase-gate repair intent (brain.ts:4864).
+- The exhausted-probe fallback (brain.ts:4823-4830) hardcodes
+  `clarify_previous_question` targeting `blockedIntent?.target_process ??
+  candidateSummaries[0]` — the same focus process, forever. Decision-log reason on
+  turns 16/17: "All matching probes are in cooldown or exhausted; broaden instead of
+  repeating the prior question."
+- No directive recognition: "ask me about the other processes" is treated as a
+  normal answer. The voice layer says "let's shift gears" while the chosen intent
+  stays on order intake — acknowledgment and plan come from different places.
+
+Fix plan:
+- **F1a — directive handling (deterministic):** classify focus-switch requests
+  ("other processes", "move on", "next process") in the turn plan (new
+  utterance-level signal or deterministic regex guard at dispatch) and force
+  `select_process_to_expand` targeting the next pending candidate with unfilled core
+  slots. The forced intent must drive both the plan AND the spoken utterance.
+- **F1b — coverage rotation:** when the focus candidate's probes are exhausted, the
+  fallback rotates to the next pending candidate with empty core slots
+  (`select_process_to_expand` against that target) instead of clarifying the same
+  process. Closeout only when every candidate's core slots are filled or exhausted.
+- **F1c — repeat-question guard:** the turn-3 inventory re-ask suggests the phase
+  gate fired `discover_processes` (score 1300) although the inventory slot was
+  already filled — verify slot-state staleness in the phase-repair path while
+  implementing F1b.
+
+### F2 (P1) — SPOF tile still 0: the brain writes free-text risks, never recordSpof
+
+Order intake's risk claims: "Single-person dependency: Marcus is the only one who
+keys orders; absence halts the process." (×2 phrasings) — free text, no literal
+`single_point_of_failure`, so the tile's ILIKE match finds nothing. The B3 prompt
+nudge was not enough. Fix: deterministic normalization at dispatch — when a risk
+claim's text matches single-person-dependency patterns, rewrite the value to the
+`recordSpof` shape (`{type: "single_point_of_failure", text}`); keep the prompt
+steering as a secondary signal.
+
+### F3 (P1) — model writes `works_on` claims in an uncontracted shape; People = 0
+
+The session's one works_on claim is `{"process": "Order intake", "activity": "keys
+all orders"}` — written by the extractor through the generic claims channel (the
+allowlist permits `(person, works_on)` with type object). The card query needs
+`value->>'candidate_process_id'`, so People = 0 everywhere. Fix: normalize works_on
+claims at dispatch — resolve the process name to a candidate id (same-turn map +
+session lookup, as `explicitCandidateProcessIdForTool` does), rewrite the value to
+`{"candidate_process_id"}`; queue unresolvable ones as retry tasks. This also
+covers recordPerson prompt noncompliance.
+
+### F4 (P1) — duplicate risk rows + raw JSON in the detail page
+
+The same Marcus fact arrived via two channels in one turn (`claims[]` and
+`recordCandidateProcessClaim`) and `risk` is multi-value, so both persist and render
+as separate callouts ("Operational risk" + "Single point of failure"). A third risk
+has an object value `{"description": "Source of truth gap..."}` rendered as raw JSON
+by RiskCallouts. Fixes: (a) near-duplicate text dedup for multi-value claims at
+write time (token-overlap within same subject+field, reuse name-quality helpers);
+(b) the detail mapper extracts `description`/`text` from object claim values before
+display.
+
+### F5 (P2) — system names don't canonicalize
+
+systems table now holds: "Google Sheet", "Google Sheets", "Google Sheet (Marcus)",
+"reorder Google Sheet", "Google Sheet (reorder)". The order intake card lists 4
+systems including both Sheet variants, so system sprawl scores 16/20 and inflates
+complexity to 57. Fix: canonicalize in `upsertNamedSystem` (strip parentheticals,
+fold plural, alias map for common SaaS) and merge existing rows; sprawl then counts
+3 systems.
+
+### F6 (P2) — evidence links section is an unreadable wall
+
+`app/process/[id]/page.tsx:102` renders one tile per claim — 20+ rows each saying
+"1 evidence source", including three separate "downstream dependency" tiles. Fix:
+group by field (claim count + unioned evidence count per field), render as a
+compact collapsible list with the raw per-claim view behind "view all".
+
+### F7 (P3) — Documentation Coverage 0% reads as failure, but is by design
+
+The tile counts uploaded-document evidence only; a voice-only interview is honestly
+0%. The interview DID capture documentation reality ("supposed to live in Odoo...
+practically Google Sheets and Marcus's head"). Improvements: an empty state ("No
+documents uploaded yet — upload SOPs to corroborate this map") instead of a bare 0%,
+and optionally a documentation-maturity chip on cards sourced from the
+`documentation.maturity` slot.
+
+## Suggested sequencing (round 2)
+
+F1 (the interview is the product; a/b together, c verified during) → F3 + F2 (both
+are dispatch-side claim normalization, one PR) → F4 + F5 (write-side hygiene) →
+F6 + F7 (presentation).

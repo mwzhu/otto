@@ -319,8 +319,10 @@ function directorAutomationStaticInput() {
     "For each process, implementation_plan must describe how automation agent(s) work: triggers, inputs, systems, controls, exception handling, and human review.",
     "For each process, expected_result must describe business impact using cycle-time, hours, error, exception, SLA, capacity, or working-capital metrics.",
     "Estimate operational assumptions only as low/base/high ranges: annual_volume, minutes_saved_per_case, error_rate, exception_rate.",
+    "Commit to a point estimate with a tight planning band: every range must keep low >= 0.9 x base and high <= 1.1 x base. Wide ranges read as guesswork; pick the most defensible base instead of widening the band.",
+    "Any numeric range quoted in implementation_plan or expected_result prose must follow the same tightness.",
     "If an assumption is inferred, set confidence <= 0.45.",
-    "Never output dollars, savings, net_score, gross_value, annual_*_value, hourly costs, prices, or currency fields.",
+    "Never output dollars, savings, net_score, gross_value, annual_*_value, hourly costs, prices, or currency fields — anywhere, including implementation_plan and expected_result prose.",
     "Prefer fewer high-confidence processes over broad weak ideas. Max 12 processes.",
   ].join("\n");
 }

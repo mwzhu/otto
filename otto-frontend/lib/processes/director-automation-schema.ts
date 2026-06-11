@@ -2,7 +2,11 @@ import { z } from "zod";
 import { AUTOMATION_TYPES, stableHash } from "@/lib/processes/opportunity-schema";
 
 export const DIRECTOR_AUTOMATION_PROMPT_ID = "synthesis.director_automation";
-export const DIRECTOR_AUTOMATION_PROMPT_VERSION = "1";
+// v2: tight planning bands (low >= 0.9 x base, high <= 1.1 x base) and the
+// no-dollars rule extended to prose. The version feeds plan_input_hash, so
+// bumping it lets unchanged inventory regenerate under the new rules instead
+// of reusing a cached wide-band plan.
+export const DIRECTOR_AUTOMATION_PROMPT_VERSION = "2";
 
 export const DIRECTOR_AUTOMATION_PATTERN_CATALOG = [
   { pattern_id: "system-integration", pattern_label: "System integration", automation_type: "system_integration" },

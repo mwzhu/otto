@@ -92,6 +92,20 @@ function rangeFromPoints(
   return { low: low[key], base: base[key], high: high[key] };
 }
 
+// Product rule for planning ranges shown to buyers: low/high stay within
+// ±`fraction` of the base estimate. Raw extracted ranges can be much wider
+// (and multiplying low×low / high×high across assumptions compounds them),
+// which reads as "we have no idea" — e.g. a $62k-$943k net value range.
+// Genuinely narrower bounds are kept; only the overshoot is clamped.
+export function tightenRoiRange(range: ROIRange, fraction = 0.1): ROIRange {
+  const spread = Math.abs(range.base) * fraction;
+  return {
+    low: Math.max(range.low, range.base - spread),
+    base: range.base,
+    high: Math.min(range.high, range.base + spread),
+  };
+}
+
 export function fmtUSD(n: number, opts?: { decimals?: number }): string {
   return new Intl.NumberFormat("en-US", {
     style: "currency",

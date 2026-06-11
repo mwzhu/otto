@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { computeRoiRange } from "@/lib/roi";
+import { computeRoiRange, tightenRoiRange } from "@/lib/roi";
 import { directorAutomationPlanPayloadSchema } from "@/lib/processes/director-automation-schema";
 
 const validPlan = {
@@ -107,6 +107,26 @@ describe("director automation plan", () => {
     expect(result.annual_error_value).toEqual({ low: 100, base: 400, high: 900 });
     expect(result.annual_delay_value).toEqual({ low: 100, base: 400, high: 900 });
     expect(result.net_score).toEqual({ low: 320, base: 1280, high: 2880 });
+  });
+
+  test("tightens planning ranges to ±10% of base", () => {
+    // Wide extracted range clamps to the band.
+    expect(tightenRoiRange({ low: 600, base: 2400, high: 5400 })).toEqual({
+      low: 2160,
+      base: 2400,
+      high: 2640,
+    });
+    // Genuinely narrower bounds are kept.
+    expect(tightenRoiRange({ low: 2300, base: 2400, high: 2450 })).toEqual({
+      low: 2300,
+      base: 2400,
+      high: 2450,
+    });
+    // Bounds never drift more than 10% from the midpoint, even asymmetric.
+    const tightened = tightenRoiRange({ low: 2350, base: 2400, high: 9000 });
+    const midpoint = (tightened.low + tightened.high) / 2;
+    expect(Math.abs(tightened.low - midpoint) / midpoint).toBeLessThanOrEqual(0.1);
+    expect(Math.abs(tightened.high - midpoint) / midpoint).toBeLessThanOrEqual(0.1);
   });
 });
 

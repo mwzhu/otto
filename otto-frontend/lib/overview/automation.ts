@@ -4,7 +4,12 @@ import { getCurrentProcessGraph } from "@/lib/processes/graph-queries";
 import { getProcessOpportunities } from "@/lib/processes/opportunity-queries";
 import type { ProcessOpportunitySource } from "@/lib/processes/opportunity-queries";
 import { EFFORT_PENALTY_BY_BAND } from "@/lib/processes/opportunity-grounding";
-import { computeRoiRange, type ROIRange, type ROIRangeAssumptions } from "@/lib/roi";
+import {
+  computeRoiRange,
+  tightenRoiRange,
+  type ROIRange,
+  type ROIRangeAssumptions,
+} from "@/lib/roi";
 import {
   getDirectorAutomationPlanStatus,
   loadLatestDirectorAutomationPlan,
@@ -216,11 +221,15 @@ async function buildDirectorPlan(input: {
   const prices = await getWorkspaceRoiPrices(input.orgId, input.workspaceId);
   const opportunities = input.directorPlan.planJson.processes
     .map((process) => {
+      // Planning bands shown to buyers stay within ±10% of the base estimate
+      // (tightenRoiRange); the raw extracted spread is preserved in plan_json.
       const assumptionRanges: ROIRangeAssumptions = {
-        annual_volume: numericRange(process.assumptions.annual_volume),
-        minutes_saved_per_case: numericRange(process.assumptions.minutes_saved_per_case),
-        error_rate: numericRange(process.assumptions.error_rate),
-        exception_rate: numericRange(process.assumptions.exception_rate),
+        annual_volume: tightenRoiRange(numericRange(process.assumptions.annual_volume)),
+        minutes_saved_per_case: tightenRoiRange(
+          numericRange(process.assumptions.minutes_saved_per_case),
+        ),
+        error_rate: tightenRoiRange(numericRange(process.assumptions.error_rate)),
+        exception_rate: tightenRoiRange(numericRange(process.assumptions.exception_rate)),
       };
       const effortPenalty = EFFORT_PENALTY_BY_BAND[process.effort_band];
       const roiRange = computeRoiRange(
@@ -287,12 +296,15 @@ async function buildDirectorPlan(input: {
         grossValue: roiRange.gross_value.base,
         netScore: roiRange.net_score.base,
         hoursSaved: hoursSavedRange.base,
-        annualTimeValueRange: roiRange.annual_time_value,
-        annualErrorValueRange: roiRange.annual_error_value,
-        annualDelayValueRange: roiRange.annual_delay_value,
-        grossValueRange: roiRange.gross_value,
-        netScoreRange: roiRange.net_score,
-        hoursSavedRange,
+        // ±10% inputs still compound through low×low / high×high (two ±10%
+        // factors → ±21%), so the computed ranges are tightened again to keep
+        // every displayed band — and the summed header range — within ±10%.
+        annualTimeValueRange: tightenRoiRange(roiRange.annual_time_value),
+        annualErrorValueRange: tightenRoiRange(roiRange.annual_error_value),
+        annualDelayValueRange: tightenRoiRange(roiRange.annual_delay_value),
+        grossValueRange: tightenRoiRange(roiRange.gross_value),
+        netScoreRange: tightenRoiRange(roiRange.net_score),
+        hoursSavedRange: tightenRoiRange(hoursSavedRange),
         assumptionRanges,
         assumptionDetails: {
           annual_volume: assumptionDetail(process.assumptions.annual_volume),
@@ -306,7 +318,10 @@ async function buildDirectorPlan(input: {
       } satisfies DepartmentAutomationOpportunity;
     })
     .sort((a, b) => b.netScore - a.netScore);
-  const topOpportunities = opportunities.slice(0, 6);
+  // The director plan is the deliverable and is already capped at 12 processes
+  // by the extraction schema — render all of them so the "Processes automated"
+  // metric (opportunityCount) always matches the ranked list below it.
+  const topOpportunities = opportunities;
   const metrics = summarize(topOpportunities);
   return {
     departmentName: input.directorPlan.planJson.department_name || input.departmentName,

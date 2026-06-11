@@ -1,5 +1,8 @@
 import { describe, expect, test } from "vitest";
-import { materializeDirectorProcessInventory } from "@/lib/interview/director/brain";
+import {
+  materializeDirectorProcessInventory,
+  candidateProcessBelongsToSession,
+} from "@/lib/interview/director/brain";
 import { shouldBlockSlotDowngrade } from "@/lib/interview/director/tools";
 import {
   isNonAnswerSlotExtraction,
@@ -153,6 +156,54 @@ describe("Task 7 — candidate process dedup at materialization", () => {
     );
     const names = recordedProcessNames(plan);
     expect(names).toHaveLength(1);
+  });
+});
+
+describe("Extract 500 — name-valued candidate id must not hit the uuid column", () => {
+  // Prod regression (sessions 83fdd5a6 turn 4, db0597d3 turn 0): the extractor
+  // handed back a process *name* ("order intake") as candidate_process_id. The
+  // belongs-to-session guard compared it against the uuid `candidate_processes.id`
+  // column, so Postgres threw `invalid input syntax for type uuid: "order intake"`,
+  // which was unhandled and 500'd the whole turn's extraction (slots/claims lost).
+  // The fix short-circuits non-UUID ids to false *before* touching the tx, so the
+  // caller falls back to the focus candidate instead of crashing.
+  const ctx = {
+    orgId: "00000000-0000-0000-0000-0000000000aa",
+    workspaceId: "00000000-0000-0000-0000-0000000000bb",
+    captureSessionId: "00000000-0000-0000-0000-0000000000cc",
+  } as never;
+
+  // A tx that explodes the instant it is touched — proves the DB is never queried.
+  const explodingTx = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error(
+          "candidate_processes must not be queried with a non-UUID id",
+        );
+      },
+    },
+  ) as never;
+
+  test("a process-name candidate id returns false without querying the db", async () => {
+    await expect(
+      candidateProcessBelongsToSession(ctx, "order intake", explodingTx),
+    ).resolves.toBe(false);
+    await expect(
+      candidateProcessBelongsToSession(ctx, "forecasting", explodingTx),
+    ).resolves.toBe(false);
+  });
+
+  test("a real uuid still flows through to the db query", async () => {
+    // With a valid uuid the guard passes and the tx IS used (then throws here),
+    // confirming the short-circuit is scoped only to non-UUID input.
+    await expect(
+      candidateProcessBelongsToSession(
+        ctx,
+        "00000000-0000-0000-0000-0000000000dd",
+        explodingTx,
+      ),
+    ).rejects.toThrow(/must not be queried with a non-UUID id/);
   });
 });
 

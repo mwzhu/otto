@@ -3345,11 +3345,18 @@ async function nextCandidateProcessNeedingCoreCoverage(
   return rows.rows[0]?.id;
 }
 
-async function candidateProcessBelongsToSession(
+export async function candidateProcessBelongsToSession(
   context: DirectorToolContext,
   candidateProcessId: string,
   tx: ClaimWriteTx,
 ) {
+  // The extractor can hand back a process *name* ("order intake") in place of a
+  // real candidate UUID. Comparing that against the uuid `candidate_processes.id`
+  // column makes Postgres throw `invalid input syntax for type uuid`, which is
+  // unhandled and 500s the entire turn's extraction (slots/claims lost). A
+  // non-UUID can never match a uuid primary key, so short-circuit to false and
+  // let the caller fall back to the focus candidate.
+  if (!isUuidString(candidateProcessId)) return false;
   const rows = await tx
     .select({ id: candidateProcesses.id })
     .from(candidateProcesses)

@@ -62,11 +62,23 @@ export async function getOverviewMetrics(
     }>(sql`
       WITH inventory AS (
         SELECT id, 'process' AS source
-        FROM processes
+        FROM processes p
         WHERE org_id = ${orgId}
           AND workspace_id = ${workspaceId}
           AND status IN ('draft', 'approved')
-          ${captureSessionId ? sql`AND false` : sql``}
+          ${
+            captureSessionId
+              ? // Match getProcessCards: count processes promoted from / linked
+                // to this session so the metric tracks the visible cards.
+                sql`AND EXISTS (
+                  SELECT 1 FROM capture_process_links cpl
+                  WHERE cpl.process_id = p.id
+                    AND cpl.org_id = p.org_id
+                    AND cpl.workspace_id = p.workspace_id
+                    AND cpl.capture_session_id = ${captureSessionId}
+                )`
+              : sql``
+          }
         UNION ALL
         SELECT id, 'candidate' AS source
         FROM candidate_processes
@@ -345,7 +357,21 @@ export async function getProcessCards(
         WHERE p.org_id = ${orgId}
           AND p.workspace_id = ${workspaceId}
           AND p.status IN ('draft', 'approved')
-          ${captureSessionId ? sql`AND false` : sql``}
+          ${
+            captureSessionId
+              ? // Session-scoped overview: show processes tied to this capture
+                // session (e.g. a candidate just promoted from it — promotion
+                // writes a capture_process_links 'created' row). Was `AND false`,
+                // which hid the promoted process the moment it left 'pending'.
+                sql`AND EXISTS (
+                  SELECT 1 FROM capture_process_links cpl
+                  WHERE cpl.process_id = p.id
+                    AND cpl.org_id = p.org_id
+                    AND cpl.workspace_id = p.workspace_id
+                    AND cpl.capture_session_id = ${captureSessionId}
+                )`
+              : sql``
+          }
         GROUP BY p.id, pv.id, r.id
       )
       SELECT * FROM candidate_cards

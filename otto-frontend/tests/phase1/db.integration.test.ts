@@ -354,6 +354,28 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
       risk_evidence_count: 2,
       exact_risk_evidence: true,
     });
+
+    // Regression: a process promoted from a capture session must stay visible
+    // in that session-scoped overview. The candidate leaves 'pending' on
+    // promote, so the promoted process (linked via capture_process_links) is
+    // the only thing keeping it on the board — the process CTE used to be
+    // `AND false` when scoped to a session, hiding it entirely.
+    const { getProcessCards } = await import("@/lib/overview/queries");
+    const scopedCards = await getProcessCards(orgId, workspaceId, {
+      captureSessionId: directorCaptureId,
+    });
+    const promotedCard = scopedCards.find(
+      (card) => card.id === promoted.process_id,
+    );
+    expect(promotedCard).toBeDefined();
+    expect(promotedCard?.source).toBe("process");
+    // The candidate it came from is no longer 'pending', so it should not also
+    // appear as a candidate card.
+    expect(
+      scopedCards.find(
+        (card) => card.source === "candidate" && card.id === week4CandidateId,
+      ),
+    ).toBeUndefined();
   });
 
   test("Week 4 candidate merge preserves candidate evidence on the target process", async () => {

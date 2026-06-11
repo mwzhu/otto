@@ -101,7 +101,14 @@ export function anthropicModelForPrompt(
 export function anthropicMaxTokensForPrompt(promptTemplateId: string) {
   if (promptTemplateId.startsWith("document.extract-claims")) return 8000;
   if (promptTemplateId.startsWith("director.turn.plan")) return 8000;
-  if (promptTemplateId.startsWith("director.turn.extract")) return 8000;
+  // Task 8: cap the async extraction output budget. The extract schema emits
+  // only slot_updates / claims / tool_calls / contradiction_signals (no spoken
+  // utterance, no intent ranking), bounded by ~16 director slots plus a handful
+  // of claims per turn. Prod session 83fdd5a6 peaked at ~1791 output tokens
+  // across 20 turns, so 3000 leaves ~67% headroom over the worst observed turn
+  // while bounding worst-case latency on a pathological over-generating turn
+  // (Sonnet latency scales with tokens actually emitted, not the cap). Was 8000.
+  if (promptTemplateId.startsWith("director.turn.extract")) return 3000;
   if (promptTemplateId.startsWith("director.voice.")) return 200;
   if (promptTemplateId.startsWith("director.checker.")) return 1500;
   if (promptTemplateId.startsWith("operator.turn.plan")) return 2000;

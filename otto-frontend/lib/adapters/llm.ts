@@ -433,6 +433,15 @@ function anthropicToolPayload(tool: NonNullable<GenerateOpts["anthropic_tool"]>)
     description: tool.description,
     input_schema: useStrict ? scrubForStrict(tool.input_schema) : tool.input_schema,
     ...(useStrict ? { strict: true } : {}),
+    // Task 8: the tool definition is the largest stable block on the extraction
+    // call (a byte-stable, phase-aware JSON schema), and `tools` render before
+    // `system`/`messages` in the Anthropic cache prefix. Without a breakpoint
+    // here the whole schema is re-billed at full input price every turn even
+    // though the static text block downstream is already cached. Marking the
+    // (single) tool caches the tools block; schemas below the model's minimum
+    // cacheable prefix silently no-op. Only one tool is ever sent, so this is
+    // the last tool definition and a valid breakpoint position.
+    cache_control: { type: "ephemeral" as const },
   };
 }
 

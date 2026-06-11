@@ -24,6 +24,27 @@ const DIRECTOR_INTERVIEW_COST_BASELINE_CENTS = 275;
 const DIRECTOR_INTERVIEW_COST_ALERT_THRESHOLD_CENTS =
   DIRECTOR_INTERVIEW_COST_BASELINE_CENTS * 2;
 
+/**
+ * Serialize dispatch transactions per capture session. The voice respond path
+ * and the async extraction path run concurrently for adjacent turns and both
+ * take many row/advisory locks on the same session's claims, slots, and
+ * candidates — in plan-dependent order, which can deadlock (BUG_FIXES.md
+ * Task 14, session 83967b8e turn 5). A session-scoped xact lock makes the
+ * write phases queue instead of interleaving; extraction is already async, so
+ * the queueing is invisible to the user. Transaction-scoped: released
+ * automatically at commit/rollback.
+ */
+export async function acquireDirectorDispatchLock(
+  tx: { execute: (query: ReturnType<typeof sql>) => Promise<unknown> },
+  captureSessionId: string,
+) {
+  await tx.execute(sql`
+    SELECT pg_advisory_xact_lock(
+      hashtextextended(${`director.dispatch:${captureSessionId}`}, 19)
+    )
+  `);
+}
+
 export const directorTranscriptSegmentInputSchema = z.object({
   speaker: z.string().min(1).default("director"),
   speaker_role: z.string().optional(),

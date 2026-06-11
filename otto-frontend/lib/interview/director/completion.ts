@@ -47,7 +47,7 @@ export async function completeDirectorInterviewInTransaction(
     await recoverStalePendingDirectorVoiceDeliveries(tx, input);
   }
   await assertAllDirectorVoiceDeliveryTerminal(tx, input);
-  await assertAllDirectorExtractionTerminal(tx, input);
+  const failedExtraction = await assertAllDirectorExtractionTerminal(tx, input);
 
   const completedAt = new Date();
   const completedRows = await tx
@@ -66,6 +66,11 @@ export async function completeDirectorInterviewInTransaction(
   const newlyCompleted = completedRows[0];
   if (newlyCompleted) {
     const followUpTasksCreated = await createUnresolvedPrioritySlotFollowUps(tx, input);
+    const failedExtractionFollowUps =
+      failedExtraction.failedExtractionTurns > 0 ||
+      failedExtraction.failedExtractionWindows > 0
+        ? await createFailedExtractionFollowUp(tx, input, failedExtraction)
+        : 0;
     await tx.insert(auditLog).values({
       orgId: input.orgId,
       workspaceId: input.workspaceId,
@@ -77,6 +82,10 @@ export async function completeDirectorInterviewInTransaction(
         idempotency_key: input.idempotencyKey,
         source: input.source,
         unresolved_priority_follow_up_tasks_created: followUpTasksCreated,
+        failed_extraction_turns: failedExtraction.failedExtractionTurns,
+        failed_extraction_windows: failedExtraction.failedExtractionWindows,
+        failed_extraction_turn_indexes: failedExtraction.failedTurnIndexes,
+        failed_extraction_follow_ups_created: failedExtractionFollowUps,
       },
     });
     return {
@@ -130,6 +139,18 @@ export async function completeDirectorInterviewInTransaction(
   };
 }
 
+type DirectorFailedExtractionSummary = {
+  failedExtractionTurns: number;
+  failedExtractionWindows: number;
+  failedTurnIndexes: number[];
+};
+
+// Pending/running extraction still blocks completion (it settles on its own
+// within seconds and completing under it would drop in-flight data). Failed
+// extraction does NOT block: a single transient failure (e.g. a dispatch
+// deadlock victim, BUG_FIXES.md Task 14) must not strand the interview with
+// no synthesis forever. Failures are returned so the caller can surface them
+// as a follow-up task instead.
 async function assertAllDirectorExtractionTerminal(
   tx: DirectorCompletionTx,
   input: {
@@ -137,15 +158,18 @@ async function assertAllDirectorExtractionTerminal(
     workspaceId: string;
     captureSessionId: string;
   },
-) {
+): Promise<DirectorFailedExtractionSummary> {
   const result = await tx.execute<{
     pending_extraction_turns: string | number;
     failed_extraction_turns: string | number;
     pending_extraction_windows: string | number;
     failed_extraction_windows: string | number;
+    failed_turn_indexes: number[] | null;
   }>(sql`
     WITH extraction_turns AS (
-      SELECT delivery_json->>'extraction_status' AS extraction_status
+      SELECT
+        delivery_json->>'extraction_status' AS extraction_status,
+        turn_index
       FROM agent_decision_log
       WHERE org_id = ${input.orgId}
         AND workspace_id = ${input.workspaceId}
@@ -168,7 +192,10 @@ async function assertAllDirectorExtractionTerminal(
       (SELECT count(*) FROM extraction_windows WHERE status IN ('pending', 'running'))::int
         AS pending_extraction_windows,
       (SELECT count(*) FROM extraction_windows WHERE status = 'failed')::int
-        AS failed_extraction_windows
+        AS failed_extraction_windows,
+      (SELECT array_agg(turn_index ORDER BY turn_index)
+         FROM extraction_turns WHERE extraction_status = 'failed')
+        AS failed_turn_indexes
   `);
   const row = result.rows[0];
   const pendingExtractionTurns = Number(row?.pending_extraction_turns ?? 0);
@@ -182,13 +209,67 @@ async function assertAllDirectorExtractionTerminal(
       "Director interview has pending structured extraction (extraction_pending). Retry completion after notes finish updating.",
     );
   }
-  if (failedExtractionTurns > 0 || failedExtractionWindows > 0) {
-    throw new ApiError(
-      409,
-      "conflict",
-      "Director interview has failed structured extraction (extraction_failed). Retry extraction before opening the overview.",
-    );
-  }
+  return {
+    failedExtractionTurns,
+    failedExtractionWindows,
+    failedTurnIndexes: (row?.failed_turn_indexes ?? []).map(Number),
+  };
+}
+
+const FAILED_EXTRACTION_FOLLOW_UP_TITLE =
+  "Review failed director extraction turns";
+
+async function createFailedExtractionFollowUp(
+  tx: DirectorCompletionTx,
+  input: {
+    orgId: string;
+    workspaceId: string;
+    captureSessionId: string;
+    userId: string;
+  },
+  failed: DirectorFailedExtractionSummary,
+) {
+  const duplicate = await tx
+    .select({ id: followUpTasks.id })
+    .from(followUpTasks)
+    .where(
+      and(
+        eq(followUpTasks.orgId, input.orgId),
+        eq(followUpTasks.workspaceId, input.workspaceId),
+        eq(followUpTasks.captureSessionId, input.captureSessionId),
+        eq(followUpTasks.status, "open"),
+        eq(followUpTasks.taskType, "failed_stage"),
+        eq(followUpTasks.title, FAILED_EXTRACTION_FOLLOW_UP_TITLE),
+      ),
+    )
+    .limit(1);
+  if (duplicate[0]) return 0;
+
+  const turnList = failed.failedTurnIndexes.join(", ");
+  await createFollowUpTask(
+    {
+      orgId: input.orgId,
+      workspaceId: input.workspaceId,
+      captureSessionId: input.captureSessionId,
+      userId: input.userId,
+    },
+    {
+      title: FAILED_EXTRACTION_FOLLOW_UP_TITLE,
+      description: `Structured extraction failed for turn(s) ${turnList || "unknown"} of this director interview. The interview was completed without that data; re-extract or recapture those answers before relying on the affected slots.`,
+      taskType: "failed_stage",
+      targetType: "capture_session",
+      targetId: input.captureSessionId,
+      priority: 0.9,
+      contextJson: {
+        source: "director_completion",
+        failed_extraction_turns: failed.failedExtractionTurns,
+        failed_extraction_windows: failed.failedExtractionWindows,
+        failed_turn_indexes: failed.failedTurnIndexes,
+      },
+    },
+    { tx },
+  );
+  return 1;
 }
 
 async function recoverStalePendingDirectorVoiceDeliveries(

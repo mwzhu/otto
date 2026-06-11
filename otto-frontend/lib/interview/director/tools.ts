@@ -553,7 +553,11 @@ export async function createFollowUpTask(
   input: {
     title: string;
     description?: string;
-    taskType?: "open_question" | "conflicting_slot" | "low_confidence_claim";
+    taskType?:
+      | "open_question"
+      | "conflicting_slot"
+      | "low_confidence_claim"
+      | "failed_stage";
     targetType?: string;
     targetId?: string;
     priority?: number;

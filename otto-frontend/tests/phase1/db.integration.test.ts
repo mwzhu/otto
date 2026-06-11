@@ -109,6 +109,10 @@ const fullTruncatedDeliveryCaptureId =
   "d6d6d6d6-d6d6-5d6d-8d6d-d6d6d6d6d6d6";
 const fullTruncatedDeliveryDecisionId =
   "d7d7d7d7-d7d7-5d7d-8d7d-d7d7d7d7d7d7";
+const failedExtractionCompletionCaptureId =
+  "d9d9d9d9-d9d9-5d9d-8d9d-d9d9d9d9d9d9";
+const failedExtractionCompletionDecisionId =
+  "dadadada-dada-5ada-8ada-dadadadadada";
 const twoCallCostCaptureId = "c3c3c3c3-c3c3-5c3c-8c3c-c3c3c3c3c3c3";
 const twoCallCostDecisionId = "c4c4c4c4-c4c4-5c4c-8c4c-c4c4c4c4c4c4";
 const cacheHitRateCaptureId = "c5c5c5c5-c5c5-5c5c-8c5c-c5c5c5c5c5c5";
@@ -3978,6 +3982,141 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
       [completionLockCaptureId],
     );
     expect(completed.rows[0].completed_at).not.toBeNull();
+  });
+
+  // Task 14: a turn left extraction_status='failed' by a transient dispatch
+  // error (prod session 83967b8e turn 5) must not 409 completion forever —
+  // the interview completes and the failure surfaces as a follow-up task.
+  test("director completion proceeds past failed extraction turns and flags them", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO UPDATE SET completed_at = null, updated_at = now()",
+      [failedExtractionCompletionCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      "DELETE FROM agent_decision_log WHERE capture_session_id = $1",
+      [failedExtractionCompletionCaptureId],
+    );
+    await appClient.query(
+      "DELETE FROM follow_up_tasks WHERE capture_session_id = $1",
+      [failedExtractionCompletionCaptureId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO agent_decision_log (
+          id,
+          org_id,
+          workspace_id,
+          capture_session_id,
+          turn_index,
+          stage_name,
+          ts_start,
+          created_at,
+          updated_at,
+          sanitized_agent_utterance,
+          prompt_template_id,
+          prompt_template_version,
+          delivery_json
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          5,
+          'director.turn',
+          now() - interval '60 seconds',
+          now() - interval '60 seconds',
+          now() - interval '60 seconds',
+          'What outcome does that drive?',
+          'director.turn.plan',
+          '1',
+          jsonb_build_object(
+            'planned_utterance',
+            'What outcome does that drive?',
+            'delivered_utterance',
+            'What outcome does that drive?',
+            'delivery_status',
+            'completed',
+            'spoken_fraction',
+            1,
+            'extraction_status',
+            'failed',
+            'extraction_error_message',
+            'deadlock detected'
+          )
+        )
+      `,
+      [
+        failedExtractionCompletionDecisionId,
+        orgId,
+        workspaceId,
+        failedExtractionCompletionCaptureId,
+      ],
+    );
+
+    const { getDb, setOrgContext } = await import("@/lib/db/client");
+    const { completeDirectorInterviewInTransaction } = await import(
+      "@/lib/interview/director/completion"
+    );
+    const result = await getDb().transaction(async (tx) => {
+      await setOrgContext(tx, orgId);
+      return completeDirectorInterviewInTransaction(tx, {
+        orgId,
+        workspaceId,
+        captureSessionId: failedExtractionCompletionCaptureId,
+        userId,
+        idempotencyKey: "failed-extraction-complete",
+        source: "browser",
+      });
+    });
+
+    expect(result.statusCode).toBe(200);
+    const rows = await appClient.query(
+      `
+        SELECT
+          (SELECT completed_at IS NOT NULL FROM capture_sessions WHERE id = $1)
+            AS completed,
+          (
+            SELECT json_agg(json_build_object(
+              'task_type', task_type,
+              'title', title,
+              'context_json', context_json
+            ))
+            FROM follow_up_tasks
+            WHERE capture_session_id = $1
+              AND task_type = 'failed_stage'
+          ) AS failed_stage_tasks,
+          (
+            SELECT metadata_json
+            FROM audit_log
+            WHERE subject_id = $1
+              AND event_type = 'capture.director_interview.completed'
+            ORDER BY created_at DESC
+            LIMIT 1
+          ) AS completion_audit
+      `,
+      [failedExtractionCompletionCaptureId],
+    );
+    expect(rows.rows[0].completed).toBe(true);
+    const failedStageTasks = rows.rows[0].failed_stage_tasks;
+    expect(failedStageTasks).toHaveLength(1);
+    expect(failedStageTasks[0].title).toBe(
+      "Review failed director extraction turns",
+    );
+    expect(failedStageTasks[0].context_json).toMatchObject({
+      source: "director_completion",
+      failed_extraction_turns: 1,
+      failed_turn_indexes: [5],
+    });
+    expect(rows.rows[0].completion_audit).toMatchObject({
+      failed_extraction_turns: 1,
+      failed_extraction_turn_indexes: [5],
+      failed_extraction_follow_ups_created: 1,
+    });
   });
 
   test("director turn ingest rejects completed capture sessions", async () => {

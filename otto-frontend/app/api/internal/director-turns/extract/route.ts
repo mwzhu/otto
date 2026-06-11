@@ -15,9 +15,11 @@ import {
   voiceMetadataDegrades,
 } from "@/lib/interview/director/brain";
 import {
+  acquireDirectorDispatchLock,
   assertDirectorTurnReferences,
   resolveDirectorSessionContext,
 } from "@/lib/interview/director/turn-transaction";
+import { retryTransientDbErrors } from "@/lib/db/transient-retry";
 import {
   apiError,
   apiJson,
@@ -103,8 +105,9 @@ export async function POST(request: Request) {
     const planned = await extractDirectorTurn(turnInput);
     const extractionLatencyMs = Math.max(0, Date.now() - extractionStarted);
     let result: Awaited<ReturnType<typeof dispatchDirectorTurnPlan>>;
-    await getDb().transaction(async (tx) => {
+    await retryTransientDbErrors(() => getDb().transaction(async (tx) => {
       await setOrgContext(tx, context!.orgId);
+      await acquireDirectorDispatchLock(tx, context!.captureSessionId);
       result = await dispatchDirectorTurnPlan({
         ...turnInput,
         plan: planned.plan,
@@ -179,7 +182,7 @@ export async function POST(request: Request) {
         responseJson: response,
         statusCode: 201,
       });
-    });
+    }));
     const dispatchResult = result!;
     const response = {
       ...dispatchResult,

@@ -1533,9 +1533,11 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(brain).toContain("voice_metadata: input.voiceMetadata ?? null");
     expect(brain).toContain(".onConflictDoNothing()");
     expect(directorTools).toContain("pg_advisory_xact_lock");
-    expect(directorTools).toContain("candidate_process:");
+    // Session-wide reconciliation lock (not per-name): related names must
+    // serialize on one key or concurrent extractions insert both rows.
+    expect(directorTools).toContain("candidate_process_reconcile");
     expect(directorTools.indexOf("pg_advisory_xact_lock")).toBeLessThan(
-      directorTools.indexOf("SELECT id, proposed_function, frequency"),
+      directorTools.indexOf("SELECT id, proposed_name, proposed_function, frequency"),
     );
     expect(transaction).toContain("delivery_status");
     expect(transaction).toContain("sanitizeJsonForLogs");

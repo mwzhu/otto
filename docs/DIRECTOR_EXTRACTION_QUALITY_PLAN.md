@@ -1,6 +1,29 @@
 # Director Extraction Quality Plan: Transcript → High Level Overview
 
-**Status:** v2 — diagnosis from prod session `e919bb61-0b32-43ba-813a-9548fcf470eb` (2026-06-11, 20:04–20:09 UTC, workspace `776a78f5`). v2 incorporates external review: race-safe reconciliation locking (A3), write-side person→candidate links (C1), metadata merge precedence for collapsed candidates (A1), schema-realistic gating signals (B1).
+**Status:** v3, IMPLEMENTED (2026-06-11) — diagnosis from prod session `e919bb61-0b32-43ba-813a-9548fcf470eb` (2026-06-11, 20:04–20:09 UTC, workspace `776a78f5`). v2 incorporated external review: race-safe reconciliation locking (A3), write-side person→candidate links (C1), metadata merge precedence for collapsed candidates (A1), schema-realistic gating signals (B1). v3 (review round 2): dispatch must honor materialized per-call evidenceIds (A1), and the B1 gate must depend only on pre-existing conversation state, not the plan's own slot updates.
+
+**Implementation notes:** A1–A3, B1–B3, C1–C4, D1–D2, E1–E2 are implemented.
+Post-implementation review (round 3) hardened three spots: (1) the B1 gate
+also drops `process.inventory` slot updates on gated turns, so a scope answer
+cannot mark the inventory slot filled with junk names behind no candidates;
+(2) `recordPerson` receives a candidate id only when the tool arguments
+explicitly reference a process (`explicitCandidateProcessIdForTool`, no
+focus-candidate fallback) so passing mentions don't inflate per-card people
+counts; (3) `recordProcess`'s write-time guard uses the full shared
+`isPlausibleCandidateProcessName` predicate (junk + narration + system names),
+not just the junk subset, so direct callers like the document pipeline cannot
+insert names the brain would reject.
+Shared name rules live in `otto-frontend/lib/candidate-processes/name-quality.ts`;
+the prod replay fixture in `evals/director/extraction-quality-prod-e919bb61.json`
+(consumed by `tests/phase1/director-extraction-quality.test.ts`); reconciliation,
+session-lock race, and works_on people-count integration tests in
+`tests/phase1/db.integration.test.ts`. `works_on` was added to
+`multiValueClaimFields` in write-claim.ts so one person can link to several
+candidates. D2 script: `scripts/cleanup-stale-candidates.mjs` (dry-run verified
+against prod: 72 stale candidates; run with `--apply` to archive, or let D1
+supersede them on the next completed interview). Remaining ops (E3): deploy,
+re-run the interview script in prod, verify 6 cards / SPOF ≥ 1 / scoped
+complexity / per-candidate people counts.
 
 ## Symptom
 
@@ -154,6 +177,14 @@ the collapse folds several calls into one survivor:
 - `evidenceIds` are unioned across survivor + collapsed members.
 This is consistent with `recordProcess`'s update path, which already merges with `??`
 semantics (tools.ts:330-340).
+
+**Dispatch must honor the materialized `evidenceIds`.** Today the recordProcess dispatch
+loop ignores `tool.arguments.evidenceIds` entirely and always passes the turn's full
+`input.evidenceIds` (brain.ts:1765-1774). Without changing that, the union above is dead
+code: per-call evidence attribution is overwritten by the blanket turn set. Update the
+dispatch to use the materialized call's `evidenceIds` when present — filtered against
+`input.evidenceIds`, matching the existing evidence-preflight discipline — and fall back
+to `input.evidenceIds` only when the tool carries none.
 *Acceptance:* unit tests — (1) a plan whose tool_calls contain recordProcess("Purchasing
 And Replenishment"), recordProcess("Purchasing"), recordProcess("Replenishment")
 dispatches exactly one recordProcess with the compound name; (2) when only the
@@ -207,14 +238,21 @@ Replenishment") in parallel transactions ends with exactly one row.
 Only materialize new candidates when the turn is an inventory enumeration. Note the
 structured contract's `utterance_type` enum is generic (`substantive_answer`,
 `partial_answer`, … — brain.ts:2963) and has **no** process-list value, so the gate must
-use signals that exist today:
-- the previously asked probe / last `chosen_intent` targeted `process.inventory`
-  (available from interview state + ranked intents), or
-- the plan contains a `process.inventory` slot_update, or
-- `current_phase === 'inventory'`.
+use signals that exist today — and only signals from **pre-existing conversation state**,
+never from the current plan's own output (a bad scope answer can self-authorize by
+emitting a bad `process.inventory` slot_update, and the materializer already treats those
+slot updates as candidate sources at brain.ts:1165):
+- the probe asked in the *previous* agent turn targeted `process.inventory` (from
+  interview state / the prior turn's chosen intent), or
+- the interview phase *as recorded before this extraction ran* is `inventory`.
+On turns that fail the gate, suppress candidate minting from **both** sources —
+direct/materialized `recordProcess` calls *and* `process.inventory` slot-update-derived
+names — while still applying evidence merges to existing candidates.
 (Alternative, if these prove too coarse: add an explicit boolean field such as
 `is_process_enumeration` to the extraction contract + schema — a schema change to
-schemas/director-turn-plan.schema.json, weigh against eval results first.)
+schemas/director-turn-plan.schema.json, weigh against eval results first. Note that field
+would also be self-reported by the extractor, so it should tighten the gate, not replace
+the state-based check.)
 For other turns (scope answers, ownership answers, drilldowns), allow evidence merges
 into *existing* candidates but require strong signals (explicit "we have a process
 called X") to mint new ones. This kills the turn-0 sub-step candidates (#7–9, #11) and
@@ -233,10 +271,28 @@ recordSpof on the order-intake candidate).
 
 ### Phase C — overview metrics correctness (otto-frontend/lib/overview/queries.ts)
 
-**C1. Fix `people_count`:** scope `person_claim` to the candidate (claim value carries
-`candidate_process_id`, same pattern as `role_claim` at queries.ts:209-216). If person→
-candidate links don't exist in the data yet, the count must fall back to candidate-scoped
-roles only — never workspace-wide persons.
+**C1. Fix `people_count` — needs a write-side link, not just a query fix.**
+There is currently **nothing to scope the person join by**: `recordPerson` writes
+`person.role` claims with a *scalar* value (the role name, tools.ts:489-497), and
+dispatch invokes it without any candidate id (brain.ts:1866-1882). So "scope by
+`value->>'candidate_process_id'`" has no data to match — a query-only fix can drop the
+bogus workspace-wide count but can never produce per-candidate people counts.
+
+Two parts:
+- *Write side:* add optional `candidateProcessId` to `recordPerson` input; dispatch
+  passes the focus/created candidate id (same-turn entity tracking already exists,
+  cf. Task 5 tracking in dispatch). Write an explicit linking claim — subject
+  `person`, field `works_on`, value `{"candidate_process_id": "<uuid>"}` — and add the
+  `(person, works_on)` pair to schemas/claim-subject-fields.json. Prompt nudge so the
+  extractor passes the candidate when the person is mentioned in a process context.
+- *Read side:* `people_count` = distinct persons with a `works_on` claim pointing at the
+  candidate, plus candidate-scoped `role_claim`s (queries.ts:209-216 pattern) and the
+  proposed-owner role. Never join unscoped person claims.
+
+Old sessions have no links, so their cards will show people from owner-role only (0–1) —
+acceptable; the D2 cleanup archives them anyway. Per-card People=4 is *not* the
+expectation: e.g. Order Intake should count only the persons evidenced on it
+(VP + Marcus → 2 once links exist).
 
 **C2. Scope tile metrics to the same inventory as the cards:** complexity CTE and SPOF
 count join against the `inventory` CTE ids and respect `captureSessionId`. The tile
@@ -274,7 +330,8 @@ run against the existing phase1 db integration harness, cf.
 otto-frontend/tests/phase1/db.integration.test.ts).
 
 **E3. Prod re-run:** redeploy, run the same interview script, confirm overview shows
-6 cards, People=4, SPOF=1, complexity averaged over the 6 only.
+6 cards, SPOF=1, complexity averaged over the 6 only, and per-card People counts only
+persons evidenced on that candidate (e.g. Order Intake → VP + Marcus = 2, not 6).
 
 ## Suggested sequencing
 

@@ -204,6 +204,7 @@ export async function processDocumentArtifact(input: ProcessDocumentArtifactInpu
           confidence: 0.82,
           evidenceIds: [evidenceRow.id],
         });
+        if (!candidate) continue;
         activeCandidateId = candidate.id;
         candidateIds.add(candidate.id);
         scopedProcessNames.add(extracted.processName);

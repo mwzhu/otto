@@ -70,6 +70,14 @@ const recentConversationDecisionId = "a5a5a5a5-a5a5-5a5a-8a5a-a5a5a5a5a5a5";
 const duplicateProcessCaptureId = "a6a6a6a6-a6a6-5a6a-8a6a-a6a6a6a6a6a6";
 const duplicateProcessEvidenceAId = "a7a7a7a7-a7a7-5a7a-8a7a-a7a7a7a7a7a7";
 const duplicateProcessEvidenceBId = "a8a8a8a8-a8a8-5a8a-8a8a-a8a8a8a8a8a8";
+const reconcileCaptureId = "b1b1b1b1-b1b1-5b1b-8b1b-b1b1b1b1b1b1";
+const reconcileEvidenceAId = "b2b2b2b2-b2b2-5b2b-8b2b-b2b2b2b2b2b2";
+const reconcileEvidenceBId = "b3b3b3b3-b3b3-5b3b-8b3b-b3b3b3b3b3b3";
+const reconcileRaceCaptureId = "b4b4b4b4-b4b4-5b4b-8b4b-b4b4b4b4b4b4";
+const worksOnCaptureId = "b5b5b5b5-b5b5-5b5b-8b5b-b5b5b5b5b5b5";
+const worksOnEvidenceId = "b6b6b6b6-b6b6-5b6b-8b6b-b6b6b6b6b6b6";
+const gatedTurnCaptureId = "b7b7b7b7-b7b7-5b7b-8b7b-b7b7b7b7b7b7";
+const gatedTurnEvidenceId = "b8b8b8b8-b8b8-5b8b-8b8b-b8b8b8b8b8b8";
 const duplicateCandidateVerificationCaptureId =
   "a9a9a9a9-a9a9-5a9a-8a9a-a9a9a9a9a9a9";
 const duplicateCandidateVerificationIdA =
@@ -802,6 +810,7 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
       "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
       [targetedClaimCaptureId, orgId, workspaceId],
     );
+    await seedInventoryInterviewState(appClient, targetedClaimCaptureId);
 
     const { runDirectorTurn } = await import("@/lib/interview/director/brain");
     const result = await runDirectorTurn({
@@ -856,6 +865,7 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
       "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
       [hardRequiredToolCaptureId, orgId, workspaceId],
     );
+    await seedInventoryInterviewState(appClient, hardRequiredToolCaptureId);
 
     const { dispatchDirectorTurnPlan } = await import("@/lib/interview/director/brain");
     const chosenIntent = {
@@ -962,9 +972,12 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
     let creation: Promise<unknown> | null = null;
     try {
       await lockClient.query("BEGIN");
+      // The reconciliation lock is session-wide (not per-name): related names
+      // hash to different per-name keys, which let concurrent extractions
+      // insert both "Purchasing" and "Purchasing And Replenishment".
       await lockClient.query(
         "SELECT pg_advisory_xact_lock(hashtextextended($1, 13))",
-        [`${duplicateProcessCaptureId}:candidate_process:quote approvals`],
+        [`${duplicateProcessCaptureId}:candidate_process_reconcile`],
       );
 
       creation = recordProcess({
@@ -1028,6 +1041,288 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
       evidence_ids: [duplicateProcessEvidenceAId, duplicateProcessEvidenceBId].sort(),
     });
   }, 30_000);
+
+  test("recordProcess reconciles related names across turns into one renamed candidate", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [reconcileCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO evidence (id, org_id, workspace_id, source_type, evidence_label, quote)
+        VALUES
+          ($1, $3, $4, 'transcript_segment', 'stated_director', 'plus purchasing in our vendor payments'),
+          ($2, $3, $4, 'transcript_segment', 'stated_director', 'Purchasing and replenishment is one of the six.')
+        ON CONFLICT (id) DO NOTHING
+      `,
+      [reconcileEvidenceAId, reconcileEvidenceBId, orgId, workspaceId],
+    );
+
+    const { recordProcess } = await import("@/lib/interview/director/tools");
+    const context = {
+      orgId,
+      workspaceId,
+      captureSessionId: reconcileCaptureId,
+      userId,
+    };
+    // Turn 0: the scope sentence mints "Purchasing".
+    const first = await recordProcess(context, {
+      name: "Purchasing",
+      confidence: 0.74,
+      evidenceIds: [reconcileEvidenceAId],
+    });
+    expect(first?.proposedName).toBe("Purchasing");
+    // Turn 1: the enumeration names the compound. The atom row must be
+    // renamed to the fuller phrase with evidence spanning both turns.
+    const second = await recordProcess(context, {
+      name: "Purchasing And Replenishment",
+      confidence: 0.74,
+      evidenceIds: [reconcileEvidenceBId],
+    });
+    expect(second?.id).toBe(first?.id);
+    expect(second?.proposedName).toBe("Purchasing And Replenishment");
+
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    const rows = await appClient.query(
+      `
+        SELECT count(*)::int AS candidates,
+               max(proposed_name) AS proposed_name,
+               (SELECT array_agg(DISTINCT evidence_id ORDER BY evidence_id)
+                  FROM candidate_processes cp2, unnest(cp2.evidence_ids) AS evidence_id
+                 WHERE cp2.capture_session_id = $1) AS evidence_ids,
+               (SELECT count(*)::int FROM audit_log
+                 WHERE org_id = $2
+                   AND event_type = 'candidate_process.reconciled') AS reconcile_audits
+        FROM candidate_processes
+        WHERE capture_session_id = $1 AND status = 'pending'
+      `,
+      [reconcileCaptureId, orgId],
+    );
+    expect(rows.rows[0].candidates).toBe(1);
+    expect(rows.rows[0].proposed_name).toBe("Purchasing And Replenishment");
+    expect(rows.rows[0].evidence_ids).toEqual(
+      [reconcileEvidenceAId, reconcileEvidenceBId].sort(),
+    );
+    expect(rows.rows[0].reconcile_audits).toBeGreaterThan(0);
+
+    // The proposed_name claim history shows the rename: old name superseded.
+    const claims = await appClient.query(
+      `
+        SELECT value #>> '{}' AS name, status
+        FROM claims
+        WHERE subject_type = 'candidate_process' AND subject_id = $1 AND field = 'proposed_name'
+        ORDER BY created_at
+      `,
+      [first?.id],
+    );
+    const active = claims.rows.filter((row) => row.status === "active");
+    expect(active).toHaveLength(1);
+    expect(active[0].name).toBe("Purchasing And Replenishment");
+  });
+
+  test("recordProcess serializes RELATED-name creation under the session-wide lock", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [reconcileRaceCaptureId, orgId, workspaceId],
+    );
+    const { recordProcess } = await import("@/lib/interview/director/tools");
+    const context = {
+      orgId,
+      workspaceId,
+      captureSessionId: reconcileRaceCaptureId,
+      userId,
+    };
+    // Two related names racing in parallel transactions: with the per-name
+    // lock these inserted two rows; the session-wide lock serializes them so
+    // the second sees and merges into the first.
+    await Promise.all([
+      recordProcess(context, {
+        name: "Purchasing",
+        confidence: 0.9,
+        evidenceIds: [],
+      }),
+      recordProcess(context, {
+        name: "Purchasing And Replenishment",
+        confidence: 0.74,
+        evidenceIds: [],
+      }),
+    ]);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    const rows = await appClient.query(
+      "SELECT count(*)::int AS candidates FROM candidate_processes WHERE capture_session_id = $1 AND status = 'pending'",
+      [reconcileRaceCaptureId],
+    );
+    expect(rows.rows[0].candidates).toBe(1);
+  }, 30_000);
+
+  test("recordPerson works_on link scopes overview people_count to the candidate", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [worksOnCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO evidence (id, org_id, workspace_id, source_type, evidence_label, quote)
+        VALUES ($1, $2, $3, 'transcript_segment', 'stated_director', 'Marcus keeps the Google Sheet for order intake.')
+        ON CONFLICT (id) DO NOTHING
+      `,
+      [worksOnEvidenceId, orgId, workspaceId],
+    );
+
+    const { recordProcess, recordPerson } = await import(
+      "@/lib/interview/director/tools"
+    );
+    const context = {
+      orgId,
+      workspaceId,
+      captureSessionId: worksOnCaptureId,
+      userId,
+    };
+    const candidate = await recordProcess(context, {
+      name: "Order Intake",
+      confidence: 0.9,
+      evidenceIds: [worksOnEvidenceId],
+    });
+    expect(candidate).not.toBeNull();
+    // Two people in the workspace; only Marcus is linked to order intake.
+    await recordPerson(context, {
+      name: "Marcus",
+      roleName: "Order Desk",
+      candidateProcessId: candidate?.id,
+      evidenceIds: [worksOnEvidenceId],
+    });
+    await recordPerson(context, {
+      name: "Priya",
+      roleName: "Purchasing Lead",
+      evidenceIds: [worksOnEvidenceId],
+    });
+
+    const { getProcessCards } = await import("@/lib/overview/queries");
+    const cards = await getProcessCards(orgId, workspaceId, {
+      captureSessionId: worksOnCaptureId,
+    });
+    const orderIntake = cards.find((card) => card.name === "Order Intake");
+    expect(orderIntake).toBeDefined();
+    // Only the linked person counts — not every person in the workspace.
+    expect(orderIntake?.people_count).toBe(1);
+    // Voice-only evidence: doc coverage is honestly zero, evidence is visible.
+    expect(orderIntake?.doc_coverage).toBe(0);
+    expect(orderIntake?.evidence_count).toBeGreaterThan(0);
+  });
+
+  test("gated dispatch drops inventory slot updates and passing-mention person links", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [gatedTurnCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO evidence (id, org_id, workspace_id, source_type, evidence_label, quote)
+        VALUES ($1, $2, $3, 'transcript_segment', 'stated_director', 'I own everything from intake through invoicing. Tom is our AP clerk.')
+        ON CONFLICT (id) DO NOTHING
+      `,
+      [gatedTurnEvidenceId, orgId, workspaceId],
+    );
+    // No interview_state row: the minting gate is closed (orient phase).
+
+    const { dispatchDirectorTurnPlan } = await import(
+      "@/lib/interview/director/brain"
+    );
+    const chosenIntent = {
+      intent: "discover_function",
+      target_slot: "function.name",
+      score: 100,
+      reason: "Scope answer.",
+    };
+    await dispatchDirectorTurnPlan({
+      orgId,
+      workspaceId,
+      captureSessionId: gatedTurnCaptureId,
+      userId,
+      latestUtterance:
+        "I own everything from intake through invoicing. Tom is our AP clerk.",
+      transcriptSegmentIds: [],
+      evidenceIds: [gatedTurnEvidenceId],
+      turnIndex: 0,
+      plannedAgentUtterance: "What are the main processes your team owns?",
+      plan: {
+        utterance_type: "substantive_answer",
+        slot_updates: [
+          {
+            slot_path: "process.inventory",
+            status: "partial",
+            confidence: 0.7,
+            evidence_ids: [gatedTurnEvidenceId],
+            priority: 90,
+            value: { processes: ["Order Picking", "Shipping", "Invoicing"] },
+          },
+        ],
+        claims: [],
+        tool_calls: [
+          {
+            name: "recordProcess",
+            arguments: { name: "Order Picking", confidence: 0.74 },
+          },
+          {
+            name: "recordPerson",
+            arguments: { name: "Tom", roleName: "AP Clerk" },
+          },
+        ],
+        contradiction_signals: [],
+        current_phase: "orient",
+        proposed_next_phase: "inventory",
+        phase_transition_ready: true,
+        ranked_intents: [chosenIntent],
+        chosen_intent: chosenIntent,
+        planned_agent_utterance: "What are the main processes your team owns?",
+      },
+    });
+
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    const rows = await appClient.query(
+      `
+        SELECT
+          (SELECT count(*)::int FROM candidate_processes
+            WHERE capture_session_id = $1) AS candidates,
+          (SELECT count(*)::int FROM slot_states
+            WHERE capture_session_id = $1 AND slot_path = 'process.inventory') AS inventory_slots,
+          (SELECT count(*)::int FROM claims c JOIN people p ON p.id = c.subject_id
+            WHERE c.subject_type = 'person' AND c.field = 'works_on'
+              AND lower(p.name) = 'tom') AS tom_links
+      `,
+      [gatedTurnCaptureId],
+    );
+    // Gate closed: no candidates minted, no inventory slot written, and Tom —
+    // mentioned in passing with no explicit process — gets no works_on link
+    // even though dispatch had an active-candidate fallback available.
+    expect(rows.rows[0]).toEqual({
+      candidates: 0,
+      inventory_slots: 0,
+      tom_links: 0,
+    });
+  });
 
   test("director dispatch preserves slot data when chosen-intent claims are malformed", async () => {
     await seedWeek2Graph(appClient);
@@ -1516,6 +1811,7 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
       "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
       [demoClaimReplayCaptureId, orgId, workspaceId],
     );
+    await seedInventoryInterviewState(appClient, demoClaimReplayCaptureId);
     await appClient.query(
       `
         INSERT INTO evidence (id, org_id, workspace_id, source_type, evidence_label, quote)
@@ -1751,6 +2047,7 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
       "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
       [drainRetryCaptureId, orgId, workspaceId],
     );
+    await seedInventoryInterviewState(appClient, drainRetryCaptureId);
     await appClient.query(
       `
         INSERT INTO evidence (id, org_id, workspace_id, source_type, evidence_label, quote)
@@ -2355,6 +2652,12 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
       expect(interviewResponse.status).toBe(201);
       const interviewJson = await interviewResponse.json();
       const captureSessionId = interviewJson.capture_session.id as string;
+      // The posted utterance is a process enumeration; in the real flow the
+      // agent would have asked the inventory probe first.
+      await seedInventoryInterviewState(appClient, captureSessionId, {
+        orgId: apiOrgId,
+        workspaceId: apiWorkspaceId,
+      });
 
       const turnResponse = await turnsRoute.POST(
         apiRequest(
@@ -5468,6 +5771,27 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
     expect(Number(rows.rows[0].confidence)).toBe(0.9);
   }, 30_000);
 });
+
+// Candidate minting is gated on pre-existing interview state (the inventory
+// phase or a just-asked discover_processes probe). Dispatch tests that mint
+// candidates seed that state so they exercise their actual subject rather
+// than the gate.
+async function seedInventoryInterviewState(
+  client: Client,
+  captureSessionId: string,
+  ids: { orgId: string; workspaceId: string } = { orgId, workspaceId },
+) {
+  await client.query("SELECT set_config('app.current_org_id', $1, false)", [
+    ids.orgId,
+  ]);
+  await client.query(
+    `INSERT INTO interview_state (org_id, workspace_id, capture_session_id, current_phase, prior_intent)
+     VALUES ($1, $2, $3, 'inventory', 'discover_processes')
+     ON CONFLICT (capture_session_id)
+     DO UPDATE SET current_phase = 'inventory', prior_intent = 'discover_processes'`,
+    [ids.orgId, ids.workspaceId, captureSessionId],
+  );
+}
 
 async function seedWeek2Graph(client: Client) {
   await client.query("SELECT set_config('app.current_org_id', $1, false)", [

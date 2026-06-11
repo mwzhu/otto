@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "description": "Regression fixture from prod director session e919bb61-0b32-43ba-813a-9548fcf470eb (2026-06-11). The director named exactly six processes; the brain emitted 18 recordProcess tool calls across three turns (scope-sentence sub-steps, compound/atom splits, and junk quantifier/pronoun names). Each case replays one turn's actual LLM tool-call shapes through materializeDirectorProcessInventory and asserts what may survive. Cross-turn reconciliation (turn-0 'Purchasing' merging into turn-1 'Purchasing And Replenishment') is covered separately by the recordProcess integration tests.",
+  "cases": [
+    {
+      "id": "turn_0_scope_sentence_mints_no_sub_steps",
+      "comment": "Director: 'I'm the VP of operations. I own everything from when a customer order comes in through getting it picked, shipped, and invoiced plus purchasing in our vendor payments.' The brain minted six candidates from a scope sentence. The materializer cannot know these are sub-steps (no name containment), so per-turn it keeps plausible names — the dispatch-level inventory gate (phase orient, prior intent discover_function) is what blocks minting. This case asserts the junk filter at minimum.",
+      "tool_calls": [
+        { "name": "recordProcess", "arguments": { "name": "Order Intake", "confidence": 0.74 } },
+        { "name": "recordProcess", "arguments": { "name": "Purchasing", "confidence": 0.74 } },
+        { "name": "recordProcess", "arguments": { "name": "Vendor Payments", "confidence": 0.74 } },
+        { "name": "recordProcess", "arguments": { "name": "Order Picking", "confidence": 0.74 } },
+        { "name": "recordProcess", "arguments": { "name": "Shipping", "confidence": 0.74 } },
+        { "name": "recordProcess", "arguments": { "name": "Invoicing", "confidence": 0.74 } }
+      ],
+      "minting_gate": { "current_phase": "orient", "prior_intent": "discover_function", "expected_open": false },
+      "expected_surviving_names": [
+        "Order Intake",
+        "Purchasing",
+        "Vendor Payments",
+        "Order Picking",
+        "Shipping",
+        "Invoicing"
+      ],
+      "forbidden_surviving_names": []
+    },
+    {
+      "id": "turn_1_enumeration_compounds_survive_atoms_and_junk_collapse",
+      "comment": "Director: 'Yeah. So we manage six big ones. Order intake... Purchasing and replenishment, and vendor invoice processing, our AP. Inventory cycle counts, new customer onboarding and credit setup. And returns and credit memos.' The brain emitted the compounds AND their atoms AND 'Six Big Ones'. Atoms must collapse into their compounds; the quantifier phrase must be rejected.",
+      "tool_calls": [
+        { "name": "recordProcess", "arguments": { "name": "Order Intake", "confidence": 0.74 } },
+        { "name": "recordProcess", "arguments": { "name": "Inventory Cycle Counts", "confidence": 0.74 } },
+        { "name": "recordProcess", "arguments": { "name": "Vendor Invoice Processing", "confidence": 0.74 } },
+        { "name": "recordProcess", "arguments": { "name": "Purchasing And Replenishment", "confidence": 0.74 } },
+        { "name": "recordProcess", "arguments": { "name": "New Customer Onboarding And Credit Setup", "confidence": 0.74 } },
+        { "name": "recordProcess", "arguments": { "name": "Returns And Credit Memos", "confidence": 0.74 } },
+        { "name": "recordProcess", "arguments": { "name": "Purchasing", "confidence": 0.95 } },
+        { "name": "recordProcess", "arguments": { "name": "Replenishment", "confidence": 0.95 } },
+        { "name": "recordProcess", "arguments": { "name": "New Customer Onboarding", "confidence": 0.95 } },
+        { "name": "recordProcess", "arguments": { "name": "Credit Setup", "confidence": 0.95 } },
+        { "name": "recordProcess", "arguments": { "name": "Returns", "confidence": 0.95 } },
+        { "name": "recordProcess", "arguments": { "name": "Credit Memos", "confidence": 0.95 } },
+        { "name": "recordProcess", "arguments": { "name": "Six Big Ones", "confidence": 0.78 } }
+      ],
+      "minting_gate": { "current_phase": "inventory", "prior_intent": "discover_processes", "expected_open": true },
+      "expected_surviving_names": [
+        "Order Intake",
+        "Inventory Cycle Counts",
+        "Vendor Invoice Processing",
+        "Purchasing And Replenishment",
+        "New Customer Onboarding And Credit Setup",
+        "Returns And Credit Memos"
+      ],
+      "forbidden_surviving_names": [
+        "Purchasing",
+        "Replenishment",
+        "New Customer Onboarding",
+        "Credit Setup",
+        "Returns",
+        "Credit Memos",
+        "Six Big Ones"
+      ]
+    },
+    {
+      "id": "turn_2_ownership_answer_mints_nothing",
+      "comment": "Director: 'No. We manage all of it.' (answer to a cross-department ownership probe). The brain minted a candidate named 'All Of It'. The junk filter must reject it even before the gate.",
+      "tool_calls": [
+        { "name": "recordProcess", "arguments": { "name": "All Of It", "confidence": 0.78 } }
+      ],
+      "minting_gate": { "current_phase": "expand", "prior_intent": "capture_owner_roles", "expected_open": false },
+      "expected_surviving_names": [],
+      "forbidden_surviving_names": ["All Of It"]
+    }
+  ],
+  "observed_junk_names_all_sessions": [
+    "Six Big Ones",
+    "All Of It",
+    "Out Of Stock",
+    "Not Very Proactive",
+    "It's Very Reactive",
+    "RAP",
+    "Pick",
+    "Ship",
+    "Pick And Ship",
+    "Invoiced"
+  ],
+  "legitimate_names_all_sessions": [
+    "Order Intake",
+    "Purchasing And Replenishment",
+    "Vendor Invoice Processing",
+    "Inventory Cycle Counts",
+    "New Customer Onboarding And Credit Setup",
+    "Returns And Credit Memos",
+    "Shipping",
+    "Invoicing",
+    "Order Picking",
+    "Vendor Payments",
+    "Forecasting",
+    "Quote Approvals",
+    "AP"
+  ]
+}

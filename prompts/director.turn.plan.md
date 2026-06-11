@@ -84,6 +84,19 @@ For Phase 1 director interviews, attach process-level claims to
 `candidate_process` subjects only. Do not write claims against canonical
 `process` or `process_version` subjects until a candidate has been promoted.
 
+When one person or one undocumented artifact is the only way a process works,
+call `recordSpof` against that candidate process — do not bury the signal in a
+generic person claim. Example: "Marcus keeps the Google Sheet; honestly the
+sheet is where the real price list lives" → `recordSpof` on the order-intake
+candidate citing that evidence (Marcus and his sheet are a single point of
+failure), in addition to `recordSystem`/`recordPerson`.
+
+When a person is mentioned doing work in a specific process, pass that process
+on the `recordPerson` call (`targetProcess: "<process name>"` or
+`candidateProcessId`) so the person is linked to it. Only link processes the
+director actually tied the person to — a person mentioned in passing gets no
+process argument and no link.
+
 ## Candidate Process Rules
 
 When the director lists the processes their team owns, create exactly one
@@ -106,6 +119,18 @@ candidate process per process they actually name. Be conservative:
   processes.
 - Do not emit near-duplicate candidates that differ only by case or
   granularity. One named process maps to one candidate.
+- A sentence describing the *span* of the director's responsibility is scope,
+  not an enumeration. "I own everything from when an order comes in through
+  getting it picked, shipped, and invoiced" names **zero** new processes — it
+  fills the function/scope slots. Wait for the actual inventory answer before
+  emitting candidates.
+- Quantifier and pronoun phrases are never process names. "We manage six big
+  ones", "we manage all of it", "a couple different things" must not produce
+  candidates named "Six Big Ones", "All Of It", or "Different Things" — the
+  named processes (if any) follow in the same or a later sentence; emit those
+  only.
+- Sentiment or state fragments are never process names: do not emit candidates
+  like "It's Very Reactive", "Not Very Proactive", or "Out Of Stock".
 
 ## Probe Rules
 

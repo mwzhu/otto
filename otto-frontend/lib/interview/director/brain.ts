@@ -74,6 +74,11 @@ import {
   assertDirectorCaptureAcceptsTurns,
   lockDirectorTurnSequence,
 } from "@/lib/interview/director/turn-transaction";
+import {
+  candidateNameTokenSet,
+  isPlausibleCandidateProcessName,
+  isTokenSubset,
+} from "@/lib/candidate-processes/name-quality";
 
 export type DirectorTurnInput = DirectorToolContext & {
   latestUtterance: string;
@@ -1072,7 +1077,15 @@ export function materializeDirectorProcessInventory(
   plan: DirectorTurnPlan,
 ): DirectorTurnPlan {
   const materializedCandidates = directorProcessCandidatesFromPlan(plan);
-  if (materializedCandidates.length === 0) return plan;
+  const hasDirectRecordProcessTools = plan.tool_calls.some(
+    (tool) => tool.name === "recordProcess",
+  );
+  // Even when nothing materializes (e.g. every direct recordProcess name was
+  // junk), direct recordProcess calls must still be stripped — they would
+  // otherwise bypass the collapse and junk gates entirely.
+  if (materializedCandidates.length === 0 && !hasDirectRecordProcessTools) {
+    return plan;
+  }
 
   const materializedNames = new Set(
     materializedCandidates.map((candidate) =>
@@ -1101,15 +1114,15 @@ export function materializeDirectorProcessInventory(
     );
   };
   const retainedToolCalls = plan.tool_calls.filter((tool) => {
+    // Direct recordProcess calls are re-emitted from the materialized
+    // candidates below; retaining the originals would let them bypass the
+    // collapse and the plausibility/junk filter (the prod 18-candidate bug).
+    if (tool.name === "recordProcess") return false;
     if (!isProposedNameCandidateTool(tool)) return true;
     const processName = processNameFromProposedNameTool(tool);
     return !processName || !isCoveredByMaterializedCandidate(processName);
   });
-  const seenRecordProcesses = new Set(
-    retainedToolCalls
-      .filter((tool) => tool.name === "recordProcess")
-      .map((tool) => normalizeCandidateProcessName(stringArg(tool.arguments.name) ?? "")),
-  );
+  const seenRecordProcesses = new Set<string>();
   const recordProcessTools = materializedCandidates
     .filter((candidate) => {
       const normalized = normalizeCandidateProcessName(candidate.name);
@@ -1125,6 +1138,13 @@ export function materializeDirectorProcessInventory(
         ...(candidate.proposedFunction
           ? { proposedFunction: candidate.proposedFunction }
           : {}),
+        ...(candidate.frequency ? { frequency: candidate.frequency } : {}),
+        ...(candidate.complexityHint
+          ? { complexityHint: candidate.complexityHint }
+          : {}),
+        ...(candidate.evidenceIds?.length
+          ? { evidenceIds: candidate.evidenceIds }
+          : {}),
       },
     }));
 
@@ -1137,29 +1157,57 @@ export function materializeDirectorProcessInventory(
   };
 }
 
+type DirectorMaterializedCandidate = {
+  name: string;
+  confidence: number;
+  proposedFunction?: string;
+  frequency?: string;
+  complexityHint?: string;
+  evidenceIds?: string[];
+};
+
 function directorProcessCandidatesFromPlan(plan: DirectorTurnPlan) {
   const proposedFunction = functionNameFromSlotUpdates(plan.slot_updates);
-  const candidates: Array<{
-    name: string;
-    confidence: number;
-    proposedFunction?: string;
-  }> = [];
-  const seen = new Set<string>();
+  const candidates: DirectorMaterializedCandidate[] = [];
+  const seenByName = new Map<string, DirectorMaterializedCandidate>();
   const addCandidate = (
     name: unknown,
     confidence: number,
-    candidateFunction = proposedFunction,
+    metadata: Partial<Omit<DirectorMaterializedCandidate, "name" | "confidence">> = {},
   ) => {
     const processName = stringArg(name);
     if (!isPlausibleDirectorProcessName(processName)) return;
     const normalized = normalizeCandidateProcessName(processName);
-    if (seen.has(normalized)) return;
-    seen.add(normalized);
-    candidates.push({
+    const existing = seenByName.get(normalized);
+    if (existing) {
+      // Same name from several sources in one turn: the first occurrence
+      // survives; fill its missing metadata and union evidence.
+      existing.confidence = Math.max(existing.confidence, confidence);
+      existing.proposedFunction ??= metadata.proposedFunction;
+      existing.frequency ??= metadata.frequency;
+      existing.complexityHint ??= metadata.complexityHint;
+      if (metadata.evidenceIds?.length) {
+        existing.evidenceIds = uniqueStrings([
+          ...(existing.evidenceIds ?? []),
+          ...metadata.evidenceIds,
+        ]);
+      }
+      return;
+    }
+    const candidate: DirectorMaterializedCandidate = {
       name: processName,
       confidence,
-      proposedFunction: candidateFunction,
-    });
+      proposedFunction: metadata.proposedFunction ?? proposedFunction,
+      ...(metadata.frequency ? { frequency: metadata.frequency } : {}),
+      ...(metadata.complexityHint
+        ? { complexityHint: metadata.complexityHint }
+        : {}),
+      ...(metadata.evidenceIds?.length
+        ? { evidenceIds: metadata.evidenceIds }
+        : {}),
+    };
+    seenByName.set(normalized, candidate);
+    candidates.push(candidate);
   };
 
   for (const slotUpdate of plan.slot_updates) {
@@ -1173,6 +1221,22 @@ function directorProcessCandidatesFromPlan(plan: DirectorTurnPlan) {
     if (!isProposedNameCandidateTool(tool)) continue;
     const processName = processNameFromProposedNameTool(tool);
     addCandidate(processName, numberArg(tool.arguments.confidence) ?? 0.74);
+  }
+  // Direct recordProcess calls funnel through the same collapse + filters as
+  // every other candidate source (they previously bypassed both), carrying
+  // their metadata so the collapse can preserve it on the survivor.
+  for (const tool of plan.tool_calls) {
+    if (tool.name !== "recordProcess") continue;
+    addCandidate(
+      stringArg(tool.arguments.name),
+      numberArg(tool.arguments.confidence) ?? 0.74,
+      {
+        proposedFunction: stringArg(tool.arguments.proposedFunction),
+        frequency: stringArg(tool.arguments.frequency),
+        complexityHint: stringArg(tool.arguments.complexityHint),
+        evidenceIds: stringArrayArg(tool.arguments.evidenceIds),
+      },
+    );
   }
 
   return collapseRelatedCandidateProcesses(candidates);
@@ -1200,13 +1264,13 @@ function directorProcessCandidatesFromPlan(plan: DirectorTurnPlan) {
 // director's phrasing (superset) over raw confidence for containment pairs so a
 // compound name stays a single candidate, which is the stated desired outcome.
 function collapseRelatedCandidateProcesses<
-  T extends { name: string; confidence: number },
+  T extends DirectorMaterializedCandidate,
 >(candidates: T[]): T[] {
-  const kept: Array<{ candidate: T; tokens: Set<string> }> = [];
+  const kept: Array<{ candidate: T; tokens: Set<string>; donors: T[] }> = [];
   for (const candidate of candidates) {
     const tokens = candidateNameTokenSet(candidate.name);
     if (tokens.size === 0) {
-      kept.push({ candidate, tokens });
+      kept.push({ candidate, tokens, donors: [] });
       continue;
     }
     const relatedIndex = kept.findIndex(
@@ -1215,44 +1279,48 @@ function collapseRelatedCandidateProcesses<
         (isTokenSubset(tokens, entry.tokens) || isTokenSubset(entry.tokens, tokens)),
     );
     if (relatedIndex === -1) {
-      kept.push({ candidate, tokens });
+      kept.push({ candidate, tokens, donors: [] });
       continue;
     }
     const existing = kept[relatedIndex];
     if (preferIncomingCandidate(candidate, tokens, existing.candidate, existing.tokens)) {
-      kept[relatedIndex] = { candidate, tokens };
+      kept[relatedIndex] = {
+        candidate,
+        tokens,
+        donors: [...existing.donors, existing.candidate],
+      };
+    } else {
+      existing.donors.push(candidate);
     }
   }
-  return kept.map((entry) => entry.candidate);
+  return kept.map((entry) =>
+    mergeCollapsedCandidateMetadata(entry.candidate, entry.donors),
+  );
 }
 
-const CANDIDATE_NAME_STOPWORDS = new Set([
-  "and",
-  "or",
-  "the",
-  "a",
-  "an",
-  "of",
-  "for",
-  "to",
-  "with",
-  "plus",
-]);
-
-function candidateNameTokenSet(name: string): Set<string> {
-  const tokens = normalizeCandidateProcessName(name)
-    .replace(/[^a-z0-9\s]+/g, " ")
-    .split(/\s+/)
-    .filter((token) => token.length > 0 && !CANDIDATE_NAME_STOPWORDS.has(token));
-  return new Set(tokens);
-}
-
-function isTokenSubset(subset: Set<string>, superset: Set<string>): boolean {
-  if (subset.size === 0 || subset.size > superset.size) return false;
-  for (const token of subset) {
-    if (!superset.has(token)) return false;
+// Metadata precedence when the collapse folds several candidates into one
+// survivor: the survivor's own non-null field always wins; otherwise inherit
+// from collapsed members in descending confidence order (so an atom's
+// `frequency` survives onto the compound that absorbed it). Evidence ids are
+// unioned across all members.
+function mergeCollapsedCandidateMetadata<T extends DirectorMaterializedCandidate>(
+  survivor: T,
+  donors: DirectorMaterializedCandidate[],
+): T {
+  if (donors.length === 0) return survivor;
+  const ranked = [...donors].sort((a, b) => b.confidence - a.confidence);
+  const merged = { ...survivor };
+  for (const field of ["proposedFunction", "frequency", "complexityHint"] as const) {
+    if (merged[field]) continue;
+    const donor = ranked.find((candidate) => candidate[field]);
+    if (donor) merged[field] = donor[field];
   }
-  return true;
+  const evidenceIds = uniqueStrings([
+    ...(survivor.evidenceIds ?? []),
+    ...donors.flatMap((donor) => donor.evidenceIds ?? []),
+  ]);
+  if (evidenceIds.length > 0) merged.evidenceIds = evidenceIds;
+  return merged;
 }
 
 function preferIncomingCandidate(
@@ -1735,6 +1803,31 @@ export async function dispatchDirectorTurnPlan(
       );
     }
 
+    // Candidate minting is gated on pre-existing conversation state — the
+    // phase recorded before this extraction ran, or the probe the agent asked
+    // in the previous turn targeting process.inventory (discover_processes).
+    // Deliberately NOT the current plan's own slot updates or utterance_type:
+    // a bad scope answer could self-authorize by emitting a bad inventory
+    // slot update. On gated turns names may still merge into existing
+    // candidates (recordProcess token-subset reconciliation) but never mint
+    // new ones — that kills scope-sentence sub-steps ("picked, shipped, and
+    // invoiced") and ownership answers ("we manage all of it").
+    const allowCandidateMinting =
+      state.currentPhase === "inventory" ||
+      state.priorIntent === "discover_processes";
+    if (!allowCandidateMinting) {
+      // The gate must close both candidate sources: recordProcess inserts
+      // (below) AND process.inventory slot updates — otherwise a gated scope
+      // answer still writes its junk names into slot_states and marks the
+      // inventory slot filled with no candidates behind it.
+      plan = {
+        ...plan,
+        slot_updates: plan.slot_updates.filter(
+          (slotUpdate) => slotUpdate.slot_path !== "process.inventory",
+        ),
+      };
+    }
+
     for (const [toolIndex, processTool] of plan.tool_calls.entries()) {
       if (processTool.name !== "recordProcess") continue;
       const args = processTool.arguments;
@@ -1762,6 +1855,13 @@ export async function dispatchDirectorTurnPlan(
         continue;
       }
       const toolStarted = Date.now();
+      // Materialized calls carry per-candidate evidence (possibly unioned
+      // across collapsed members); honor it, filtered to the turn's allowed
+      // set per the evidence-preflight discipline. Calls without their own
+      // evidence fall back to the blanket turn set.
+      const toolEvidenceIds = (stringArrayArg(args.evidenceIds) ?? []).filter(
+        (evidenceId) => input.evidenceIds.includes(evidenceId),
+      );
       const candidate = await recordProcess(
         context,
         {
@@ -1770,10 +1870,40 @@ export async function dispatchDirectorTurnPlan(
           frequency: stringArg(args.frequency),
           complexityHint: stringArg(args.complexityHint),
           confidence: numberArg(args.confidence) ?? 0.74,
-          evidenceIds: input.evidenceIds,
+          evidenceIds:
+            toolEvidenceIds.length > 0 ? toolEvidenceIds : input.evidenceIds,
+          allowNewCandidate: allowCandidateMinting,
         },
         { tx },
       );
+      if (!candidate) {
+        // Either the write-time junk guard refused the name (defense in depth
+        // behind isPlausibleDirectorProcessName above), or this is a
+        // non-enumeration turn and the name had no existing candidate to
+        // merge into.
+        degradedQuality = true;
+        degradedReasons.add("invalid_process_name");
+        await createFollowUpTask(
+          context,
+          {
+            taskType: "low_confidence_claim",
+            title: "Review skipped director process candidate",
+            description: allowCandidateMinting
+              ? "A proposed process name matched a junk-name pattern and was not recorded."
+              : "Candidate minting is gated to inventory-enumeration turns; the name had no existing candidate to merge into.",
+            targetType: "capture_session",
+            targetId: input.captureSessionId,
+            priority: 2,
+            contextJson: {
+              proposed_name: processName,
+              evidence_ids: input.evidenceIds,
+              minting_gate_open: allowCandidateMinting,
+            },
+          },
+          { tx },
+        );
+        continue;
+      }
       toolExecutionLog.push(
         directorToolExecutionLogEntry({
           input,
@@ -1866,11 +1996,21 @@ export async function dispatchDirectorTurnPlan(
       if (tool.name === "recordPerson") {
         const personName = stringArg(tool.arguments.name);
         if (personName) {
+          // works_on links require the extractor to have explicitly tied the
+          // person to a process — falling back to the focus candidate would
+          // link every passing mention to the active card and re-inflate
+          // people counts.
+          const personCandidateId = await explicitCandidateProcessIdForTool(
+            context,
+            tool.arguments,
+            candidateProcessIdsByName,
+            tx,
+          );
           await runDirectorTool(
             plan.tool_calls.indexOf(tool),
             tool.name,
             tool.arguments,
-            undefined,
+            personCandidateId,
             async () => {
               const person = await recordPerson(
                 context,
@@ -1878,6 +2018,7 @@ export async function dispatchDirectorTurnPlan(
                   name: personName,
                   title: stringArg(tool.arguments.title),
                   roleName: stringArg(tool.arguments.roleName),
+                  candidateProcessId: personCandidateId,
                   evidenceIds: input.evidenceIds,
                 },
                 { tx },
@@ -3478,10 +3619,14 @@ function candidateIdForSlot(
   }).candidateProcessId;
 }
 
-async function candidateProcessIdForTool(
+// Resolves a candidate id ONLY when the tool arguments explicitly reference a
+// process (by id or by name). Returns undefined otherwise — callers that must
+// not inherit the focus candidate (recordPerson's works_on link) use this
+// directly, so a person mentioned in passing is not linked to whatever
+// process happens to be active.
+async function explicitCandidateProcessIdForTool(
   context: DirectorToolContext,
   toolArguments: Record<string, unknown>,
-  fallbackCandidateProcessId: string | undefined,
   candidateProcessIdsByName: Map<string, string>,
   tx: ClaimWriteTx,
 ) {
@@ -3510,7 +3655,24 @@ async function candidateProcessIdForTool(
     if (existingCandidateId) return existingCandidateId;
   }
 
-  return fallbackCandidateProcessId;
+  return undefined;
+}
+
+async function candidateProcessIdForTool(
+  context: DirectorToolContext,
+  toolArguments: Record<string, unknown>,
+  fallbackCandidateProcessId: string | undefined,
+  candidateProcessIdsByName: Map<string, string>,
+  tx: ClaimWriteTx,
+) {
+  return (
+    (await explicitCandidateProcessIdForTool(
+      context,
+      toolArguments,
+      candidateProcessIdsByName,
+      tx,
+    )) ?? fallbackCandidateProcessId
+  );
 }
 
 async function candidateProcessIdByName(
@@ -5817,28 +5979,9 @@ function normalizeProcessName(value: string) {
 }
 
 function isPlausibleDirectorProcessName(value: unknown): value is string {
-  if (typeof value !== "string") return false;
-  const cleaned = cleanPhrase(value);
-  const lower = cleaned.toLowerCase();
-  if (cleaned.length < 3 || cleaned.length > 80) return false;
-  if (cleaned.split(/\s+/).length > 8) return false;
-  if (
-    /^(then|and then|we then|we first|first|next|finally)\b/i.test(cleaned) ||
-    /^(we\s+)?(?:begin|start|move|send|finish|look|open|check|copy|paste|reconcile|review|approve|export|upload|download)\b/i.test(cleaned)
-  ) {
-    return false;
-  }
-  if (
-    /\b(?:begin by|starts? by|move data|send off|final check|we finish|looking at|make sure)\b/i.test(cleaned)
-  ) {
-    return false;
-  }
-  if (
-    /^(?:google sheets?|netsuite|workday|salesforce|excel|slack|jira|asana|hubspot|zendesk)$/i.test(cleaned)
-  ) {
-    return false;
-  }
-  return !/^(?:and we|we|i|they|it|this|that|looks like|successful)$/i.test(lower);
+  // Single source of truth shared with recordProcess's write-time guard and
+  // the document pipeline (lib/candidate-processes/name-quality.ts).
+  return isPlausibleCandidateProcessName(value);
 }
 
 function chooseFocusProcess(
@@ -6520,6 +6663,14 @@ function stringArg(value: unknown) {
 
 function numberArg(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function stringArrayArg(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const strings = value.filter(
+    (item): item is string => typeof item === "string" && item.trim().length > 0,
+  );
+  return strings.length > 0 ? strings : undefined;
 }
 
 function hash(value: unknown) {

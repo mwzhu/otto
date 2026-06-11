@@ -28,6 +28,11 @@ import { normalizeDirectorSlotValue } from "@/lib/interview/director/slot-values
 import { isNonAnswerSlotExtraction } from "@/lib/interview/director/slot-non-answer";
 import { stableStringify } from "@/lib/http/json";
 import { sanitizeForLogs, sanitizeJsonForLogs } from "@/lib/security/sanitize";
+import {
+  candidateNameTokenSet,
+  isPlausibleCandidateProcessName,
+  isTokenSubset,
+} from "@/lib/candidate-processes/name-quality";
 
 export type DirectorToolContext = {
   orgId: string;
@@ -292,58 +297,122 @@ export async function recordProcess(
     complexityHint?: string;
     confidence?: number;
     evidenceIds: string[];
+    /**
+     * When false (non-enumeration turns), the name may merge into or rename
+     * an existing pending candidate but never mint a brand-new one. Returns
+     * null when no related candidate exists.
+     */
+    allowNewCandidate?: boolean;
   },
   options: DirectorToolOptions = {},
 ) {
+  // Defense in depth: the full shared predicate (junk shapes, narration
+  // fragments, bare system names) runs at write time so direct callers like
+  // the document pipeline cannot insert a name the brain would reject.
+  if (!isPlausibleCandidateProcessName(input.name)) {
+    return null;
+  }
   const normalized = normalizeName(input.name);
   return withDirectorToolTx(context, options, async (tx) => {
+    // Session-wide reconciliation lock — deliberately NOT per-name. Related
+    // names ("Purchasing" vs "Purchasing And Replenishment") hash to different
+    // per-name keys, so a per-name lock cannot stop two concurrent extractions
+    // from racing past the related-candidate scan below and inserting both.
     await tx.execute(sql`
       SELECT pg_advisory_xact_lock(
         hashtextextended(
-          ${`${context.captureSessionId}:candidate_process:${normalized}`},
+          ${`${context.captureSessionId}:candidate_process_reconcile`},
           13
         )
       )
     `);
-    const existing = await tx.execute<{
+    const pending = await tx.execute<{
       id: string;
+      proposed_name: string;
       proposed_function: string | null;
       frequency: string | null;
       complexity_hint: string | null;
       evidence_ids: string[] | null;
     }>(sql`
-      SELECT id, proposed_function, frequency, complexity_hint, evidence_ids
+      SELECT id, proposed_name, proposed_function, frequency, complexity_hint, evidence_ids
       FROM candidate_processes
       WHERE org_id = ${context.orgId}
         AND workspace_id = ${context.workspaceId}
         AND capture_session_id = ${context.captureSessionId}
-        AND lower(proposed_name) = ${normalized}
         AND status = 'pending'
-      LIMIT 1
+      ORDER BY created_at ASC
       FOR UPDATE
     `);
-    const existingRow = existing.rows[0];
+    const exactRow = pending.rows.find(
+      (row) => normalizeName(row.proposed_name) === normalized,
+    );
+    // Cross-turn reconciliation: an incoming name whose significant-word set
+    // contains (or is contained by) an existing pending candidate's is the
+    // same process at different granularity — turn 0's "Purchasing" followed
+    // by turn 1's "Purchasing And Replenishment" must end as one row.
+    const incomingTokens = candidateNameTokenSet(input.name);
+    const relatedRow =
+      exactRow ??
+      (incomingTokens.size > 0
+        ? pending.rows.find((row) => {
+            const rowTokens = candidateNameTokenSet(row.proposed_name);
+            return (
+              rowTokens.size > 0 &&
+              (isTokenSubset(incomingTokens, rowTokens) ||
+                isTokenSubset(rowTokens, incomingTokens))
+            );
+          })
+        : undefined);
     let candidate;
-    if (existingRow) {
+    if (relatedRow) {
       const mergedEvidenceIds = unique([
-        ...(existingRow.evidence_ids ?? []),
+        ...(relatedRow.evidence_ids ?? []),
         ...input.evidenceIds,
       ]);
+      // The fuller (superset) phrasing is the director's compound name; when
+      // the incoming name strictly contains the stored one, rename the row.
+      const relatedTokens = candidateNameTokenSet(relatedRow.proposed_name);
+      const shouldRename =
+        !exactRow &&
+        relatedTokens.size < incomingTokens.size &&
+        isTokenSubset(relatedTokens, incomingTokens);
       candidate = (
         await tx
           .update(candidateProcesses)
           .set({
-            proposedFunction: input.proposedFunction ?? existingRow.proposed_function ?? undefined,
-            frequency: input.frequency ?? existingRow.frequency ?? undefined,
-            complexityHint: input.complexityHint ?? existingRow.complexity_hint ?? undefined,
+            ...(shouldRename ? { proposedName: input.name.trim() } : {}),
+            proposedFunction: input.proposedFunction ?? relatedRow.proposed_function ?? undefined,
+            frequency: input.frequency ?? relatedRow.frequency ?? undefined,
+            complexityHint: input.complexityHint ?? relatedRow.complexity_hint ?? undefined,
             evidenceIds: mergedEvidenceIds,
             confidence: String(input.confidence ?? 0.75),
             updatedAt: new Date(),
           })
-          .where(eq(candidateProcesses.id, existingRow.id))
+          .where(eq(candidateProcesses.id, relatedRow.id))
           .returning()
       )[0];
+      if (!exactRow) {
+        await tx.insert(auditLog).values({
+          orgId: context.orgId,
+          workspaceId: context.workspaceId,
+          userId: context.userId,
+          eventType: "candidate_process.reconciled",
+          subjectType: "candidate_process",
+          subjectId: relatedRow.id,
+          metadataJson: sanitizeJsonForLogs({
+            incoming_name: input.name.trim(),
+            stored_name: relatedRow.proposed_name,
+            action: shouldRename ? "renamed_to_compound" : "merged_into_existing",
+            capture_session_id: context.captureSessionId,
+          }) as Record<string, unknown>,
+        });
+      }
     } else {
+      // Non-enumeration turns may only merge into existing candidates; a name
+      // with no related pending candidate is not minted (B1 gate).
+      if (input.allowNewCandidate === false) {
+        return null;
+      }
       candidate = (
         await tx
           .insert(candidateProcesses)
@@ -452,7 +521,13 @@ export async function recordRole(
 
 export async function recordPerson(
   context: DirectorToolContext,
-  input: { name: string; title?: string; roleName?: string; evidenceIds: string[] },
+  input: {
+    name: string;
+    title?: string;
+    roleName?: string;
+    candidateProcessId?: string;
+    evidenceIds: string[];
+  },
   options: DirectorToolOptions = {},
 ) {
   return withDirectorToolTx(context, options, async (tx) => {
@@ -500,6 +575,30 @@ export async function recordPerson(
         requestHash: claimHash(input),
         route: "director-tool/record-person",
         metadata: { role_id: role.id, source: "director_tool" },
+      });
+    }
+    // Person→candidate link: the overview people_count joins on this claim, so
+    // a person only counts toward processes they were actually evidenced on
+    // (previously every workspace person counted on every card).
+    if (input.candidateProcessId) {
+      await writeClaimInTransaction(tx, {
+        orgId: context.orgId,
+        workspaceId: context.workspaceId,
+        userId: context.userId,
+        subject: { type: "person", id: person.id },
+        field: "works_on",
+        value: { candidate_process_id: input.candidateProcessId },
+        evidenceIds: input.evidenceIds,
+        confidence: 0.72,
+        idempotencyKey: claimKey("person", person.id, "works_on", {
+          candidateProcessId: input.candidateProcessId,
+        }),
+        requestHash: claimHash({
+          candidateProcessId: input.candidateProcessId,
+          evidenceIds: input.evidenceIds,
+        }),
+        route: "director-tool/record-person",
+        metadata: { source: "director_tool" },
       });
     }
     return person;

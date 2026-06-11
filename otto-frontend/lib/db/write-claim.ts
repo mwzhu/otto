@@ -452,4 +452,7 @@ const multiValueClaimFields = new Set([
   "used_in_process",
   "participates_in_process",
   "handoff_target",
+  // A person can work on several candidate processes; each link is its own
+  // active claim (the overview people_count counts these per candidate).
+  "works_on",
 ]);

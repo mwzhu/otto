@@ -74,7 +74,8 @@
       "fields": [
         { "field": "role", "value_schema": { "type": "string" } },
         { "field": "manager", "value_schema": { "type": ["string", "object"] } },
-        { "field": "single_point_of_failure", "value_schema": { "type": ["boolean", "object"] } }
+        { "field": "single_point_of_failure", "value_schema": { "type": ["boolean", "object"] } },
+        { "field": "works_on", "value_schema": { "type": "object" } }
       ]
     },
     {

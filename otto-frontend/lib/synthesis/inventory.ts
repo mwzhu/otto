@@ -15,6 +15,7 @@ import { writeClaim } from "@/lib/db/write-claim";
 import { stableStringify } from "@/lib/http/json";
 import { computeComplexityScore, type ComplexityScore } from "@/lib/synthesis/complexity";
 import { generateCandidateNarrative, type CandidateNarrative } from "@/lib/synthesis/narrative";
+import { genericCandidateProcessNames } from "@/lib/candidate-processes/name-quality";
 
 export type InventorySynthesisInput = {
   orgId: string;
@@ -38,17 +39,6 @@ export type CandidateInventoryRow = {
   risks: Array<{ text?: string; evidence_ids?: string[] }> | null;
   documented_evidence_count: number;
 };
-
-const genericCandidateProcessNames = [
-  "a couple different things",
-  "couple different things",
-  "different things",
-  "a few things",
-  "several things",
-  "some things",
-  "multiple things",
-  "things",
-] as const;
 
 export async function runInventorySynthesis(input: InventorySynthesisInput) {
   const actorUserId = input.userId ?? (await firstOrgUserId(input.orgId));
@@ -173,6 +163,39 @@ export async function runInventorySynthesis(input: InventorySynthesisInput) {
         .update(synthesisRuns)
         .set({ status: "completed", stage: "publish-draft-inventory", updatedAt: new Date() })
         .where(eq(synthesisRuns.id, run.id));
+      // Session hygiene: a completed director-driven inventory supersedes the
+      // workspace's still-pending candidates from earlier sessions. Without
+      // this, every re-run of the interview stacks a fresh copy of the
+      // inventory onto the overview (prod accumulated 90 pending candidates
+      // across six test sessions). Document-only runs do not supersede —
+      // an upload must not silently archive director candidates.
+      const runType = input.runType ?? "combined_inventory";
+      if (runType === "director_inventory" || runType === "combined_inventory") {
+        const superseded = await tx.execute<{ id: string; proposed_name: string }>(sql`
+          UPDATE candidate_processes
+          SET status = 'discarded', updated_at = now()
+          WHERE org_id = ${input.orgId}
+            AND workspace_id = ${input.workspaceId}
+            AND status = 'pending'
+            AND NOT (capture_session_id = ANY(${uuidArraySql(input.captureSessionIds)}))
+          RETURNING id, proposed_name
+        `);
+        if (superseded.rows.length > 0) {
+          await tx.insert(auditLog).values({
+            orgId: input.orgId,
+            workspaceId: input.workspaceId,
+            userId: actorUserId,
+            eventType: "candidate_process.superseded_by_session",
+            subjectType: "synthesis_run",
+            subjectId: run.id,
+            metadataJson: {
+              capture_session_ids: input.captureSessionIds,
+              superseded_candidate_ids: superseded.rows.map((row) => row.id),
+              superseded_count: superseded.rows.length,
+            },
+          });
+        }
+      }
       await tx.insert(auditLog).values({
         orgId: input.orgId,
         workspaceId: input.workspaceId,

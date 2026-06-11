@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "../scripts/with-env.sh .env.local -- next dev",
-    "build": "if [ -x ../scripts/with-env.sh ]; then ../scripts/with-env.sh .env.local -- next build; else next build; fi",
+    "build": "if [ -d ../schemas ]; then mkdir -p schemas && cp ../schemas/*.json schemas/; fi && if [ -x ../scripts/with-env.sh ]; then ../scripts/with-env.sh .env.local -- next build; else next build; fi",
     "start": "../scripts/with-env.sh .env.local -- next start",
     "lint": "eslint",
     "test": "../scripts/with-env.sh .env.local -- vitest run tests/phase0 tests/phase1",

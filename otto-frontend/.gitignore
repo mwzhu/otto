@@ -41,3 +41,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Build-time copy of repo-root schemas/ (source of truth lives at ../schemas; see prebuild script)
+/schemas/

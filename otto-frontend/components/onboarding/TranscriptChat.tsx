@@ -24,6 +24,7 @@ import { Pill } from "@/components/ui/Pill";
 import { AnimatedDots } from "@/components/common/AnimatedDots";
 import { BRAND } from "@/lib/brand";
 import { cn } from "@/lib/cn";
+import { computeCoverageSummary } from "@/lib/interview/director/coverage-meter";
 import { DIRECTOR_SESSION_KEY } from "@/app/onboarding/voice/VoicePreStartClient";
 
 type DirectorSession = {
@@ -311,15 +312,13 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
     return () => window.clearInterval(timer);
   }, [listening, paused]);
 
-  const filledSlots = useMemo(
-    () =>
-      coverage.filter((slot) =>
-        ["filled", "asked_unknown"].includes(slot.status),
-      ).length,
+  // Weighted coverage (Task 13): partial slots carry real extracted data, so
+  // they earn fractional credit instead of reading as empty. See
+  // computeCoverageSummary for the weighting.
+  const { filledSlots, partialSlots, totalSlots, coveragePercent } = useMemo(
+    () => computeCoverageSummary(coverage),
     [coverage],
   );
-  const totalSlots = Math.max(coverage.length, 13);
-  const coveragePercent = Math.round((filledSlots / totalSlots) * 100);
   const displayMessages = useMemo(
     () =>
       listening
@@ -1019,7 +1018,9 @@ export function TranscriptChat({ nextHref }: { nextHref: string }) {
         <header className="border-b border-subtle px-4 py-3">
           <p className="text-[12px] font-semibold text-ink">Operations Notes</p>
           <p className="mt-1 text-[11.5px] text-ink-muted">
-            {filledSlots} of {totalSlots} slots covered · {coveragePercent}%
+            {filledSlots} filled
+            {partialSlots > 0 ? ` · ${partialSlots} partial` : ""} of{" "}
+            {totalSlots} slots · {coveragePercent}%
           </p>
           <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted">
             <div

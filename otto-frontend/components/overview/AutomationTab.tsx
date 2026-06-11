@@ -31,6 +31,12 @@ export function AutomationTab({
           <p className="mt-2 max-w-3xl text-[13px] leading-relaxed text-ink-secondary">
             {emptyStateCopy(plan)}
           </p>
+          {plan.planState === "none" && (
+            <GeneratePlanButton
+              workspaceId={workspaceId}
+              captureSessionId={captureSessionId}
+            />
+          )}
         </section>
         <StatusBanner
           plan={plan}
@@ -392,20 +398,19 @@ function StatusBanner({
         ? "A director automation refresh is running. Showing the latest completed plan for now."
         : "Director automation plan generation is running. This tab will populate once the plan is complete.";
   const retry = async () => {
-    if (!captureSessionId || retrying) return;
+    if (retrying) return;
     setRetrying(true);
-    const params = new URLSearchParams({ workspace_id: workspaceId });
-    params.set("capture_session_id", captureSessionId);
-    const response = await fetch(`/api/automation-plan/status?${params}`, {
-      method: "POST",
-    });
+    const response = await fetch(
+      `/api/automation-plan/status?${planRequestParams(workspaceId, captureSessionId)}`,
+      { method: "POST" },
+    );
     setRetrying(false);
     if (response.ok) router.refresh();
   };
   return (
     <div className="mb-4 flex items-center justify-between gap-3 rounded-md border border-subtle bg-canvas px-4 py-3 text-[12.5px] leading-relaxed text-ink-secondary">
       <span>{copy}</span>
-      {state === "failed" && captureSessionId && (
+      {state === "failed" && (
         <button
           type="button"
           onClick={retry}
@@ -417,6 +422,60 @@ function StatusBanner({
       )}
     </div>
   );
+}
+
+function GeneratePlanButton({
+  workspaceId,
+  captureSessionId,
+}: {
+  workspaceId: string;
+  captureSessionId?: string | null;
+}) {
+  const [requesting, setRequesting] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const router = useRouter();
+  const generate = async () => {
+    if (requesting) return;
+    setRequesting(true);
+    setFailed(false);
+    const response = await fetch(
+      `/api/automation-plan/status?${planRequestParams(workspaceId, captureSessionId)}`,
+      { method: "POST" },
+    );
+    setRequesting(false);
+    if (response.ok) {
+      router.refresh();
+    } else {
+      setFailed(true);
+    }
+  };
+  return (
+    <div className="mt-4 flex items-center gap-3">
+      <button
+        type="button"
+        onClick={generate}
+        disabled={requesting}
+        className="rounded-md border border-subtle bg-surface px-3 py-1.5 text-[12px] font-semibold text-ink disabled:opacity-60"
+      >
+        {requesting ? "Requesting..." : "Generate automation plan"}
+      </button>
+      {failed && (
+        <span className="text-[12px] text-ink-secondary">
+          Could not start plan generation. Complete a director interview first,
+          then try again.
+        </span>
+      )}
+    </div>
+  );
+}
+
+function planRequestParams(
+  workspaceId: string,
+  captureSessionId?: string | null,
+) {
+  const params = new URLSearchParams({ workspace_id: workspaceId });
+  if (captureSessionId) params.set("capture_session_id", captureSessionId);
+  return params;
 }
 
 function emptyStateCopy(plan: DepartmentAutomationPlan) {

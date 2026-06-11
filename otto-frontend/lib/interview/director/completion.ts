@@ -12,11 +12,17 @@ import {
   agentDecisionLog,
 } from "@/lib/db/schema";
 import { writeAgentDecision } from "@/lib/db/write-agent-decision";
+import { getServerEnv } from "@/lib/env";
 import { ApiError } from "@/lib/http/json";
-import { directorInterviewCompletedEventName, inngest } from "@/lib/inngest/client";
+import {
+  directorAutomationPlanRequestedEventName,
+  directorInterviewCompletedEventName,
+  inngest,
+} from "@/lib/inngest/client";
 import { directorSlotDefinitions } from "@/lib/interview/director/slot-schema";
 import { createFollowUpTask } from "@/lib/interview/director/tools";
 import { lockDirectorTurnSequence } from "@/lib/interview/director/turn-transaction";
+import { runDirectorAutomationPlan } from "@/lib/synthesis/director-automation";
 import { runInventorySynthesis } from "@/lib/synthesis/inventory";
 
 type DirectorCompletionTx = Parameters<
@@ -680,7 +686,7 @@ export async function requestAndRunDirectorInventorySynthesis(
       toolCalls: [],
       degradedQuality: false,
     });
-    await runInventorySynthesis({
+    const synthesisResult = await runInventorySynthesis({
       orgId: requested.orgId,
       workspaceId: requested.workspaceId,
       captureSessionIds: [requested.captureSessionId],
@@ -688,6 +694,15 @@ export async function requestAndRunDirectorInventorySynthesis(
       userId: eventData.userId,
       idempotencyKey: eventData.idempotencyKey,
     });
+    if (synthesisResult.ok) {
+      await requestDirectorAutomationPlanGeneration({
+        orgId: requested.orgId,
+        workspaceId: requested.workspaceId,
+        captureSessionId: requested.captureSessionId,
+        userId: eventData.userId,
+        idempotencyKey: eventData.idempotencyKey,
+      });
+    }
   } catch (error) {
     await getDb().transaction(async (tx) => {
       await setOrgContext(tx, requested.orgId);
@@ -704,6 +719,36 @@ export async function requestAndRunDirectorInventorySynthesis(
         },
       });
     });
+  }
+}
+
+// This inline path wins the synthesis.inventory.queued idempotency race
+// against the directorInterviewCompleted Inngest function, which then skips
+// sending the inventory-synthesis event — so the inventorySynthesis Inngest
+// function (the only other place that chains the director automation plan)
+// never fires for director completions. The plan must be chained here too.
+async function requestDirectorAutomationPlanGeneration(input: {
+  orgId: string;
+  workspaceId: string;
+  captureSessionId: string;
+  userId: string;
+  idempotencyKey: string;
+}) {
+  if (!getServerEnv().DIRECTOR_AUTOMATION_PLAN_GENERATION_ENABLED) return;
+  const eventData = {
+    orgId: input.orgId,
+    workspaceId: input.workspaceId,
+    captureSessionIds: [input.captureSessionId],
+    userId: input.userId,
+    idempotencyKey: input.idempotencyKey,
+  };
+  try {
+    await inngest.send({
+      name: directorAutomationPlanRequestedEventName,
+      data: eventData,
+    });
+  } catch {
+    await runDirectorAutomationPlan(eventData);
   }
 }
 

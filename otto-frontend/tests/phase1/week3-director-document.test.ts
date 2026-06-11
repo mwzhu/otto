@@ -1250,6 +1250,14 @@ describe("Week 3 director brain and document pipeline", () => {
     expect(completion.indexOf("await inngest.send")).toBeGreaterThan(
       completion.indexOf("if (!eventData) return;"),
     );
+    // The inline inventory path must chain the director automation plan: it
+    // wins the synthesis.inventory.queued idempotency race, so the Inngest
+    // inventorySynthesis function never fires for director completions.
+    expect(completion).toContain("if (synthesisResult.ok)");
+    expect(completion).toContain("requestDirectorAutomationPlanGeneration");
+    expect(completion).toContain("directorAutomationPlanRequestedEventName");
+    expect(completion).toContain("DIRECTOR_AUTOMATION_PLAN_GENERATION_ENABLED");
+    expect(completion).toContain("runDirectorAutomationPlan");
     expect(inngestFunctions).toContain("alreadyQueued");
     expect(inngestFunctions).toContain("pg_advisory_xact_lock");
     expect(inngestFunctions).toContain("synthesis.inventory.queued:");

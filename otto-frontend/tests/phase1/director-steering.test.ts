@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  answeredProbeIntentsThisSession,
   applySteeringIntentExclusions,
   buildDirectorSteeringContext,
   checkDirectorSpokenOutput,
@@ -7,9 +8,11 @@ import {
   consecutivePriorIntentFirings,
   deterministicTurnPlan,
   directorIntentDirective,
+  directorInvalidClaimRecoverable,
   probeFiringSummariesFromRows,
   pendingReExtractSlotPaths,
   provisionallyAnsweredSlotPaths,
+  resolveDirectorSlotCandidateProcessId,
   type DirectorProbeFiringRow,
 } from "@/lib/interview/director/brain";
 import { phraseDirectorTurnDetailed } from "@/lib/interview/director/voice";
@@ -495,5 +498,251 @@ describe("extraction-failure re-ask guard (pending_re_extract)", () => {
       provisionallyAnsweredSlots: [blockedSlot!],
     });
     expect(guarded.chosen_intent.target_slot).not.toBe(blockedSlot);
+  });
+});
+
+const FOCUS_CANDIDATE = "11111111-1111-1111-1111-111111111111";
+const OTHER_CANDIDATE = "22222222-2222-2222-2222-222222222222";
+
+describe("focus-authoritative slot scoping (Task 10)", () => {
+  test("enrich-phase process slots are forced onto the focus candidate, overriding the extractor", () => {
+    // Session 83fdd5a6: focus was "order intake" but the extractor scoped the
+    // systems slot to the "returns and credit memos" candidate. Focus wins.
+    const scoped = resolveDirectorSlotCandidateProcessId({
+      slotPath: "systems.systems_of_record",
+      extractorCandidateId: OTHER_CANDIDATE,
+      focusCandidateId: FOCUS_CANDIDATE,
+      phase: "enrich",
+    });
+    expect(scoped.candidateProcessId).toBe(FOCUS_CANDIDATE);
+    expect(scoped.authoritative).toBe(true);
+  });
+
+  test("expand-phase process slots also default to the focus candidate", () => {
+    const scoped = resolveDirectorSlotCandidateProcessId({
+      slotPath: "scope.boundaries",
+      focusCandidateId: FOCUS_CANDIDATE,
+      phase: "expand",
+    });
+    expect(scoped.candidateProcessId).toBe(FOCUS_CANDIDATE);
+    expect(scoped.authoritative).toBe(true);
+  });
+
+  test("capture-level slots never scope to a candidate, even with a focus set", () => {
+    for (const slotPath of ["function.name", "process.inventory"]) {
+      const scoped = resolveDirectorSlotCandidateProcessId({
+        slotPath,
+        extractorCandidateId: OTHER_CANDIDATE,
+        focusCandidateId: FOCUS_CANDIDATE,
+        phase: "enrich",
+      });
+      expect(scoped.candidateProcessId).toBeUndefined();
+    }
+  });
+
+  test("inventory phase honors the extractor candidate (slots may land on a just-created candidate)", () => {
+    const scoped = resolveDirectorSlotCandidateProcessId({
+      slotPath: "scope.boundaries",
+      extractorCandidateId: OTHER_CANDIDATE,
+      focusCandidateId: FOCUS_CANDIDATE,
+      phase: "inventory",
+    });
+    // Not yet expand/enrich: the extractor candidate is honored (the caller
+    // still session-checks it). authoritative=false signals the belongs-check.
+    expect(scoped.candidateProcessId).toBe(OTHER_CANDIDATE);
+    expect(scoped.authoritative).toBe(false);
+  });
+
+  test("with no focus set, enrich slots fall back to the extractor candidate", () => {
+    const scoped = resolveDirectorSlotCandidateProcessId({
+      slotPath: "systems.systems_of_record",
+      extractorCandidateId: OTHER_CANDIDATE,
+      focusCandidateId: undefined,
+      phase: "enrich",
+    });
+    expect(scoped.candidateProcessId).toBe(OTHER_CANDIDATE);
+    expect(scoped.authoritative).toBe(false);
+  });
+});
+
+describe("answered-but-not-filled re-ask guard (Task 11)", () => {
+  test("focus selection fires once: re-asked after the director answered, the probe is excluded", () => {
+    // "Which process should we focus on first?" maps to define_process_boundary.
+    const firings = [firing("define_process_boundary", "scope.boundaries", 2, 5_000)];
+    const answered = answeredProbeIntentsThisSession({
+      recentFirings: firings,
+      latestUtterance: "Let's focus on order intake easily.",
+      currentSlots: new Map(),
+      candidateProcessNames: ["order intake", "returns and credit memos"],
+      // Focus was recorded from the answer — selection is satisfied.
+      focusCandidateProcessId: FOCUS_CANDIDATE,
+    });
+    expect(answered).toContain("define_process_boundary");
+
+    const eligible = applySteeringIntentExclusions(
+      [intentFixture({ intent: "define_process_boundary", target_slot: "scope.boundaries" })],
+      {
+        answeredProbeIntents: answered,
+        proposedNextPhase: "expand",
+        candidateProcessNames: ["order intake"],
+      },
+    );
+    expect(
+      eligible.some((candidate) => candidate.intent === "define_process_boundary"),
+    ).toBe(false);
+  });
+
+  test("inventory fires once: re-asked after a six-process answer, discover_processes is excluded", () => {
+    const firings = [firing("discover_processes", "process.inventory", 1, 9_000)];
+    const answered = answeredProbeIntentsThisSession({
+      recentFirings: firings,
+      latestUtterance:
+        "We run order intake, invoicing, purchasing, shipping, returns, and vendor payments.",
+      currentSlots: new Map([
+        ["process.inventory", { status: "partial" }],
+      ]),
+      candidateProcessNames: ["order intake", "invoicing", "purchasing"],
+    });
+    expect(answered).toContain("discover_processes");
+  });
+
+  test("the special one-shot probes stay eligible until satisfied", () => {
+    // define_process_boundary fired but no focus and no boundary value yet.
+    const unsatisfiedFocus = answeredProbeIntentsThisSession({
+      recentFirings: [firing("define_process_boundary", "scope.boundaries", 1, 9_000)],
+      latestUtterance: "Hmm, hard to say which one.",
+      currentSlots: new Map(),
+      candidateProcessNames: ["order intake", "returns"],
+      focusCandidateProcessId: undefined,
+    });
+    expect(unsatisfiedFocus).not.toContain("define_process_boundary");
+
+    // discover_processes fired but the inventory is still empty (no candidates).
+    const unsatisfiedInventory = answeredProbeIntentsThisSession({
+      recentFirings: [firing("discover_processes", "process.inventory", 1, 9_000)],
+      latestUtterance: "I'm not sure, there's a lot.",
+      currentSlots: new Map(),
+      candidateProcessNames: [],
+    });
+    expect(unsatisfiedInventory).not.toContain("discover_processes");
+  });
+
+  test("a probe answered substantively is excluded even though its slot is only partial", () => {
+    const firings = [firing("capture_systems", "systems.systems_of_record", 3, 6_000)];
+    const answered = answeredProbeIntentsThisSession({
+      recentFirings: firings,
+      latestUtterance:
+        "We mostly work in Gmail and a couple of shared Google Sheets for tracking.",
+      // Slot landed partial — the Task 10 mis-scope / weak-extraction case.
+      currentSlots: new Map([
+        ["systems.systems_of_record", { status: "partial" }],
+      ]),
+      candidateProcessNames: ["order intake"],
+      focusCandidateProcessId: FOCUS_CANDIDATE,
+    });
+    expect(answered).toContain("capture_systems");
+
+    const eligible = applySteeringIntentExclusions(
+      [intentFixture({ intent: "capture_systems", target_slot: "systems.systems_of_record" })],
+      {
+        answeredProbeIntents: answered,
+        proposedNextPhase: "enrich",
+        candidateProcessNames: ["order intake"],
+      },
+    );
+    expect(eligible.some((candidate) => candidate.intent === "capture_systems")).toBe(false);
+  });
+
+  test("the latest firing's probe stays eligible after a don't-know reply", () => {
+    const answered = answeredProbeIntentsThisSession({
+      recentFirings: [firing("capture_metrics", "metrics.kpis", 4, 4_000)],
+      latestUtterance: "I don't know, you'd have to ask the team.",
+      currentSlots: new Map(),
+      candidateProcessNames: ["order intake"],
+      focusCandidateProcessId: FOCUS_CANDIDATE,
+    });
+    expect(answered).not.toContain("capture_metrics");
+  });
+
+  test("controller-exempt intents are never excluded by the answered guard", () => {
+    const eligible = applySteeringIntentExclusions(
+      [intentFixture({ intent: "clarify_previous_question", target_slot: undefined })],
+      {
+        answeredProbeIntents: ["clarify_previous_question"],
+        proposedNextPhase: "enrich",
+        candidateProcessNames: [],
+      },
+    );
+    expect(eligible.some((candidate) => candidate.intent === "clarify_previous_question")).toBe(
+      true,
+    );
+  });
+});
+
+describe("claim_subject_validation_failed degrade gating (Task 12)", () => {
+  const evidence = [evidenceId];
+
+  test("a candidate/person claim named in the conversation is recoverable (not a drop)", () => {
+    // Recoverable: drainDirectorRetryClaimTasks replays it once the candidate is
+    // created in a later turn, so it must not flip the degrade flag.
+    expect(
+      directorInvalidClaimRecoverable("candidate_process", {
+        subject_type: "candidate_process",
+        subject_id: "Inventory Restock",
+        field: "kpi",
+        value: { name: "stockout rate" },
+        confidence: 0.8,
+        evidence_ids: evidence,
+      }),
+    ).toBe(true);
+    expect(
+      directorInvalidClaimRecoverable("person", {
+        subject_type: "person",
+        subject_id: "Marcus",
+        field: "role",
+        value: "warehouse lead",
+        confidence: 0.75,
+        evidence_ids: evidence,
+      }),
+    ).toBe(true);
+  });
+
+  test("an unknown subject type is genuinely dropped (sets the degrade flag)", () => {
+    expect(
+      directorInvalidClaimRecoverable("workflow", {
+        subject_type: "workflow",
+        subject_id: "some-unknown-thing",
+        field: "note",
+        value: "x",
+        confidence: 0.5,
+        evidence_ids: evidence,
+      }),
+    ).toBe(false);
+  });
+
+  test("a recoverable subject type without evidence cannot be replayed → dropped", () => {
+    expect(
+      directorInvalidClaimRecoverable("person", {
+        subject_type: "person",
+        subject_id: "Marcus",
+        field: "role",
+        value: "warehouse lead",
+        confidence: 0.75,
+        evidence_ids: [],
+      }),
+    ).toBe(false);
+  });
+
+  test("a recoverable subject type without a name reference cannot be matched → dropped", () => {
+    expect(
+      directorInvalidClaimRecoverable("candidate_process", {
+        subject_type: "candidate_process",
+        subject_id: "",
+        field: "kpi",
+        value: { name: "x" },
+        confidence: 0.8,
+        evidence_ids: evidence,
+      }),
+    ).toBe(false);
   });
 });

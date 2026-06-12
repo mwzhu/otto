@@ -24,7 +24,11 @@ export function ProcessCard({
           <h3 className="text-[14.5px] font-semibold leading-snug tracking-tight text-ink">
             {p.name}
           </h3>
-          <Pill tone={p.complexity}>{complexityLabel(p.complexity)}</Pill>
+          {p.needs_capture ? (
+            <Pill tone="neutral">More info needed</Pill>
+          ) : (
+            <Pill tone={p.complexity}>{complexityLabel(p.complexity)}</Pill>
+          )}
         </div>
         <div className="mb-3">
           <StatusBadge status={p.status} />
@@ -32,6 +36,13 @@ export function ProcessCard({
         <p className="line-clamp-3 grow text-[12.5px] leading-relaxed text-ink-secondary">
           {p.description}
         </p>
+        {p.needs_capture && (p.missing_slots?.length ?? 0) > 0 && (
+          <p className="mt-2 text-[11.5px] leading-relaxed text-ink-muted">
+            Not captured yet: {p.missing_slots!.slice(0, 4).join(", ")}
+            {p.missing_slots!.length > 4 ? `, +${p.missing_slots!.length - 4} more` : ""}.
+            Continue the interview or run a deep-dive to score this process.
+          </p>
+        )}
         <dl className="mt-4 grid grid-cols-3 gap-3 border-t border-subtle pt-3 text-[11.5px]">
           <KV k="People" v={p.people_count} />
           <KV k="Systems" v={p.systems.length} />
@@ -39,7 +50,7 @@ export function ProcessCard({
         </dl>
         <dl className="mt-3 grid grid-cols-2 gap-3 text-[11.5px]">
           <KV k="Evidence" v={p.evidence_count ?? 0} />
-          <KV k="Doc coverage" v={`${Math.round(p.doc_coverage * 100)}%`} />
+          <KV k="Capture coverage" v={`${p.coverage_percent ?? Math.round(p.doc_coverage * 100)}%`} />
         </dl>
         <div className="mt-3 flex flex-wrap gap-1">
           {p.systems.slice(0, 3).map((s) => (

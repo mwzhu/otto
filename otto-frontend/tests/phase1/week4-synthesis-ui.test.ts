@@ -10,18 +10,18 @@ describe("Week 4 synthesis and DB-backed UI contracts", () => {
       frequency: "daily",
       painPoints: [{ text: "manual spreadsheet cleanup", evidenceIds: ["e1"] }],
       risks: [{ text: "single point of failure", evidenceIds: ["e2"] }],
-      documentationEvidenceCount: 1,
       evidenceIds: ["e1", "e2"],
     });
 
     expect(score.total).toBeGreaterThan(45);
+    // G2: documentation_gap was removed — complexity scores only
+    // evidence-positive signals; doc status lives in the coverage metric.
     expect(Object.keys(score.factors)).toEqual([
       "system_sprawl",
       "handoff_count",
       "frequency_pressure",
       "friction_severity",
       "spof_risk",
-      "documentation_gap",
     ]);
     expect(score.factors.spof_risk.evidenceIds).toContain("e2");
   });

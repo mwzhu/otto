@@ -2,6 +2,7 @@ import "server-only";
 
 import { sql } from "drizzle-orm";
 import { getDb, setOrgContext } from "@/lib/db/client";
+import { claimValueText } from "@/lib/claims/value-text";
 import type { Claim, Evidence, ProcessDetail } from "@/lib/types";
 
 type DetailRow = {
@@ -324,10 +325,8 @@ function riskTitle(value: unknown) {
 }
 
 function riskBody(value: unknown) {
-  if (typeof value === "string") return value;
-  if (value && typeof value === "object") {
-    const object = value as { text?: unknown; type?: unknown };
-    return String(object.text ?? object.type ?? JSON.stringify(value));
-  }
-  return "Risk captured from intake evidence.";
+  // F4b: extract description/text from object-shaped claim values instead of
+  // rendering raw JSON in the risk callouts.
+  const text = claimValueText(value);
+  return text || "Risk captured from intake evidence.";
 }

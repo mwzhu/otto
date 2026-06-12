@@ -8,6 +8,8 @@ import {
   consecutivePriorIntentFirings,
   deterministicTurnPlan,
   directorIntentDirective,
+  directorRequestedFocusSwitch,
+  withFocusSwitchCandidate,
   directorInvalidClaimRecoverable,
   probeFiringSummariesFromRows,
   pendingReExtractSlotPaths,
@@ -43,6 +45,7 @@ function firing(
   return {
     probeId: intentName,
     targetSlot,
+    targetCandidateProcessId: null,
     turnIndex,
     firedAt: new Date(Date.now() - msAgo),
   };
@@ -253,7 +256,11 @@ describe("cooldown and max_fires enforcement (Task 2)", () => {
     ).toBe(false);
   });
 
-  test("falls back to a non-repeating bridge intent when every candidate is excluded", () => {
+  // F1b: when probes are exhausted and an untouched candidate exists, the
+  // bridge rotates to it instead of clarifying the same process (prod session
+  // 667b5809 looped clarify_previous_question on "Order intake" while five
+  // candidates had zero slots probed).
+  test("rotates to an untouched candidate when every probe is excluded", () => {
     const summaries = probeFiringSummariesFromRows([
       firing("discover_processes", "process.inventory", 2, 1_000),
     ]);
@@ -263,6 +270,24 @@ describe("cooldown and max_fires enforcement (Task 2)", () => {
         probeFiringSummaries: summaries,
         proposedNextPhase: "inventory",
         candidateProcessNames: ["Order Intake"],
+      },
+    );
+    expect(eligible).toHaveLength(1);
+    expect(eligible[0].intent).toBe("select_process_to_expand");
+    expect(eligible[0].target_process).toBe("Order Intake");
+  });
+
+  test("falls back to a non-repeating bridge intent when every candidate is already worked", () => {
+    const summaries = probeFiringSummariesFromRows([
+      firing("discover_processes", "process.inventory", 2, 1_000),
+    ]);
+    const eligible = applySteeringIntentExclusions(
+      [intentFixture()],
+      {
+        probeFiringSummaries: summaries,
+        proposedNextPhase: "inventory",
+        candidateProcessNames: ["Order Intake"],
+        focusProcessName: "Order Intake",
       },
     );
     expect(eligible).toHaveLength(1);
@@ -744,5 +769,98 @@ describe("claim_subject_validation_failed degrade gating (Task 12)", () => {
         evidence_ids: evidence,
       }),
     ).toBe(false);
+  });
+});
+
+// F1: focus rotation — prod session 667b5809 asked to switch four times
+// (turns 12, 15, 16, 17) and the planner never left "Order intake".
+describe("F1 — director-requested focus switch", () => {
+  const prodSwitchRequests = [
+    "Can you start asking me about the other five processes now?",
+    "Yo. Start asking me about the other processes now.",
+    "No. Move on.",
+    "Oh, asking me about, like, the other processes. Remember those other ones that we talked about earlier in the conversation?",
+  ];
+  for (const utterance of prodSwitchRequests) {
+    test(`detects: "${utterance.slice(0, 50)}"`, () => {
+      expect(directorRequestedFocusSwitch(utterance)).toBe(true);
+    });
+  }
+
+  const narration = [
+    "It then moves on to picking and shipping.",
+    "It depends on other processes upstream of intake.",
+    "Marcus keys the order and we move the data into Odoo.",
+    "Order intake easily. It's the highest volume process.",
+  ];
+  for (const utterance of narration) {
+    test(`ignores narration: "${utterance.slice(0, 50)}"`, () => {
+      expect(directorRequestedFocusSwitch(utterance)).toBe(false);
+    });
+  }
+
+  const sixCandidates = [
+    "Order intake",
+    "Purchasing and replenishment",
+    "Vendor invoice processing",
+    "Inventory cycle counts",
+    "New customer onboarding and credit setup",
+    "Returns and credit memos",
+  ];
+
+  test("a switch request rotates to an untouched candidate and re-enters expand", () => {
+    const plan = deterministicTurnPlan({
+      latestUtterance: "Yo. Start asking me about the other processes now.",
+      evidenceIds: ["00000000-0000-0000-0000-000000000301"],
+      currentSlots: new Map([
+        ["scope.boundaries", { status: "filled", confidence: 0.9 }],
+      ]),
+      currentPhase: "enrich",
+      candidateProcessNames: sixCandidates,
+      focusProcessName: "Order intake",
+      expandedCandidateProcessNames: ["Order intake"],
+      priorIntent: "capture_variants",
+    });
+    expect(plan.chosen_intent.intent).toBe("select_process_to_expand");
+    expect(plan.chosen_intent.target_process).toBeDefined();
+    expect(plan.chosen_intent.target_process!.toLowerCase()).not.toBe("order intake");
+    expect(plan.proposed_next_phase).toBe("expand");
+    // The spoken utterance must follow the rotation, not pay lip service.
+    expect((plan.planned_agent_utterance ?? "").toLowerCase()).toContain(
+      plan.chosen_intent.target_process!.toLowerCase(),
+    );
+  });
+
+  test("a switch request with every candidate already worked falls through", () => {
+    const plan = deterministicTurnPlan({
+      latestUtterance: "No. Move on.",
+      evidenceIds: ["00000000-0000-0000-0000-000000000301"],
+      currentSlots: new Map(),
+      currentPhase: "enrich",
+      candidateProcessNames: ["Order intake"],
+      focusProcessName: "Order intake",
+      expandedCandidateProcessNames: ["Order intake"],
+    });
+    expect(plan.chosen_intent.intent).not.toBe("select_process_to_expand");
+  });
+
+  test("withFocusSwitchCandidate carries the rotation target's candidate id", () => {
+    const plan = deterministicTurnPlan({
+      latestUtterance: "Start asking me about the other processes now.",
+      evidenceIds: ["00000000-0000-0000-0000-000000000301"],
+      currentSlots: new Map(),
+      currentPhase: "enrich",
+      candidateProcessNames: sixCandidates,
+      focusProcessName: "Order intake",
+    });
+    const summaries = sixCandidates.map((proposedName, index) => ({
+      id: `00000000-0000-0000-0000-00000000010${index}`,
+      proposedName,
+    }));
+    const withFocus = withFocusSwitchCandidate(plan, summaries);
+    const expected = summaries.find(
+      (candidate) => candidate.proposedName === plan.chosen_intent.target_process,
+    );
+    expect(withFocus.focus_candidate_process_id).toBe(expected?.id);
   });
 });

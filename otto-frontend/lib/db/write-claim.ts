@@ -5,6 +5,7 @@ import { sql } from "drizzle-orm";
 import { getIdempotentResponse, storeIdempotentResponse } from "@/lib/db/idempotency";
 import { getDb, setOrgContext } from "@/lib/db/client";
 import { ApiError } from "@/lib/http/json";
+import { isNearDuplicateClaimValue } from "@/lib/claims/value-text";
 
 export type ClaimSubject =
   | { type: "process"; id: string }
@@ -82,6 +83,56 @@ export async function writeClaimInTransaction(
 
   await lockParentRow(tx, input);
   const shouldSupersede = !multiValueClaimFields.has(input.field);
+  // F4a: multi-value fields accumulate, so the same fact arriving through two
+  // channels in one turn (plan claims[] + recordCandidateProcessClaim) lands
+  // twice and renders as duplicate rows. Suppress a new claim whose text is a
+  // near-duplicate of an existing active claim on the same subject+field.
+  if (!shouldSupersede && nearDuplicateCheckedFields.has(input.field)) {
+    const siblings = await tx.execute<{
+      id: string;
+      subject_type: string;
+      subject_id: string;
+      field: string;
+      value: unknown;
+    }>(sql`
+      SELECT id, subject_type, subject_id, field, value
+      FROM claims
+      WHERE org_id = ${input.orgId}
+        AND workspace_id = ${input.workspaceId}
+        AND subject_type = ${input.subject.type}
+        AND subject_id = ${input.subject.id}
+        AND field = ${input.field}
+        AND status = 'active'
+        AND superseded_by_claim_id IS NULL
+      FOR UPDATE
+    `);
+    const duplicate = siblings.rows.find((row) =>
+      isNearDuplicateClaimValue(row.value, input.value),
+    );
+    if (duplicate) {
+      const body: WriteClaimResult = {
+        claim: {
+          id: duplicate.id,
+          subject_type: duplicate.subject_type,
+          subject_id: duplicate.subject_id,
+          field: duplicate.field,
+          value: duplicate.value,
+          status: "active",
+          superseded_by_claim_id: null,
+        },
+        superseded_claim_id: null,
+      };
+      await storeIdempotentResponse(tx, {
+        orgId: input.orgId,
+        key: input.idempotencyKey,
+        route: input.route,
+        requestHash: input.requestHash,
+        responseJson: body,
+        statusCode: 200,
+      });
+      return { body, statusCode: 200, idempotent: true };
+    }
+  }
   const priorRows = shouldSupersede
     ? await tx.execute<{ id: string }>(sql`
       SELECT id
@@ -455,4 +506,16 @@ const multiValueClaimFields = new Set([
   // A person can work on several candidate processes; each link is its own
   // active claim (the overview people_count counts these per candidate).
   "works_on",
+]);
+
+// Text-bearing multi-value fields where the same fact arriving twice reads as
+// duplicate UI rows. Linking fields (works_on, used_in_process) are excluded —
+// their values are ids, and exact replays are already caught by idempotency.
+const nearDuplicateCheckedFields = new Set([
+  "pain_point",
+  "risk",
+  "kpi",
+  "business_outcome",
+  "upstream_dependency",
+  "downstream_dependency",
 ]);

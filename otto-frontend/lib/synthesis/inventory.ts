@@ -16,6 +16,8 @@ import { stableStringify } from "@/lib/http/json";
 import { computeComplexityScore, type ComplexityScore } from "@/lib/synthesis/complexity";
 import { generateCandidateNarrative, type CandidateNarrative } from "@/lib/synthesis/narrative";
 import { genericCandidateProcessNames } from "@/lib/candidate-processes/name-quality";
+import { claimValueText } from "@/lib/claims/value-text";
+import { directorCoreCoverageSlotPaths } from "@/lib/interview/director/slot-schema";
 
 export type InventorySynthesisInput = {
   orgId: string;
@@ -35,9 +37,11 @@ export type CandidateInventoryRow = {
   evidence_ids: string[] | null;
   system_names: string[] | null;
   role_names: string[] | null;
-  pain_points: Array<{ text?: string; evidence_ids?: string[] }> | null;
-  risks: Array<{ text?: string; evidence_ids?: string[] }> | null;
+  pain_points: Array<{ value?: unknown; text?: string; evidence_ids?: string[] }> | null;
+  risks: Array<{ value?: unknown; text?: string; evidence_ids?: string[] }> | null;
   documented_evidence_count: number;
+  /** G1/G3: weighted core-slot fill (0..1) used to gate complexity display. */
+  core_slot_coverage: number;
 };
 
 export async function runInventorySynthesis(input: InventorySynthesisInput) {
@@ -332,16 +336,31 @@ export async function loadCandidateInventory(
           '{}'
         ) AS role_names,
         COALESCE(
-          jsonb_agg(DISTINCT jsonb_build_object('text', cc.value->>'text', 'evidence_ids', cc.claim_evidence_ids))
+          jsonb_agg(DISTINCT jsonb_build_object('value', cc.value, 'evidence_ids', cc.claim_evidence_ids))
             FILTER (WHERE cc.field = 'pain_point'),
           '[]'::jsonb
         ) AS pain_points,
         COALESCE(
-          jsonb_agg(DISTINCT jsonb_build_object('text', COALESCE(cc.value->>'text', cc.value::text), 'evidence_ids', cc.claim_evidence_ids))
+          jsonb_agg(DISTINCT jsonb_build_object('value', cc.value, 'evidence_ids', cc.claim_evidence_ids))
             FILTER (WHERE cc.field = 'risk'),
           '[]'::jsonb
         ) AS risks,
-        COUNT(DISTINCT e.id) FILTER (WHERE e.evidence_label = 'documented')::int AS documented_evidence_count
+        COUNT(DISTINCT e.id) FILTER (WHERE e.evidence_label = 'documented')::int AS documented_evidence_count,
+        COALESCE((
+          SELECT LEAST(1.0, sum(
+            CASE ss.status
+              WHEN 'filled' THEN 1.0
+              WHEN 'asked_unknown' THEN 1.0
+              WHEN 'partial' THEN 0.5
+              ELSE 0
+            END
+          ) / ${sql.raw(`${directorCoreCoverageSlotPaths.length}.0`)})
+          FROM slot_states ss
+          WHERE ss.org_id = c.org_id
+            AND ss.workspace_id = c.workspace_id
+            AND ss.candidate_process_id = c.id
+            AND ss.slot_path IN ${coreCoverageSlotPathsSql()}
+        ), 0)::float AS core_slot_coverage
       FROM candidate_processes c
       LEFT JOIN claims sc
         ON sc.org_id = c.org_id
@@ -378,6 +397,13 @@ export async function loadCandidateInventory(
 function genericCandidateNamesSql() {
   return sql`(${sql.join(
     genericCandidateProcessNames.map((name) => sql`${name}`),
+    sql`, `,
+  )})`;
+}
+
+function coreCoverageSlotPathsSql() {
+  return sql`(${sql.join(
+    directorCoreCoverageSlotPaths.map((path) => sql`${path}`),
     sql`, `,
   )})`;
 }
@@ -468,7 +494,6 @@ async function scoreCandidates(input: {
       frequency: candidate.frequency,
       painPoints: normalizeSignals(candidate.pain_points),
       risks: normalizeSignals(candidate.risks),
-      documentationEvidenceCount: candidate.documented_evidence_count,
       evidenceIds: candidate.evidence_ids ?? [],
     });
     await writeClaim({
@@ -483,7 +508,13 @@ async function scoreCandidates(input: {
       idempotencyKey: claimKey("synthesis", candidate.id, "complexity_score", score),
       requestHash: hash(score),
       route: "synthesis/inventory/complexity",
-      metadata: { synthesis_run_id: input.synthesisRunId, source: "phase1_synthesis" },
+      metadata: {
+        synthesis_run_id: input.synthesisRunId,
+        source: "phase1_synthesis",
+        // G3: capture coverage at scoring time; display gates on coverage so
+        // a defaults-only score never renders as "low complexity".
+        coverage: candidate.core_slot_coverage,
+      },
     });
     outputs.push({ candidateId: candidate.id, score });
   }
@@ -597,11 +628,17 @@ async function firstOrgUserId(orgId: string) {
 }
 
 function normalizeSignals(
-  signals: Array<{ text?: string; evidence_ids?: string[] }> | null | undefined,
+  signals:
+    | Array<{ value?: unknown; text?: string; evidence_ids?: string[] }>
+    | null
+    | undefined,
 ) {
+  // F8: claim values arrive as plain strings, {text}, {items: [...]}, or
+  // {description}; the old `.text`-only read silently dropped every other
+  // shape (prod: friction scored 0/20 despite two captured pain points).
   return (signals ?? [])
     .map((signal) => ({
-      text: cleanJsonText(signal.text),
+      text: cleanJsonText(claimValueText(signal.value ?? signal.text)),
       evidenceIds: signal.evidence_ids ?? [],
     }))
     .filter((signal) => signal.text.length > 0);

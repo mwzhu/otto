@@ -1411,10 +1411,6 @@ function computeOperatorGraphComplexity(
       text: gap.description,
       evidenceIds: gap.evidenceIds,
     })),
-    documentationEvidenceCount: pack.documentChunks.reduce(
-      (count, chunk) => count + chunk.evidenceIds.length,
-      0,
-    ),
     evidenceIds: uniqueStrings([
       ...taskNodes.flatMap((node) => node.data.evidence_ids ?? []),
       ...pack.transcriptSegments.flatMap((segment) => segment.evidenceIds),

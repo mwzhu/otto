@@ -43,6 +43,9 @@ export function OverviewClient({
     metrics?.documentationCoverage ??
     Math.round(average(processes.map((p) => p.doc_coverage)) * 100);
   const spofCount = metrics?.spofCount ?? 0;
+  const scoredCount =
+    metrics?.scoredProcessCount ?? processes.filter((p) => !p.needs_capture).length;
+  const totalCount = metrics?.processCount ?? processes.length;
 
   useEffect(() => {
     const shouldPoll =
@@ -106,19 +109,23 @@ export function OverviewClient({
               <MetricTile
                 label="Documentation Coverage"
                 value={`${docCoverage}%`}
-                hint="Average across all captured processes"
+                hint="Core interview slots filled across processes"
               />
               <MetricTile
                 label="Complexity Score"
                 value={avgComplexity}
                 suffix="/100"
-                hint="Weighted by vulnerabilities, sprawl, dependencies"
+                hint={
+                  scoredCount < totalCount
+                    ? `Average of ${scoredCount} scored ${scoredCount === 1 ? "process" : "processes"} — ${totalCount - scoredCount} need more capture`
+                    : "Weighted by vulnerabilities, sprawl, dependencies"
+                }
                 highlight
               />
               <MetricTile
                 label="Single Points of Failure"
                 value={spofCount}
-                hint="Roles with no documented backup"
+                hint="One-person dependencies found"
                 highlight
               />
             </section>

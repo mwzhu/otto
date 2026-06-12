@@ -78,6 +78,10 @@ const worksOnCaptureId = "b5b5b5b5-b5b5-5b5b-8b5b-b5b5b5b5b5b5";
 const worksOnEvidenceId = "b6b6b6b6-b6b6-5b6b-8b6b-b6b6b6b6b6b6";
 const gatedTurnCaptureId = "b7b7b7b7-b7b7-5b7b-8b7b-b7b7b7b7b7b7";
 const gatedTurnEvidenceId = "b8b8b8b8-b8b8-5b8b-8b8b-b8b8b8b8b8b8";
+const roundTwoCaptureId = "c2c2c2c2-c2c2-5c2c-8c2c-c2c2c2c2c2c2";
+const roundTwoEvidenceId = "c3c3c3c3-c3c3-5c3c-8c3c-c3c3c3c3c3c3";
+const coverageCaptureId = "c4c4c4c4-c4c4-5c4c-8c4c-c4c4c4c4c4c4";
+const coverageEvidenceId = "c5c5c5c5-c5c5-5c5c-8c5c-c5c5c5c5c5c5";
 const duplicateCandidateVerificationCaptureId =
   "a9a9a9a9-a9a9-5a9a-8a9a-a9a9a9a9a9a9";
 const duplicateCandidateVerificationIdA =
@@ -184,6 +188,7 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
     applyMigration("0009_provisional_step_sources.sql");
     applyMigration("0010_operator_visual_comprehension.sql");
     applyMigration("0011_workflow_semantic_models.sql");
+    applyMigration("0016_works_on_multivalue_claims.sql");
     execFileSync(
       "docker",
       [
@@ -1344,6 +1349,262 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
       inventory_slots: 0,
       tom_links: 0,
     });
+  });
+
+  test("round 2: dispatch normalizes SPOF risks and works_on links; system names canonicalize", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [roundTwoCaptureId, orgId, workspaceId],
+    );
+    await seedInventoryInterviewState(appClient, roundTwoCaptureId);
+    await appClient.query(
+      `
+        INSERT INTO evidence (id, org_id, workspace_id, source_type, evidence_label, quote)
+        VALUES ($1, $2, $3, 'transcript_segment', 'stated_director', 'Marcus keys all orders into the Google Sheet.')
+        ON CONFLICT (id) DO NOTHING
+      `,
+      [roundTwoEvidenceId, orgId, workspaceId],
+    );
+
+    const { dispatchDirectorTurnPlan } = await import(
+      "@/lib/interview/director/brain"
+    );
+    const chosenIntent = {
+      intent: "capture_risk_spof",
+      target_slot: "risk.spofs",
+      target_process: "Order Intake",
+      score: 100,
+      reason: "Capture the SPOF answer.",
+    };
+    await dispatchDirectorTurnPlan({
+      orgId,
+      workspaceId,
+      captureSessionId: roundTwoCaptureId,
+      userId,
+      latestUtterance:
+        "Marcus runs the order desk in the Google Sheet. If he is out, intake stops.",
+      transcriptSegmentIds: [],
+      evidenceIds: [roundTwoEvidenceId],
+      turnIndex: 0,
+      plannedAgentUtterance: "Who backs Marcus up?",
+      plan: {
+        utterance_type: "substantive_answer",
+        slot_updates: [],
+        claims: [
+          {
+            subject_type: "person",
+            subject_id: "Marcus",
+            field: "works_on",
+            value: { process: "Order Intake", activity: "keys all orders" },
+            confidence: 0.8,
+            evidence_ids: [roundTwoEvidenceId],
+          },
+        ],
+        tool_calls: [
+          {
+            name: "recordProcess",
+            arguments: { name: "Order Intake", confidence: 0.9 },
+          },
+          {
+            name: "recordPerson",
+            arguments: { name: "Marcus", roleName: "Order Desk" },
+          },
+          {
+            name: "recordSystem",
+            arguments: { name: "Google Sheet (Marcus)" },
+          },
+          {
+            name: "recordSystem",
+            arguments: { name: "google sheets" },
+          },
+          {
+            name: "recordCandidateProcessClaim",
+            arguments: {
+              targetProcess: "Order Intake",
+              field: "risk",
+              value:
+                "Single person dependency on Marcus; if out, order intake stops",
+              confidence: 0.9,
+            },
+          },
+        ],
+        contradiction_signals: [],
+        current_phase: "inventory",
+        proposed_next_phase: "expand",
+        phase_transition_ready: true,
+        ranked_intents: [chosenIntent],
+        chosen_intent: chosenIntent,
+        planned_agent_utterance: "Who backs Marcus up?",
+      },
+    });
+
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    const candidate = await appClient.query(
+      "SELECT id FROM candidate_processes WHERE capture_session_id = $1 AND lower(proposed_name) = 'order intake'",
+      [roundTwoCaptureId],
+    );
+    const candidateId = candidate.rows[0].id as string;
+
+    // F2: the free-text risk landed in the canonical recordSpof shape.
+    const risk = await appClient.query(
+      `SELECT value FROM claims
+        WHERE subject_type = 'candidate_process' AND subject_id = $1
+          AND field = 'risk' AND status = 'active'`,
+      [candidateId],
+    );
+    expect(risk.rows).toHaveLength(1);
+    expect(risk.rows[0].value.type).toBe("single_point_of_failure");
+
+    // F3: the works_on claim resolved {process: name} to the candidate id.
+    // works_on is multi-value (a person can be linked to several processes
+    // across tests/turns); assert the link to THIS candidate exists and that
+    // the uncontracted {process: name} shape was rewritten to an id.
+    const worksOn = await appClient.query(
+      `SELECT c.value FROM claims c JOIN people p ON p.id = c.subject_id
+        WHERE c.subject_type = 'person' AND c.field = 'works_on'
+          AND c.status = 'active' AND lower(p.name) = 'marcus'`,
+    );
+    const linkedIds = worksOn.rows.map(
+      (row) => (row.value as { candidate_process_id?: string }).candidate_process_id,
+    );
+    expect(linkedIds).toContain(candidateId);
+    expect(
+      worksOn.rows.every(
+        (row) => typeof row.value.candidate_process_id === "string",
+      ),
+    ).toBe(true);
+
+    // F5: both sheet variants folded into one canonical system row.
+    const sheets = await appClient.query(
+      "SELECT name FROM systems WHERE org_id = $1 AND lower(name) LIKE '%sheet%'",
+      [orgId],
+    );
+    expect(sheets.rows).toHaveLength(1);
+    expect(sheets.rows[0].name).toBe("Google Sheets");
+  });
+
+  test("round 2: near-duplicate multi-value claims are suppressed at write time", async () => {
+    await seedWeek2Graph(appClient);
+    const { writeClaim } = await import("@/lib/db/write-claim");
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    const candidate = await appClient.query(
+      "SELECT id FROM candidate_processes WHERE capture_session_id = $1 AND lower(proposed_name) = 'order intake'",
+      [roundTwoCaptureId],
+    );
+    const candidateId = candidate.rows[0].id as string;
+    // The second Marcus phrasing (different channel in prod) must merge into
+    // the first instead of rendering as a second risk callout.
+    const result = await writeClaim({
+      orgId,
+      workspaceId,
+      userId,
+      subject: { type: "candidate_process", id: candidateId },
+      field: "risk",
+      value: {
+        type: "single_point_of_failure",
+        text: "Single-person dependency: Marcus is the only one who keys orders; absence halts the process.",
+      },
+      evidenceIds: [],
+      confidence: 0.9,
+      idempotencyKey: `test-dup-risk:${candidateId}`,
+      requestHash: "test-dup-risk",
+      route: "test/dup-risk",
+    });
+    expect(result.idempotent).toBe(true);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    const risks = await appClient.query(
+      `SELECT count(*)::int AS count FROM claims
+        WHERE subject_type = 'candidate_process' AND subject_id = $1
+          AND field = 'risk' AND status = 'active'`,
+      [candidateId],
+    );
+    expect(risks.rows[0].count).toBe(1);
+  });
+
+  test("round 2: coverage tile averages core slot fill and gates complexity (G1/G3)", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [coverageCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO evidence (id, org_id, workspace_id, source_type, evidence_label, quote)
+        VALUES ($1, $2, $3, 'transcript_segment', 'stated_director', 'Order intake and returns.')
+        ON CONFLICT (id) DO NOTHING
+      `,
+      [coverageEvidenceId, orgId, workspaceId],
+    );
+    const { recordProcess } = await import("@/lib/interview/director/tools");
+    const context = {
+      orgId,
+      workspaceId,
+      captureSessionId: coverageCaptureId,
+      userId,
+    };
+    const drilled = await recordProcess(context, {
+      name: "Order Intake",
+      confidence: 0.9,
+      evidenceIds: [coverageEvidenceId],
+    });
+    const untouched = await recordProcess(context, {
+      name: "Returns",
+      confidence: 0.9,
+      evidenceIds: [coverageEvidenceId],
+    });
+    expect(drilled).not.toBeNull();
+    expect(untouched).not.toBeNull();
+    // Four of the seven core slots filled on the drilled candidate → 57%.
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    for (const slotPath of [
+      "scope.boundaries",
+      "ownership.roles",
+      "systems.systems_of_record",
+      "frequency.volume",
+    ]) {
+      await appClient.query(
+        `INSERT INTO slot_states (org_id, workspace_id, capture_session_id, candidate_process_id, slot_path, status, confidence)
+         VALUES ($1, $2, $3, $4, $5, 'filled', 0.9)`,
+        [orgId, workspaceId, coverageCaptureId, drilled!.id, slotPath],
+      );
+    }
+
+    const { getOverviewMetrics, getProcessCards } = await import(
+      "@/lib/overview/queries"
+    );
+    const metrics = await getOverviewMetrics(orgId, workspaceId, {
+      captureSessionId: coverageCaptureId,
+    });
+    // avg(4/7, 0) ≈ 28.6% → 29.
+    expect(metrics.processCount).toBe(2);
+    expect(metrics.documentationCoverage).toBe(29);
+    expect(metrics.scoredProcessCount).toBe(1);
+
+    const cards = await getProcessCards(orgId, workspaceId, {
+      captureSessionId: coverageCaptureId,
+    });
+    const drilledCard = cards.find((card) => card.name === "Order Intake");
+    const untouchedCard = cards.find((card) => card.name === "Returns");
+    expect(drilledCard?.needs_capture).toBe(false);
+    expect(drilledCard?.coverage_percent).toBe(57);
+    expect(untouchedCard?.needs_capture).toBe(true);
+    expect(untouchedCard?.coverage_percent).toBe(0);
+    expect(untouchedCard?.missing_slots).toContain("Scope and boundaries");
   });
 
   test("director dispatch preserves slot data when chosen-intent claims are malformed", async () => {

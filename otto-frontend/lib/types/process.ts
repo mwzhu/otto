@@ -9,7 +9,13 @@ export type ProcessSummary = {
   status: "documented" | "in_progress";
   complexity: "low" | "med" | "high";
   complexity_score: number; // 0-100
-  doc_coverage: number; // 0-1
+  doc_coverage: number; // 0-1 capture coverage (core slot fill)
+  /** G1: capture coverage as a whole percent (core director slots filled). */
+  coverage_percent?: number;
+  /** G3: below the coverage gate — show "more info needed", not a score. */
+  needs_capture?: boolean;
+  /** Labels of core slots with no captured value (when needs_capture). */
+  missing_slots?: string[];
   description: string;
   people_count: number;
   systems: string[];

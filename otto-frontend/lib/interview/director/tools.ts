@@ -33,6 +33,7 @@ import {
   isPlausibleCandidateProcessName,
   isTokenSubset,
 } from "@/lib/candidate-processes/name-quality";
+import { canonicalizeSystemName } from "@/lib/systems/canonicalize";
 
 export type DirectorToolContext = {
   orgId: string;
@@ -729,11 +730,19 @@ async function writeCandidateClaim(
 }
 
 async function upsertNamedSystem(orgId: string, name: string, tx?: DirectorToolTx) {
+  // F5: fold variants ("Google Sheet (Marcus)", "google sheets") into one
+  // canonical system row — name variants were inflating the system-sprawl
+  // complexity factor and cluttering process cards.
+  const canonicalName = canonicalizeSystemName(name);
   return withNamedEntityTx(orgId, tx, async (activeTx) => {
     const existing = await activeTx.execute<{ id: string }>(sql`
       SELECT id FROM systems
       WHERE org_id = ${orgId}
-        AND lower(name) = ${normalizeName(name)}
+        AND (
+          lower(name) = ${normalizeName(canonicalName)}
+          OR canonical_key = ${canonicalKey(canonicalName)}
+        )
+      ORDER BY created_at ASC
       LIMIT 1
       FOR UPDATE
     `);
@@ -751,9 +760,9 @@ async function upsertNamedSystem(orgId: string, name: string, tx?: DirectorToolT
         .insert(systems)
         .values({
           orgId,
-          name: name.trim(),
+          name: canonicalName,
           type: "business_system",
-          canonicalKey: canonicalKey(name),
+          canonicalKey: canonicalKey(canonicalName),
         })
         .returning()
     )[0];

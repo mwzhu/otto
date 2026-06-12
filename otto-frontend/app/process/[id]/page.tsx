@@ -12,6 +12,7 @@ import { getWorkspaceForProcess } from "@/lib/workspaces/current";
 import { getDirectorProcessDetail, getProcessEvidence } from "@/lib/processes/queries";
 import { EvidenceLink } from "@/components/common/EvidenceLink";
 import { EvidenceDrawer } from "@/components/workspace/EvidenceDrawer";
+import { claimValueText } from "@/lib/claims/value-text";
 
 export default async function ProcessDetailPage({
   params,
@@ -99,22 +100,42 @@ export default async function ProcessDetailPage({
               No active process claims have linked evidence yet.
             </div>
           ) : (
+            // F6: one row per claim FIELD (a drilled process accumulates 20+
+            // claims — three separate "downstream dependency" tiles each
+            // saying "1 evidence source" read as noise). Expand a field to
+            // reach the individual claims.
             <div className="grid grid-cols-2 gap-2.5">
-              {evidence.claims.map((claim) => (
-                <div
-                  key={claim.id}
-                  className="flex items-center justify-between gap-3 rounded-md border border-subtle bg-surface px-3.5 py-3"
+              {groupClaimsByField(evidence.claims).map((group) => (
+                <details
+                  key={group.field}
+                  className="rounded-md border border-subtle bg-surface px-3.5 py-3"
                 >
-                  <div>
-                    <div className="text-[12.5px] font-medium text-ink">
-                      {claim.field.replace(/_/g, " ")}
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+                    <div>
+                      <div className="text-[12.5px] font-medium text-ink">
+                        {group.field.replace(/_/g, " ")}
+                      </div>
+                      <div className="text-[11px] text-ink-muted">
+                        {group.claims.length} claim{group.claims.length === 1 ? "" : "s"} ·{" "}
+                        {group.evidenceCount} evidence source{group.evidenceCount === 1 ? "" : "s"}
+                      </div>
                     </div>
-                    <div className="text-[11px] text-ink-muted">
-                      {claim.evidence_ids.length} evidence source{claim.evidence_ids.length === 1 ? "" : "s"}
-                    </div>
+                    <span className="text-[11px] text-ink-muted">view</span>
+                  </summary>
+                  <div className="mt-3 space-y-2 border-t border-subtle pt-3">
+                    {group.claims.map((claim) => (
+                      <div
+                        key={claim.id}
+                        className="flex items-center justify-between gap-3"
+                      >
+                        <div className="line-clamp-1 text-[11.5px] text-ink-secondary">
+                          {claimValueText(claim.value) || claim.field.replace(/_/g, " ")}
+                        </div>
+                        <EvidenceLink claimId={claim.id} count={claim.evidence_ids.length} />
+                      </div>
+                    ))}
                   </div>
-                  <EvidenceLink claimId={claim.id} count={claim.evidence_ids.length} />
-                </div>
+                </details>
               ))}
             </div>
           )}
@@ -147,4 +168,20 @@ export default async function ProcessDetailPage({
       />
     </div>
   );
+}
+
+function groupClaimsByField<
+  T extends { id: string; field: string; value?: unknown; evidence_ids: string[] },
+>(claims: T[]) {
+  const groups = new Map<string, T[]>();
+  for (const claim of claims) {
+    const list = groups.get(claim.field) ?? [];
+    list.push(claim);
+    groups.set(claim.field, list);
+  }
+  return [...groups.entries()].map(([field, fieldClaims]) => ({
+    field,
+    claims: fieldClaims,
+    evidenceCount: new Set(fieldClaims.flatMap((claim) => claim.evidence_ids)).size,
+  }));
 }

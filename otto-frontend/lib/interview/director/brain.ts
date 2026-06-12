@@ -79,6 +79,7 @@ import {
   isPlausibleCandidateProcessName,
   isTokenSubset,
 } from "@/lib/candidate-processes/name-quality";
+import { normalizeRiskClaimValue } from "@/lib/claims/value-text";
 
 export type DirectorTurnInput = DirectorToolContext & {
   latestUtterance: string;
@@ -429,6 +430,18 @@ export async function buildDirectorSteeringPlan(
   const candidateProcessNames = candidateSummaries.map(
     (candidate) => candidate.proposedName,
   );
+  // Task 10: when a focus candidate is recorded, its name is the authoritative
+  // focus process — the spoken probe must target it, not whatever process the
+  // chooser inferred from the latest answer (which is how session 83fdd5a6
+  // drifted to "returns and credit memos" while focused on "order intake").
+  const focusCandidateName = state.focusCandidateProcessId
+    ? candidateSummaries.find(
+        (candidate) => candidate.id === state.focusCandidateProcessId,
+      )?.proposedName
+    : undefined;
+  // F1: candidates whose core slots are already covered, so rotation keeps
+  // cycling through under-captured processes until each is filled/exhausted.
+  const expandedCandidateProcessNames = await readCoreCoveredCandidateNames(context);
   // Task 11: probes the director substantively answered this session are
   // excluded even if their slot landed partial or mis-scoped, with focus
   // selection / inventory firing at most once once satisfied.
@@ -438,6 +451,7 @@ export async function buildDirectorSteeringPlan(
     currentSlots,
     candidateProcessNames,
     focusCandidateProcessId: state.focusCandidateProcessId,
+    recentTurns,
   });
   const plan = deterministicTurnPlan({
     latestUtterance: input.latestUtterance,
@@ -452,29 +466,28 @@ export async function buildDirectorSteeringPlan(
     probeFiringSummaries,
     provisionallyAnsweredSlots,
     answeredProbeIntents,
+    focusProcessName: focusCandidateName,
+    expandedCandidateProcessNames,
   });
   const rankedIntents = plan.ranked_intents.length
     ? plan.ranked_intents
     : await rankProbeIntents(context, state.focusCandidateProcessId);
   const chosenIntent = plan.chosen_intent ?? rankedIntents[0];
-  const normalizedPlan = {
-    ...plan,
-    chosen_intent: chosenIntent,
-    ranked_intents: rankedIntents,
-  };
+  const normalizedPlan = withFocusSwitchCandidate(
+    {
+      ...plan,
+      chosen_intent: chosenIntent,
+      ranked_intents: rankedIntents,
+    },
+    candidateSummaries,
+  );
   const filledSlots = Array.from(currentSlots.entries())
     .filter(([, slot]) => ["filled", "asked_unknown"].includes(slot.status))
     .map(([slotPath]) => slotPath);
-  // Task 10: when a focus candidate is recorded, its name is the authoritative
-  // focus process — the spoken probe must target it, not whatever process the
-  // chooser inferred from the latest answer (which is how session 83fdd5a6
-  // drifted to "returns and credit memos" while focused on "order intake").
-  const focusCandidateName = state.focusCandidateProcessId
-    ? candidateSummaries.find(
-        (candidate) => candidate.id === state.focusCandidateProcessId,
-      )?.proposedName
-    : undefined;
   const focusProcessName =
+    (normalizedPlan.chosen_intent?.intent === "select_process_to_expand"
+      ? normalizedPlan.chosen_intent.target_process
+      : undefined) ??
     focusCandidateName ??
     chosenIntent.target_process ??
     candidateSummaries[0]?.proposedName;
@@ -691,6 +704,7 @@ export function checkerVerdictSignalFromDeliveryJson(
 export type DirectorProbeFiringRow = {
   probeId: string;
   targetSlot: string | null;
+  targetCandidateProcessId: string | null;
   turnIndex: number | null;
   firedAt: Date;
 };
@@ -829,6 +843,14 @@ export function answeredProbeIntentsThisSession(input: {
   currentSlots: Map<string, { status: string }>;
   candidateProcessNames: string[];
   focusCandidateProcessId?: string;
+  /**
+   * Recent transcript lines ("Director: ..." / "Otto: ..."). The inventory
+   * check scans director lines so an enumeration that is still in the async
+   * extraction pipeline (no candidates, no slot row yet) still satisfies the
+   * probe — prod turn 3 re-asked the full process list during exactly that
+   * lag window ("I already told you that, bro").
+   */
+  recentTurns?: string[];
 }): string[] {
   const answered = new Set<string>();
   const ordered = orderProbeFiringsByRecency(input.recentFirings);
@@ -860,7 +882,8 @@ export function answeredProbeIntentsThisSession(input: {
   );
   const inventorySatisfied =
     input.candidateProcessNames.length > 0 ||
-    directorSlotHasValue(input.currentSlots, "process.inventory");
+    directorSlotHasValue(input.currentSlots, "process.inventory") ||
+    directorEnumeratedProcessesInTranscript(input.recentTurns);
   if (firedIntents.has("discover_processes") && inventorySatisfied) {
     answered.add("discover_processes");
   } else {
@@ -882,6 +905,137 @@ export function answeredProbeIntentsThisSession(input: {
 
 function uniqueNumbers(values: number[]) {
   return [...new Set(values)];
+}
+
+// A director transcript line that enumerates two or more process names counts
+// as a delivered inventory even before its async extraction commits.
+function directorEnumeratedProcessesInTranscript(recentTurns?: string[]) {
+  if (!recentTurns?.length) return false;
+  return recentTurns.some((turn) => {
+    if (!turn.startsWith("Director: ")) return false;
+    return extractProcessNames(turn.slice("Director: ".length)).length >= 2;
+  });
+}
+
+/**
+ * F1a: the director explicitly asked to leave the current process ("start
+ * asking me about the other processes", "move on", "next one"). Prod session
+ * 667b5809 asked four times across turns 12-17 and the planner never switched
+ * — there was no directive recognition at all. Deterministic, so the switch
+ * cannot depend on extractor compliance.
+ */
+export function directorRequestedFocusSwitch(text: string): boolean {
+  const cleaned = text.trim();
+  if (!cleaned) return false;
+  // "ask/talk/tell/switch ... about the other/next/remaining processes" — a
+  // request verb must appear within a few words of the process reference so
+  // workflow narration ("it depends on other processes upstream") does not
+  // read as a switch request.
+  if (
+    /\b(?:ask|asking|tell|telling|talk|talking|switch|go|start|cover|discuss|move|what)\W+(?:\w+\W+){0,5}(?:other|next|remaining|rest of(?: the)?|different)\s+(?:\w+\s+){0,2}process(?:es)?\b/i.test(
+      cleaned,
+    )
+  ) {
+    return true;
+  }
+  if (/\b(?:remember\s+)?(?:those|the)\s+other\s+ones\b/i.test(cleaned)) {
+    return true;
+  }
+  // "move on" only as an imperative: sentence-initial (optionally after
+  // no/yeah/ok/please/let's) or sentence-final — narration like "it then
+  // moves on to picking" must not match.
+  if (
+    /(?:^|[.!?]\s*)(?:no[.,!]?\s*)?(?:yeah[.,!]?\s*)?(?:ok(?:ay)?[.,!]?\s*)?(?:please\s+)?(?:let'?s\s+)?move\s+on\b/i.test(
+      cleaned,
+    ) ||
+    /\bmove\s+on\s*(?:now|please)?[.!?]?$/i.test(cleaned)
+  ) {
+    return true;
+  }
+  return /\b(?:done|enough)\s+(?:with|about)\s+(?:this|that|it)\b/i.test(cleaned);
+}
+
+/**
+ * The next candidate process that has not been worked yet: not the current
+ * focus and not targeted by any prior probe firing. Returns undefined when
+ * every candidate has been touched (callers fall through to closeout/bridge).
+ */
+export function nextDirectorFocusCandidate(input: {
+  candidateProcessNames: string[];
+  expandedCandidateProcessNames?: string[];
+  focusProcessName?: string;
+}): string | undefined {
+  const excluded = new Set(
+    (input.expandedCandidateProcessNames ?? []).map(normalizeCandidateProcessName),
+  );
+  if (input.focusProcessName) {
+    excluded.add(normalizeCandidateProcessName(input.focusProcessName));
+  }
+  return input.candidateProcessNames.find(
+    (name) => !excluded.has(normalizeCandidateProcessName(name)),
+  );
+}
+
+/**
+ * When the plan rotates focus (select_process_to_expand with a target), carry
+ * the target's candidate id as the requested focus so dispatch actually
+ * switches interview_state.focus_candidate_process_id — otherwise the agent
+ * says "let's zoom into X" while every subsequent answer keeps scoping to the
+ * old focus (the Task 10 drift class).
+ */
+export function withFocusSwitchCandidate(
+  plan: DirectorTurnPlan,
+  candidateSummaries: CandidateSummary[],
+): DirectorTurnPlan {
+  if (
+    plan.chosen_intent?.intent !== "select_process_to_expand" ||
+    !plan.chosen_intent.target_process
+  ) {
+    return plan;
+  }
+  const targetName = normalizeCandidateProcessName(plan.chosen_intent.target_process);
+  const target = candidateSummaries.find(
+    (candidate) => normalizeCandidateProcessName(candidate.proposedName) === targetName,
+  );
+  return target ? { ...plan, focus_candidate_process_id: target.id } : plan;
+}
+
+/**
+ * Names of candidates whose core expand slots (boundaries, ownership,
+ * systems) are already covered — rotation skips these and keeps cycling
+ * through under-captured candidates until every one is filled or exhausted.
+ * Keying this on probe firings instead would stop rotating after each
+ * candidate was merely touched once.
+ */
+async function readCoreCoveredCandidateNames(
+  context: DirectorToolContext,
+): Promise<string[]> {
+  const rows = await getDb().transaction(async (tx) => {
+    await setOrgContext(tx, context.orgId);
+    return tx.execute<{ proposed_name: string }>(sql`
+      SELECT cp.proposed_name
+      FROM candidate_processes cp
+      WHERE cp.org_id = ${context.orgId}
+        AND cp.workspace_id = ${context.workspaceId}
+        AND cp.capture_session_id = ${context.captureSessionId}
+        AND cp.status = 'pending'
+        AND (
+          SELECT count(DISTINCT s.slot_path)::int
+          FROM slot_states s
+          WHERE s.org_id = cp.org_id
+            AND s.workspace_id = cp.workspace_id
+            AND s.capture_session_id = cp.capture_session_id
+            AND s.candidate_process_id = cp.id
+            AND s.slot_path IN (
+              'scope.boundaries',
+              'ownership.roles',
+              'systems.systems_of_record'
+            )
+            AND s.status IN ('filled', 'asked_unknown')
+        ) >= 3
+    `);
+  });
+  return rows.rows.map((row) => row.proposed_name);
 }
 
 export function nonAuthoritativeDirectorSteeringPlan(
@@ -935,25 +1089,41 @@ async function planDirectorTurnWithExtractionPlanner(
   const statePromise = readInterviewState(context);
   const recentTurnsPromise = readRecentTurns(context);
   const candidateSummariesPromise = readCandidateSummaries(context);
+  const coveredCandidateNamesPromise = readCoreCoveredCandidateNames(context);
   const state = await statePromise;
-  const [currentSlots, recentTurns, candidateSummaries] = await Promise.all([
-    readCurrentSlots(context, {
-      candidateProcessId: state.focusCandidateProcessId,
+  const [currentSlots, recentTurns, candidateSummaries, coveredCandidateNames] =
+    await Promise.all([
+      readCurrentSlots(context, {
+        candidateProcessId: state.focusCandidateProcessId,
+      }),
+      recentTurnsPromise,
+      candidateSummariesPromise,
+      coveredCandidateNamesPromise,
+    ]);
+  // F1: the extract-path deterministic plan must compute the same focus
+  // rotation as the steering path — otherwise the agent SAYS "let's zoom into
+  // X" while dispatch keeps the old focus and scopes every later answer to it.
+  const focusCandidateName = state.focusCandidateProcessId
+    ? candidateSummaries.find(
+        (candidate) => candidate.id === state.focusCandidateProcessId,
+      )?.proposedName
+    : undefined;
+  const deterministicPlan = withFocusSwitchCandidate(
+    deterministicTurnPlan({
+      latestUtterance: input.latestUtterance,
+      evidenceIds: input.evidenceIds,
+      currentSlots,
+      currentPhase: state.currentPhase,
+      candidateProcessNames: candidateSummaries.map((candidate) => candidate.proposedName),
+      priorIntent: state.priorIntent,
+      lowInfoTurnCount: state.lowInfoTurnCount,
+      lastNewSlotTurnIndex: state.lastNewSlotTurnIndex,
+      turnIndex: input.turnIndex,
+      focusProcessName: focusCandidateName,
+      expandedCandidateProcessNames: coveredCandidateNames,
     }),
-    recentTurnsPromise,
-    candidateSummariesPromise,
-  ]);
-  const deterministicPlan = deterministicTurnPlan({
-    latestUtterance: input.latestUtterance,
-    evidenceIds: input.evidenceIds,
-    currentSlots,
-    currentPhase: state.currentPhase,
-    candidateProcessNames: candidateSummaries.map((candidate) => candidate.proposedName),
-    priorIntent: state.priorIntent,
-    lowInfoTurnCount: state.lowInfoTurnCount,
-    lastNewSlotTurnIndex: state.lastNewSlotTurnIndex,
-    turnIndex: input.turnIndex,
-  });
+    candidateSummaries,
+  );
   const promptBlocks = buildExtractionPromptCacheBlocks({
     currentSlots,
     recentTurns,
@@ -2196,6 +2366,7 @@ export async function dispatchDirectorTurnPlan(
       context,
       claimResolution.claims,
       tx,
+      sessionClaimEntities,
     );
     degradedQuality = degradedQuality || claimDispatch.degraded;
     if (claimDispatch.invalidClaims > 0) {
@@ -3709,13 +3880,16 @@ async function recordCandidateProcessClaimFromTool(
   if (!field) {
     throw new Error("recordCandidateProcessClaim requires a field.");
   }
-  const value =
+  const rawValue =
     toolArguments.value === undefined
       ? stringArg(toolArguments.text) ?? stringArg(toolArguments.name)
       : toolArguments.value;
-  if (value === undefined) {
+  if (rawValue === undefined) {
     throw new Error("recordCandidateProcessClaim requires a value.");
   }
+  // F2: free-text SPOF risks rewrite to the canonical recordSpof shape so the
+  // overview SPOF metric can match them.
+  const value = field === "risk" ? normalizeRiskClaimValue(rawValue) : rawValue;
   const claim = {
     subject_type: "candidate_process",
     subject_id: candidateProcessId,
@@ -3776,10 +3950,55 @@ type DirectorClaimSessionEntities = {
   rolesByName: Map<string, string>;
 };
 
+/**
+ * F3: resolve a works_on claim value to the canonical
+ * `{candidate_process_id}` shape. Accepts an explicit session candidate id,
+ * or a process name under `process` / `process_name` / `candidate_process` /
+ * a non-uuid `candidate_process_id` / a bare string — resolved against
+ * same-turn created candidates first, then the session's stored candidates.
+ */
+async function resolveWorksOnClaimValue(
+  context: DirectorToolContext,
+  value: unknown,
+  sessionEntities: DirectorClaimSessionEntities | undefined,
+  tx: ClaimWriteTx,
+): Promise<{ candidate_process_id: string } | undefined> {
+  const record =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  const explicitId =
+    typeof record.candidate_process_id === "string"
+      ? record.candidate_process_id
+      : undefined;
+  if (
+    explicitId &&
+    isUuidString(explicitId) &&
+    (await candidateProcessBelongsToSession(context, explicitId, tx))
+  ) {
+    return { candidate_process_id: explicitId };
+  }
+  const processName =
+    [record.process, record.process_name, record.candidate_process]
+      .map((candidate) => (typeof candidate === "string" ? candidate.trim() : ""))
+      .find(Boolean) ??
+    (explicitId && !isUuidString(explicitId) ? explicitId : undefined) ??
+    (typeof value === "string" && value.trim() ? value.trim() : undefined);
+  if (!processName) return undefined;
+  const normalized = normalizeDirectorEntityName(processName);
+  const sameTurnId = normalized
+    ? sessionEntities?.candidatesByName.get(normalized)
+    : undefined;
+  if (sameTurnId) return { candidate_process_id: sameTurnId };
+  const existingId = await candidateProcessIdByName(context, processName, tx);
+  return existingId ? { candidate_process_id: existingId } : undefined;
+}
+
 async function dispatchPlanClaims(
   context: DirectorToolContext,
   claims: DirectorTurnPlan["claims"],
   tx: ClaimWriteTx,
+  sessionEntities?: DirectorClaimSessionEntities,
 ): Promise<{
   degraded: boolean;
   droppedClaims: number;
@@ -3807,11 +4026,39 @@ async function dispatchPlanClaims(
       );
       continue;
     }
+    // F2: free-text SPOF risks rewrite to the canonical recordSpof shape.
+    let value = claim.field === "risk" ? normalizeRiskClaimValue(claim.value) : claim.value;
+    // F3: works_on links must carry a session candidate id — the extractor
+    // emits shapes like {"process": "Order intake"} which the people_count
+    // join cannot use. Resolve the name; drop with a retry task when no
+    // candidate matches.
+    if (claim.subject_type === "person" && claim.field === "works_on") {
+      const resolved = await resolveWorksOnClaimValue(context, value, sessionEntities, tx);
+      if (!resolved) {
+        invalidClaims += 1;
+        await createFollowUpTask(
+          context,
+          {
+            taskType: "low_confidence_claim",
+            title: "Resolve director works_on link: unknown process reference",
+            description:
+              "A person works_on claim referenced a process that does not match any session candidate; re-link it once the candidate exists.",
+            targetType: claim.subject_type,
+            targetId: uuidOrUndefined(claim.subject_id),
+            priority: 2,
+            contextJson: directorClaimFollowUpContext(claim),
+          },
+          { tx },
+        );
+        continue;
+      }
+      value = resolved;
+    }
     const request = {
       subject_type: claim.subject_type,
       subject_id: claim.subject_id,
       field: claim.field,
-      value: claim.value,
+      value,
       evidence_ids: claim.evidence_ids,
       confidence: claim.confidence,
       metadata: claim.metadata,
@@ -3826,7 +4073,7 @@ async function dispatchPlanClaims(
           id: claim.subject_id,
         } as ClaimSubject,
         field: claim.field,
-        value: claim.value,
+        value,
         evidenceIds: claim.evidence_ids,
         confidence: claim.confidence,
         idempotencyKey: `director-plan-claim:${hash(request)}`,
@@ -5010,6 +5257,8 @@ export function applySteeringIntentExclusions(
     answeredProbeIntents?: string[];
     proposedNextPhase: DirectorInterviewPhase;
     candidateProcessNames: string[];
+    focusProcessName?: string;
+    expandedCandidateProcessNames?: string[];
   },
 ): DirectorIntent[] {
   const provisional = new Set(input.provisionallyAnsweredSlots ?? []);
@@ -5030,6 +5279,27 @@ export function applySteeringIntentExclusions(
     });
   }
   if (eligible.length > 0 || rankedIntents.length === 0) return eligible;
+  // F1b: the focus candidate's probes are exhausted. Rotate to the next
+  // untouched candidate instead of clarifying the same process forever (prod
+  // turns 16/17 looped on "clarify_previous_question target: Order intake"
+  // while five candidates had zero slots probed).
+  const rotationTarget = nextDirectorFocusCandidate({
+    candidateProcessNames: input.candidateProcessNames,
+    expandedCandidateProcessNames: input.expandedCandidateProcessNames,
+    focusProcessName: input.focusProcessName,
+  });
+  if (rotationTarget && input.proposedNextPhase !== "closeout") {
+    return [
+      intent(
+        "select_process_to_expand",
+        "scope.boundaries",
+        700,
+        "Focus probes are exhausted; rotate to the next uncovered process.",
+        rotationTarget,
+        "focus_rotation",
+      ),
+    ];
+  }
   return [
     cooldownBridgeIntent(
       input.proposedNextPhase,
@@ -5048,6 +5318,7 @@ async function readRecentProbeFiringRows(
       .select({
         probeId: probeFirings.probeId,
         targetSlot: probeFirings.targetSlot,
+        targetCandidateProcessId: probeFirings.targetCandidateProcessId,
         turnIndex: probeFirings.turnIndex,
         firedAt: probeFirings.firedAt,
       })
@@ -5423,6 +5694,10 @@ export function deterministicTurnPlan(input: {
   provisionallyAnsweredSlots?: string[];
   /** Intents already substantively answered this session (Task 11). */
   answeredProbeIntents?: string[];
+  /** Authoritative focus candidate name (interview_state), for rotation (F1). */
+  focusProcessName?: string;
+  /** Candidates a probe has already targeted this session, for rotation (F1). */
+  expandedCandidateProcessNames?: string[];
 }): DirectorTurnPlan {
   const slotUpdates: Array<{
     slot_path: string;
@@ -5714,8 +5989,48 @@ export function deterministicTurnPlan(input: {
       answeredProbeIntents: input.answeredProbeIntents,
       proposedNextPhase,
       candidateProcessNames: input.candidateProcessNames,
+      focusProcessName: input.focusProcessName,
+      expandedCandidateProcessNames: input.expandedCandidateProcessNames,
     },
   );
+  // F1a: an explicit "ask me about the other processes" / "move on" overrides
+  // slot-coverage probing — rotate focus to the next untouched candidate. This
+  // returns before the forced-closeout check so repeated switch requests
+  // (which classify as low-information turns) cannot push the interview into
+  // closeout instead of honoring the request.
+  if (directorRequestedFocusSwitch(text)) {
+    const switchTarget = nextDirectorFocusCandidate({
+      candidateProcessNames: input.candidateProcessNames,
+      expandedCandidateProcessNames: input.expandedCandidateProcessNames,
+      focusProcessName: input.focusProcessName,
+    });
+    if (switchTarget) {
+      const switchIntent = intent(
+        "select_process_to_expand",
+        "scope.boundaries",
+        1500,
+        "The director asked to move to another process; rotating focus.",
+        switchTarget,
+        "focus_switch",
+      );
+      const plan = {
+        utterance_type: utteranceType,
+        slot_updates: slotUpdates,
+        claims: [],
+        tool_calls: toolCalls,
+        contradiction_signals: contradictionSignals(utteranceType, text),
+        current_phase: currentPhase,
+        proposed_next_phase: "expand" as const,
+        phase_transition_ready: currentPhase !== "expand",
+        ranked_intents: ensureIntentRanked(switchIntent, rankedIntents),
+        chosen_intent: switchIntent,
+      };
+      return {
+        ...plan,
+        planned_agent_utterance: deterministicPhrase(plan),
+      };
+    }
+  }
   const forceCloseout = shouldForceDirectorCloseout({
     utteranceType,
     lowInfoTurnCount: input.lowInfoTurnCount ?? 0,

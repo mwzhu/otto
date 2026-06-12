@@ -1,12 +1,16 @@
 import "server-only";
 
+// G2: complexity scores only evidence-positive signals. Two factors used to
+// reward not-knowing — `documentation_gap` (flat 15 for having no uploaded
+// docs) and an unknown-frequency default (8) — which made a process nobody
+// asked about score 23-26 "low complexity" instead of "unknown". Documentation
+// status now lives in the coverage metric (G1), not here.
 export type ComplexityFactorKey =
   | "system_sprawl"
   | "handoff_count"
   | "frequency_pressure"
   | "friction_severity"
-  | "spof_risk"
-  | "documentation_gap";
+  | "spof_risk";
 
 export type ComplexityInput = {
   systemCount?: number;
@@ -15,7 +19,6 @@ export type ComplexityInput = {
   frequency?: string | null;
   painPoints?: Array<{ text: string; evidenceIds?: string[] }>;
   risks?: Array<{ text: string; evidenceIds?: string[] }>;
-  documentationEvidenceCount?: number;
   evidenceIds?: string[];
 };
 
@@ -88,21 +91,14 @@ export function computeComplexityScore(input: ComplexityInput): ComplexityScore 
       (input.risks?.length ?? 0) === 0 ? ["No SPOF or risk claims were evidenced yet."] : [],
       `${input.risks?.length ?? 0} evidenced risk signal${(input.risks?.length ?? 0) === 1 ? "" : "s"}.`,
     ),
-    documentation_gap: factor(
-      "Documentation gap",
-      input.documentationEvidenceCount && input.documentationEvidenceCount > 0 ? 4 : 15,
-      15,
-      input.evidenceIds ?? [],
-      input.documentationEvidenceCount ? [] : ["No documented evidence is attached yet."],
-      input.documentationEvidenceCount
-        ? `${input.documentationEvidenceCount} documented evidence source${input.documentationEvidenceCount === 1 ? "" : "s"}.`
-        : "Documentation evidence missing.",
-    ),
   };
 
-  const total = Object.values(factors).reduce((sum, row) => sum + row.value, 0);
+  // Factor maxes sum to 85; rescale the total to /100 so bands and the
+  // recommended threshold keep their meaning after dropping documentation_gap.
+  const rawTotal = Object.values(factors).reduce((sum, row) => sum + row.value, 0);
+  const rawMax = Object.values(factors).reduce((sum, row) => sum + row.max, 0);
   return {
-    total,
+    total: Math.round((rawTotal / rawMax) * 100),
     factors,
     assumptions: unique(Object.values(factors).flatMap((row) => row.assumptions)),
   };
@@ -127,11 +123,14 @@ function factor(
 }
 
 function frequencyScore(frequency: string) {
-  if (!frequency) return 8;
+  // Unknown frequency contributes nothing — "we never asked" is a coverage
+  // gap, not frequency pressure. Captured-but-unparsed cadence text gets a
+  // conservative middle score.
+  if (!frequency) return 0;
   if (/real.?time|hour|daily|per day|every day|high volume/.test(frequency)) return 15;
   if (/week|weekly|several times|recurring/.test(frequency)) return 10;
   if (/month|monthly|quarter/.test(frequency)) return 6;
-  return 8;
+  return 6;
 }
 
 function severityBoost(text: string) {

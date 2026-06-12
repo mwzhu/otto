@@ -452,3 +452,132 @@ and optionally a documentation-maturity chip on cards sourced from the
 F1 (the interview is the product; a/b together, c verified during) → F3 + F2 (both
 are dispatch-side claim normalization, one PR) → F4 + F5 (write-side hygiene) →
 F6 + F7 (presentation).
+
+---
+
+# Round 2 addendum: metrics redesign (G) — separating "what Otto knows" from "what the business is"
+
+The three tiles conflate knowledge-completeness with process attributes. Decision:
+
+## G1 — Documentation Coverage becomes slot-fill capture coverage
+
+Per-process coverage = weighted fill of the core director slots for that candidate
+(slot_states already stores per-candidate rows with empty/partial/filled/
+asked_unknown — prod session 667b5809 has ~13 scoped rows for order intake and zero
+for the other five, which is exactly the right signal). Scoring: filled = 1,
+partial = 0.5, asked_unknown = 1 (the question was asked and resolved — the org not
+knowing is a maturity finding, not a capture gap), empty/conflicting = 0. Core slot
+set = the expand-phase core list (scope.boundaries, outcomes, ownership.roles,
+systems, frequency.volume, friction, risk) — reuse the existing list in brain.ts
+rather than a new one. Department tile = average across inventory processes.
+Uploaded documents raise coverage the honest way: the document pipeline fills
+slots. (Upload corroboration stays available per-claim via evidence labels; it is
+no longer the tile.)
+
+## G2 — Complexity stops borrowing ignorance signals
+
+Two factors currently reward not-knowing: `documentation_gap` (flat 15 when no
+uploaded docs — 26% of a typical score is "no docs") and the unknown-frequency
+default (8). Remove both from the rubric; rescale remaining factors (sprawl 20,
+handoffs 15, frequency 15 with unknown = 0, friction 20, SPOF 15) to /100.
+Re-calibrate the recommended threshold and complexity bands after rescale.
+
+**F8 (P1, found during this review):** pain_point claims arrive as
+`{"items": [...]}` or plain strings, but `normalizeSignals`
+(lib/synthesis/inventory.ts:599) only reads `.text` — friction scored 0/20 on
+order intake despite two captured pain points. Normalize claim value shapes
+(string, {text}, {items: []}, {description}) into signal text before scoring;
+same normalizer fixes the raw-JSON risk display (F4b).
+
+## G3 — Low-coverage processes get an action, not a fake score
+
+A process below a coverage threshold (e.g. <40% core slots) shows no complexity
+score at all. The card swaps the score badge for "More info needed" with the
+missing slots ("no boundaries, no systems, no frequency") and a capture CTA
+(continue director interview / process deep-dive). Synthesis still computes the
+score internally but tags it `metadata.coverage`; display gates on it. The tile
+average only averages scored processes and says so: "42 avg · 1 of 6 scored".
+This also reframes the F1 outcome: when the interviewer fails to rotate, the
+overview now SAYS five processes are under-captured instead of calling them
+"low complexity".
+
+## G4 — Tile semantics after the change
+
+- Processes Captured: unchanged.
+- Documentation Coverage: slot-fill % (G1) — answers "how well is the department
+  documented in Otto".
+- Complexity: avg of scored processes only + scored/total count (G2+G3).
+- Single Points of Failure: unchanged concept; F2 fixes the plumbing; relabel
+  subtitle to "one-person dependencies found".
+
+Sequencing: F8+G2 together (one scoring PR), then G1 (coverage query + tile),
+then G3 (card gating + CTA), G4 copy rides along. F1 remains the top priority —
+G3 makes under-capture visible, F1 makes it rare.
+
+---
+
+# Round 2 + addendum: IMPLEMENTED (2026-06-11)
+
+All of F1–F8 and G1–G4 are implemented and tested (426 unit/integration tests
+passing; the only failures are the two pre-existing operator-capture contract
+tests that fail on clean HEAD).
+
+- **F1** — `directorRequestedFocusSwitch` (deterministic directive detection,
+  tested against all four prod move-on utterances and narration negatives),
+  rotation in `deterministicTurnPlan` returning `select_process_to_expand` to
+  the next untouched candidate with `proposed_next_phase: expand`, the
+  exhausted-probe bridge in `applySteeringIntentExclusions` rotating instead of
+  clarifying, and `withFocusSwitchCandidate` carrying the target's candidate id
+  so dispatch actually moves `focus_candidate_process_id`. Both the steering
+  and extract paths compute identical rotation inputs (probe-firing targets +
+  authoritative focus) so speech and dispatch cannot diverge. F1c: the
+  inventory-satisfied check now also scans recent director transcript lines
+  (`extractProcessNames ≥ 2`) so async-extraction lag no longer re-asks the
+  process list.
+- **F2/F3** — `lib/claims/value-text.ts`: `normalizeRiskClaimValue` rewrites
+  single-person-dependency risk text to the recordSpof shape at both claim
+  channels; `resolveWorksOnClaimValue` resolves `{process: name}` works_on
+  values to `{candidate_process_id}` (same-turn map, then session lookup),
+  dropping unresolvable ones to retry tasks.
+- **F4** — near-duplicate suppression for text-bearing multi-value claims in
+  `writeClaimInTransaction` (token containment ≥ 0.6, plus same-person SPOF
+  matching for the prod Marcus pair); `riskBody` renders object values via
+  `claimValueText` instead of raw JSON.
+- **F5** — `lib/systems/canonicalize.ts` + `upsertNamedSystem` lookup by
+  canonical key: the five prod Sheet variants fold to "Google Sheets" (+ the
+  intentionally-distinct leading-qualifier name).
+- **F6** — process detail evidence links grouped one row per field with
+  claim/evidence counts, expandable to per-claim links.
+- **F8/G2** — `normalizeSignals` reads all claim value shapes (the prod
+  friction-0 bug); complexity drops `documentation_gap` and the
+  unknown-frequency default, rescales to /100.
+- **G1/G3/G4** — `directorCoreCoverageSlotPaths` (7 core slots) in
+  slot-schema; coverage CTE in overview queries (candidates own, promoted
+  processes inherit via `promoted_process_id`); Documentation Coverage tile =
+  average slot-fill; complexity tile averages only processes above the 40%
+  coverage gate and says "Average of N scored — M need more capture"; cards
+  below the gate show "More info needed" + missing slot labels + capture CTA;
+  synthesis tags `metadata.coverage` on complexity claims; SPOF subtitle is
+  now "One-person dependencies found".
+
+**Migration required before/with deploy:** `migrations/0016_works_on_multivalue_claims.sql`
+rebuilds `claims_active_subject_field_idx` to exclude `works_on` (and
+`business_outcome`, which was already multi-value in the app layer but missing
+from the index). Without it, a person's second works_on link violates the
+unique index and aborts the dispatch transaction. Idempotent
+(DROP IF EXISTS + CREATE); apply with `npm run db:migrate` against prod.
+
+**E3 (round 2):** re-run the interview; expect the agent to rotate to the
+other five processes on request (and on probe exhaustion), SPOF tile ≥ 1,
+coverage tile reflecting slot fill, one Marcus risk callout, one Google Sheets
+system, grouped evidence links.
+
+**Round 2 review fixes (round 3):** (1) rotation exclusion now keys on core-slot
+coverage (`readCoreCoveredCandidateNames`: boundaries/ownership/systems all
+filled or asked_unknown), not probe-touched-once — rotation keeps cycling until
+every candidate is filled or exhausted, per the plan; (2) promoted process cards
+inherit `covered_slot_paths` from their best source candidate so a low-coverage
+promoted process lists its missing slots; (3) promoted-process coverage joins
+use LATERAL ... LIMIT 1 so multiple candidates promoted/merged into one process
+cannot duplicate inventory rows in the coverage/scored-count/complexity
+averages.

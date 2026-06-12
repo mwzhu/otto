@@ -74,6 +74,29 @@ export const directorSlotDefinitions: DirectorSlotDefinition[] = [
   { path: "variants.exceptions", label: "Variants", priority: 40 },
 ];
 
+/**
+ * G1: the core per-process slots that define capture coverage. A process's
+ * coverage % is the weighted fill of these seven (filled / asked_unknown = 1,
+ * partial = 0.5); the overview's Documentation Coverage tile averages it
+ * across the inventory, and complexity display gates on it (G3).
+ */
+export const directorCoreCoverageSlotPaths = [
+  "scope.boundaries",
+  "outcomes.business_outcomes",
+  "ownership.roles",
+  "systems.systems_of_record",
+  "frequency.volume",
+  "friction.pain_points",
+  "risk.spofs",
+] as const;
+
+export function directorSlotLabel(slotPath: string) {
+  return (
+    directorSlotDefinitions.find((definition) => definition.path === slotPath)?.label ??
+    slotPath
+  );
+}
+
 export function slotPriority(slotPath: string) {
   return (
     directorSlotDefinitions.find((definition) => definition.path === slotPath)

@@ -765,11 +765,13 @@ export const claims = pgTable(
           'pain_point',
           'risk',
           'kpi',
+          'business_outcome',
           'upstream_dependency',
           'downstream_dependency',
           'used_in_process',
           'participates_in_process',
-          'handoff_target'
+          'handoff_target',
+          'works_on'
         )`),
   }),
 );

@@ -113,6 +113,13 @@
       "when": 1780617600000,
       "tag": "0015_director_automation_plan_table",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1780704000000,
+      "tag": "0016_works_on_multivalue_claims",
+      "breakpoints": true
     }
   ]
 }

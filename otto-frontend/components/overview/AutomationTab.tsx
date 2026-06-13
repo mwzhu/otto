@@ -152,11 +152,16 @@ export function AutomationTab({
                 methodology={roiMethodology(plan, "delay")}
               />
               <CalcRow
+                label="Confidence & effort adjustment"
+                amount={`(${fmtUSDValue(roiAdjustment(plan))})`}
+                methodology="Gross modeled value discounted out by each opportunity's confidence and delivery effort band. Shown in parentheses because it reduces the total."
+              />
+              <CalcRow
                 label={`Net realized value (${plan.departmentName})`}
                 amount={fmtUSDValue(
                   plan.metrics.annualNetValueRange ?? plan.metrics.annualNetValue,
                 )}
-                methodology="Time savings + error reduction + delay reduction, adjusted by opportunity confidence and delivery effort band."
+                methodology="Manual effort removed + error reduction + delay reduction, less the confidence & effort adjustment — the realized value after discounting each opportunity."
               />
             </tbody>
           </table>
@@ -194,14 +199,7 @@ function Audit({ audit }: { audit: DepartmentAutomationPlan["audit"] }) {
                 className="flex gap-2.5 text-[13px] leading-relaxed text-ink-secondary"
               >
                 <span className="mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-ink-muted" />
-                <span>
-                  {pattern.text}
-                  {pattern.metricBasis && (
-                    <span className="mt-0.5 block text-[11.5px] text-ink-muted">
-                      {pattern.metricBasis}
-                    </span>
-                  )}
-                </span>
+                <span>{pattern.text}</span>
               </li>
             ))}
           </ul>
@@ -472,18 +470,52 @@ function emptyStateCopy(plan: DepartmentAutomationPlan) {
   return "Complete a director interview to produce the department automation plan, then add operator captures for deeper workflow evidence on the highest-priority processes.";
 }
 
+function toRange(value: number | ROIRange): ROIRange {
+  return typeof value === "number"
+    ? { low: value, base: value, high: value }
+    : value;
+}
+
+// The realized-value row applies a per-opportunity confidence/effort haircut,
+// so the three gross drivers above it never summed to it. Derive the haircut
+// from the exact ranges displayed (drivers - net) so the table reconciles at
+// every bound: time + error + delay - adjustment = net realized value.
+function roiAdjustment(plan: DepartmentAutomationPlan): ROIRange {
+  const time = toRange(
+    plan.metrics.annualTimeValueRange ?? plan.metrics.annualTimeValue,
+  );
+  const error = toRange(
+    plan.metrics.annualErrorValueRange ?? plan.metrics.annualErrorValue,
+  );
+  const delay = toRange(
+    plan.metrics.annualDelayValueRange ?? plan.metrics.annualDelayValue,
+  );
+  const net = toRange(
+    plan.metrics.annualNetValueRange ?? plan.metrics.annualNetValue,
+  );
+  return {
+    low: time.low + error.low + delay.low - net.low,
+    base: time.base + error.base + delay.base - net.base,
+    high: time.high + error.high + delay.high - net.high,
+  };
+}
+
 function fmtUSDValue(value: number | ROIRange) {
   if (typeof value === "number") {
     return fmtUSD(value);
   }
-  return `${fmtUSD(value.low)}-${fmtUSD(value.high)}`;
+  const low = fmtUSD(value.low);
+  const high = fmtUSD(value.high);
+  return low === high ? low : `${low}-${high}`;
 }
 
 function fmtNumValue(value: number | ROIRange) {
   if (typeof value === "number") {
     return fmtNum(Math.round(value));
   }
-  return `${fmtNum(Math.round(value.low))}-${fmtNum(Math.round(value.high))}`;
+  const low = Math.round(value.low);
+  const high = Math.round(value.high);
+  return low === high ? fmtNum(low) : `${fmtNum(low)}-${fmtNum(high)}`;
 }
 
 function roiMethodology(
@@ -518,14 +550,20 @@ function roiLabel(
 
 function rangeOrNumber(range: ROIRange | undefined, fallback: number) {
   if (!range) return fmtNum(Math.round(fallback));
-  return `${fmtNum(Math.round(range.low))}-${fmtNum(Math.round(range.high))}`;
+  const low = Math.round(range.low);
+  const high = Math.round(range.high);
+  return low === high ? fmtNum(low) : `${fmtNum(low)}-${fmtNum(high)}`;
 }
 
 function percentRangeOrNumber(range: ROIRange | undefined, fallback: number) {
   if (!range) return `${Math.round(fallback * 100)}%`;
-  return `${Math.round(range.low * 100)}-${Math.round(range.high * 100)}%`;
+  const low = Math.round(range.low * 100);
+  const high = Math.round(range.high * 100);
+  return low === high ? `${low}%` : `${low}-${high}%`;
 }
 
 function percentRange(range: ROIRange) {
-  return `${Math.round(range.low * 100)}-${Math.round(range.high * 100)}%`;
+  const low = Math.round(range.low * 100);
+  const high = Math.round(range.high * 100);
+  return low === high ? `${low}%` : `${low}-${high}%`;
 }

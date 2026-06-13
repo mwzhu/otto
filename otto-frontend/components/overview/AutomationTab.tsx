@@ -324,22 +324,18 @@ function Assumptions({
       <AssumptionPill
         label="Annual volume"
         value={`${fmtNumValue(ranges.annual_volume)} cases`}
-        detail={details.annual_volume}
       />
       <AssumptionPill
         label="Minutes saved"
         value={`${fmtNumValue(ranges.minutes_saved_per_case)} min/case`}
-        detail={details.minutes_saved_per_case}
       />
       <AssumptionPill
         label="Error rate"
         value={percentRange(ranges.error_rate)}
-        detail={details.error_rate}
       />
       <AssumptionPill
         label="Exception rate"
         value={percentRange(ranges.exception_rate)}
-        detail={details.exception_rate}
       />
     </div>
   );
@@ -348,29 +344,17 @@ function Assumptions({
 function AssumptionPill({
   label,
   value,
-  detail,
 }: {
   label: string;
   value: string;
-  detail: NonNullable<
-    DepartmentAutomationOpportunity["assumptionDetails"]
-  >["annual_volume"];
 }) {
   return (
     <div className="rounded-md border border-subtle bg-canvas px-3 py-2">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-[10.5px] font-semibold uppercase tracking-wide text-ink-muted">
-          {label}
-        </span>
-        <span className="rounded-sm border border-subtle px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-muted">
-          {detail.basis}
-        </span>
+      <div className="text-[10.5px] font-semibold uppercase tracking-wide text-ink-muted">
+        {label}
       </div>
       <div className="mt-1 font-mono text-[12.5px] font-semibold tabular-nums text-ink">
         {value}
-      </div>
-      <div className="mt-1 text-[10.5px] text-ink-muted">
-        {Math.round(detail.confidence * 100)}% assumption confidence
       </div>
     </div>
   );

@@ -118,7 +118,7 @@ export function AutomationTab({
         <p className="mt-1.5 max-w-3xl text-[12px] leading-relaxed text-ink-secondary">
           Value is shown as low-base-high planning ranges. The model uses
           department-specific process volume, minutes saved, error rate,
-          exception rate, confidence, effort band, and workspace ROI prices.
+          exception rate, and workspace ROI prices.
         </p>
         <div className="mt-4 overflow-hidden rounded-md border border-subtle">
           <table className="w-full border-collapse text-left text-[12px]">
@@ -152,16 +152,11 @@ export function AutomationTab({
                 methodology={roiMethodology(plan, "delay")}
               />
               <CalcRow
-                label="Confidence & effort adjustment"
-                amount={`(${fmtUSDValue(roiAdjustment(plan))})`}
-                methodology="Gross modeled value discounted out by each opportunity's confidence and delivery effort band. Shown in parentheses because it reduces the total."
-              />
-              <CalcRow
                 label={`Net realized value (${plan.departmentName})`}
                 amount={fmtUSDValue(
                   plan.metrics.annualNetValueRange ?? plan.metrics.annualNetValue,
                 )}
-                methodology="Manual effort removed + error reduction + delay reduction, less the confidence & effort adjustment — the realized value after discounting each opportunity."
+                methodology="Manual effort removed + error reduction + delay reduction, totaled across ranked opportunities."
               />
             </tbody>
           </table>
@@ -468,36 +463,6 @@ function emptyStateCopy(plan: DepartmentAutomationPlan) {
     return "The latest director automation plan generation failed. Retry the director synthesis or review the captured inventory before presenting this tab.";
   }
   return "Complete a director interview to produce the department automation plan, then add operator captures for deeper workflow evidence on the highest-priority processes.";
-}
-
-function toRange(value: number | ROIRange): ROIRange {
-  return typeof value === "number"
-    ? { low: value, base: value, high: value }
-    : value;
-}
-
-// The realized-value row applies a per-opportunity confidence/effort haircut,
-// so the three gross drivers above it never summed to it. Derive the haircut
-// from the exact ranges displayed (drivers - net) so the table reconciles at
-// every bound: time + error + delay - adjustment = net realized value.
-function roiAdjustment(plan: DepartmentAutomationPlan): ROIRange {
-  const time = toRange(
-    plan.metrics.annualTimeValueRange ?? plan.metrics.annualTimeValue,
-  );
-  const error = toRange(
-    plan.metrics.annualErrorValueRange ?? plan.metrics.annualErrorValue,
-  );
-  const delay = toRange(
-    plan.metrics.annualDelayValueRange ?? plan.metrics.annualDelayValue,
-  );
-  const net = toRange(
-    plan.metrics.annualNetValueRange ?? plan.metrics.annualNetValue,
-  );
-  return {
-    low: time.low + error.low + delay.low - net.low,
-    base: time.base + error.base + delay.base - net.base,
-    high: time.high + error.high + delay.high - net.high,
-  };
 }
 
 function fmtUSDValue(value: number | ROIRange) {

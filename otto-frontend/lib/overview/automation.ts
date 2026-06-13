@@ -3,7 +3,6 @@ import "server-only";
 import { getCurrentProcessGraph } from "@/lib/processes/graph-queries";
 import { getProcessOpportunities } from "@/lib/processes/opportunity-queries";
 import type { ProcessOpportunitySource } from "@/lib/processes/opportunity-queries";
-import { EFFORT_PENALTY_BY_BAND } from "@/lib/processes/opportunity-grounding";
 import {
   computeRoiRange,
   tightenRoiRange,
@@ -231,15 +230,14 @@ async function buildDirectorPlan(input: {
         error_rate: tightenRoiRange(numericRange(process.assumptions.error_rate)),
         exception_rate: tightenRoiRange(numericRange(process.assumptions.exception_rate)),
       };
-      const effortPenalty = EFFORT_PENALTY_BY_BAND[process.effort_band];
-      const roiRange = computeRoiRange(
-        assumptionRanges,
-        prices,
-        {
-          confidence: process.confidence,
-          effort_penalty: effortPenalty,
-        },
-      );
+      // Net realized value is pure modeled savings: time + error + delay.
+      // We do NOT discount by confidence or penalize build effort, so
+      // net_score == gross_value and the breakdown drivers sum exactly to the
+      // net total. (confidence is still shown as context, not applied.)
+      const roiRange = computeRoiRange(assumptionRanges, prices, {
+        confidence: 1,
+        effort_penalty: 1,
+      });
       const hoursSavedRange: ROIRange = {
         low:
           (assumptionRanges.annual_volume.low *
@@ -263,7 +261,7 @@ async function buildDirectorPlan(input: {
         exception_rate: assumptionRanges.exception_rate.base,
         delay_cost: prices.delay_cost,
         confidence: process.confidence,
-        effort_penalty: effortPenalty,
+        effort_penalty: 1,
       };
       return {
         id: `director:${process.candidate_process_id}`,

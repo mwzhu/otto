@@ -1,5 +1,6 @@
 .git/
 node_modules/
+otto-frontend/node_modules/
 # Large app/build trees the agent Dockerfiles never COPY — keep the LiveKit
 # Cloud Agents source-build upload (repo-root context) lean. otto-frontend/.next
 # alone is ~1GB.

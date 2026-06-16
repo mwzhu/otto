@@ -6,10 +6,6 @@ import { useWorkspaceStore } from "@/lib/store/workspace";
 const MODES: { id: ReturnType<typeof useWorkspaceStore.getState>["layoutMode"]; label: string }[] =
   [
     { id: "authored", label: "Default" },
-    { id: "vertical", label: "Vertical" },
-    { id: "swimlane-role", label: "Swimlanes (Role)" },
-    { id: "swimlane-system", label: "Swimlanes (System)" },
-    { id: "exception", label: "Exceptions" },
   ];
 
 export function LayoutModeToggle({ className }: { className?: string }) {

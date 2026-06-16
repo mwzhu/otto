@@ -15,7 +15,7 @@ type WorkspaceState = {
   toggleRefine: (next?: boolean) => void;
   selectedNodeId: string | null;
   setSelectedNodeId: (id: string | null) => void;
-  layoutMode: "authored" | "vertical" | "swimlane-role" | "swimlane-system" | "exception";
+  layoutMode: "authored";
   setLayoutMode: (m: WorkspaceState["layoutMode"]) => void;
   collapsedToL3: boolean;
   toggleL3: () => void;

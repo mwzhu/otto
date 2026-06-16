@@ -931,6 +931,7 @@ describe("Phase 2 operator capture contract", () => {
     expect(statusRoute).toContain(
       "captureInventoryCount === null ? metrics.processCount > 0 : captureInventoryCount > 0",
     );
+    expect(statusRoute).toContain("'process_graph'");
     expect(statusRoute).not.toContain(
       'latestRun?.status === "partial_synthesis" ||',
     );

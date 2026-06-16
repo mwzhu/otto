@@ -22,6 +22,8 @@ import { validateDocumentUploadMetadata } from "@/lib/documents/validation";
 
 export const runtime = "nodejs";
 
+const MAX_PROXY_UPLOAD_BYTES = 50 * 1024 * 1024;
+
 const bodySchema = z.object({
   filename: z.string().min(1),
   mime_type: z.string().min(1),
@@ -104,7 +106,10 @@ export async function POST(
       const response = {
         artifact,
         upload_url: uploadUrl,
-        proxy_upload_url: shouldOfferProxyUpload(body.artifact_type)
+        proxy_upload_url: shouldOfferProxyUpload(
+          body.artifact_type,
+          body.size_bytes,
+        )
           ? `/api/artifacts/${artifact.id}/upload`
           : undefined,
       };
@@ -125,8 +130,15 @@ export async function POST(
   }
 }
 
-function shouldOfferProxyUpload(artifactType: string) {
-  return artifactType === "document" || artifactType === "image";
+function shouldOfferProxyUpload(artifactType: string, sizeBytes?: number) {
+  return (
+    artifactType === "document" ||
+    artifactType === "image" ||
+    artifactType === "screen_frame" ||
+    (artifactType === "video" &&
+      typeof sizeBytes === "number" &&
+      sizeBytes <= MAX_PROXY_UPLOAD_BYTES)
+  );
 }
 
 async function createUploadUrl(input: { key: string; contentType: string }) {

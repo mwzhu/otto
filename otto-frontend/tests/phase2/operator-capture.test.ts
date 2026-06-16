@@ -83,6 +83,31 @@ describe("Phase 2 operator capture contract", () => {
     expect(operatorSlotScope("step.inputs_outputs")).toBe("compatibility");
   });
 
+  test("browser artifact uploads can fall back to authenticated proxy uploads", () => {
+    const screenshare = read(
+      "app/process/[id]/capture/screenshare/ScreenshareClient.tsx",
+    );
+    const processCaptureUpload = read(
+      "components/capture/ProcessCaptureUploadClient.tsx",
+    );
+    const presignRoute = read(
+      "app/api/workspaces/[workspaceId]/artifacts/presign/route.ts",
+    );
+
+    expect(presignRoute).toContain('artifactType === "screen_frame"');
+    expect(presignRoute).toContain('artifactType === "video"');
+    expect(presignRoute).toContain("sizeBytes <= MAX_PROXY_UPLOAD_BYTES");
+    expect(screenshare).toContain("proxy_upload_url");
+    expect(screenshare).toContain("fallbackUploadUrl: presign.proxy_upload_url");
+    expect(screenshare).toContain("uploadArtifactBlob");
+    expect(screenshare).toContain("Storage upload failed before the server accepted the file.");
+    expect(processCaptureUpload).toContain("proxy_upload_url");
+    expect(processCaptureUpload).toContain(
+      "fallbackUploadUrl: presign.proxy_upload_url",
+    );
+    expect(processCaptureUpload).toContain("uploadArtifactBytes");
+  });
+
   test("operator graph migration keeps graph rows canonical and RLS-protected", () => {
     const migration = read("migrations/0005_operator_graph.sql");
     const claimSubjects = JSON.parse(

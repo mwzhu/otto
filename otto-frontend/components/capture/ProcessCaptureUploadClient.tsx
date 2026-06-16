@@ -92,6 +92,7 @@ export function ProcessCaptureUploadClient({
             postJson<{
               artifact: { id: string };
               upload_url: string;
+              proxy_upload_url?: string;
             }>(
               `/api/workspaces/${workspaceId}/artifacts/presign`,
               {
@@ -104,14 +105,12 @@ export function ProcessCaptureUploadClient({
             ),
         );
         await withUploadStep("Uploading file", async () => {
-          const upload = await fetch(presign.upload_url, {
-            method: "PUT",
-            headers: { "content-type": file.type || fallbackMimeType(uploadKind) },
-            body: file,
+          await uploadArtifactBytes({
+            file,
+            uploadUrl: presign.upload_url,
+            fallbackUploadUrl: presign.proxy_upload_url,
+            contentType: file.type || fallbackMimeType(uploadKind),
           });
-          if (!upload.ok) {
-            throw new Error(`storage upload failed (${upload.status})`);
-          }
         });
         setRow({ name: file.name, size: file.size, status: "binding" });
         await withUploadStep(
@@ -312,4 +311,54 @@ async function postJson<T>(url: string, body: unknown, idempotencyKey: string) {
     throw new Error(payload?.error?.message ?? `Request failed (${response.status})`);
   }
   return payload as T;
+}
+
+async function uploadArtifactBytes(input: {
+  file: File;
+  uploadUrl: string;
+  fallbackUploadUrl?: string;
+  contentType: string;
+}) {
+  try {
+    await putArtifactBytes(input.uploadUrl, input.file, input.contentType);
+  } catch (error) {
+    if (!input.fallbackUploadUrl) throw error;
+    await putArtifactBytes(input.fallbackUploadUrl, input.file, input.contentType);
+  }
+}
+
+async function putArtifactBytes(url: string, file: File, contentType: string) {
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "PUT",
+      headers: { "content-type": contentType },
+      body: file,
+    });
+  } catch (error) {
+    throw new Error(uploadNetworkErrorMessage(error));
+  }
+  if (!response.ok) {
+    const message = await uploadErrorMessage(response);
+    throw new Error(message ?? `storage upload failed (${response.status})`);
+  }
+}
+
+function uploadNetworkErrorMessage(error: unknown) {
+  if (error instanceof Error && error.message && error.message !== "Load failed") {
+    return error.message;
+  }
+  return "Storage upload failed before the server accepted the file.";
+}
+
+async function uploadErrorMessage(response: Response) {
+  try {
+    const payload = await response.json();
+    if (typeof payload?.error?.message === "string") {
+      return payload.error.message;
+    }
+  } catch {
+    // Direct storage URLs do not return Otto API JSON.
+  }
+  return null;
 }

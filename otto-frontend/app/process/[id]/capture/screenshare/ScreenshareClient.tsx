@@ -907,6 +907,7 @@ async function stopAndUploadMediaRecorderFallback(input: {
   const presign = await postJson<{
     artifact: { id: string };
     upload_url: string;
+    proxy_upload_url?: string;
   }>(
     `/api/workspaces/${input.session.workspaceId}/artifacts/presign`,
     {
@@ -917,13 +918,12 @@ async function stopAndUploadMediaRecorderFallback(input: {
     },
     `operator-mediarecorder-presign-${input.session.captureSessionId}`,
   );
-  const upload = await fetch(presign.upload_url, {
-    method: "PUT",
-    headers: { "content-type": mimeType },
-    body: blob,
+  await uploadArtifactBlob({
+    blob,
+    contentType: mimeType,
+    uploadUrl: presign.upload_url,
+    fallbackUploadUrl: presign.proxy_upload_url,
   });
-  if (!upload.ok)
-    throw new Error(`Recording upload failed (${upload.status}).`);
   return postJson(
     `/api/processes/${input.session.processId}/operator-captures/${input.session.captureSessionId}/recording`,
     {
@@ -1079,6 +1079,7 @@ function startScreenFrameSampler(input: {
       const presign = await postJson<{
         artifact: { id: string };
         upload_url: string;
+        proxy_upload_url?: string;
       }>(
         `/api/workspaces/${input.session.workspaceId}/artifacts/presign`,
         {
@@ -1089,13 +1090,12 @@ function startScreenFrameSampler(input: {
         },
         `screen-frame-presign-${input.session.captureSessionId}-${currentFrame}`,
       );
-      const upload = await fetch(presign.upload_url, {
-        method: "PUT",
-        headers: { "content-type": "image/jpeg" },
-        body: blob,
+      await uploadArtifactBlob({
+        blob,
+        contentType: "image/jpeg",
+        uploadUrl: presign.upload_url,
+        fallbackUploadUrl: presign.proxy_upload_url,
       });
-      if (!upload.ok)
-        throw new Error(`Frame upload failed (${upload.status}).`);
       const savedFrame = await postJson<{
         warning?: { message?: string };
       }>(
@@ -1145,6 +1145,56 @@ function startScreenFrameSampler(input: {
     video.srcObject = null;
     video.remove();
   };
+}
+
+async function uploadArtifactBlob(input: {
+  blob: Blob;
+  contentType: string;
+  uploadUrl: string;
+  fallbackUploadUrl?: string;
+}) {
+  try {
+    await putArtifactBlob(input.uploadUrl, input.blob, input.contentType);
+  } catch (error) {
+    if (!input.fallbackUploadUrl) throw error;
+    await putArtifactBlob(input.fallbackUploadUrl, input.blob, input.contentType);
+  }
+}
+
+async function putArtifactBlob(url: string, blob: Blob, contentType: string) {
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "PUT",
+      headers: { "content-type": contentType },
+      body: blob,
+    });
+  } catch (error) {
+    throw new Error(uploadNetworkErrorMessage(error));
+  }
+  if (!response.ok) {
+    const message = await uploadErrorMessage(response);
+    throw new Error(message ?? `Storage upload failed (${response.status}).`);
+  }
+}
+
+function uploadNetworkErrorMessage(error: unknown) {
+  if (error instanceof Error && error.message && error.message !== "Load failed") {
+    return error.message;
+  }
+  return "Storage upload failed before the server accepted the file.";
+}
+
+async function uploadErrorMessage(response: Response) {
+  try {
+    const payload = await response.json();
+    if (typeof payload?.error?.message === "string") {
+      return payload.error.message;
+    }
+  } catch {
+    // Direct storage URLs do not return Otto API JSON.
+  }
+  return null;
 }
 
 function hashVideoFrame(video: HTMLVideoElement, canvas: HTMLCanvasElement) {

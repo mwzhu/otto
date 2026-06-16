@@ -2,6 +2,8 @@
 
 https://otto-pi-sandy.vercel.app/
 
+https://www.loom.com/share/8a03258b6e6b41048ee12055b4724ca2
+
 Otto is an AI operations consultant. It discovers how a business actually runs, maps each
 workflow at fine granularity, and surfaces the highest-ROI automation opportunities. In other
 words, it does the discovery-and-prioritization half of a forward-deployed engineer's job, run

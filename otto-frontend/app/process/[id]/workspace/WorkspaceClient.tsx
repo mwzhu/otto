@@ -6,7 +6,6 @@ import dynamic from "next/dynamic";
 import { TabBar } from "@/components/workspace/TabBar";
 import { SummaryTab } from "@/components/workspace/tabs/SummaryTab";
 import { NodeEvidenceDrawer, StepsTab } from "@/components/workspace/tabs/StepsTab";
-import { InsightsTab } from "@/components/workspace/tabs/InsightsTab";
 import { RiskTab } from "@/components/workspace/tabs/RiskTab";
 import { RefineProcessChat } from "@/components/workspace/RefineProcessChat";
 import { Button } from "@/components/ui/Button";
@@ -153,13 +152,6 @@ export default function WorkspaceClient({
           {active === "steps" && (
             <StepsTab workspaceId={workspaceId} processId={processId} graph={graph} />
           )}
-          {active === "insights" && (
-            <InsightsTab
-              processId={processId}
-              graph={graph}
-              followUps={followUps}
-            />
-          )}
           {active === "risk" && (
             <RiskTab processId={processId} followUps={followUps} />
           )}
@@ -181,7 +173,7 @@ export default function WorkspaceClient({
 }
 
 function isWorkspaceTab(value: string | null): value is WorkspaceTab {
-  return value === "summary" || value === "steps" || value === "insights" || value === "risk";
+  return value === "summary" || value === "steps" || value === "risk";
 }
 
 async function approveDraft({

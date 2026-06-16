@@ -52,7 +52,6 @@ export default async function WorkspacePage({
   if (graph) {
     const counts: Partial<Record<WorkspaceTab, number>> = {
       steps: graph.nodes.filter((node) => node.type === "task").length,
-      insights: graph.summary ? 1 : graph.nodes.length > 0 ? 6 : 0,
       risk:
         graph.nodes.filter((node) => node.type === "exception").length +
         followUps.filter(isRiskFollowUp).length,

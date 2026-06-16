@@ -788,8 +788,8 @@ describe("Phase 2 operator capture contract", () => {
     );
     const stepsTab = read("components/workspace/tabs/StepsTab.tsx");
     const summaryTab = read("components/workspace/tabs/SummaryTab.tsx");
-    const insightsTab = read("components/workspace/tabs/InsightsTab.tsx");
     const riskTab = read("components/workspace/tabs/RiskTab.tsx");
+    const tabBar = read("components/workspace/TabBar.tsx");
     const followUpPresentation = read(
       "lib/processes/follow-up-presentation.ts",
     );
@@ -844,17 +844,14 @@ describe("Phase 2 operator capture contract", () => {
     expect(stepsTab).toContain("Frame expired by retention policy");
     expect(stepsTab).toContain("evidence source");
     expect(stepsTab).toContain('params.set("version_id", versionId)');
-    expect(summaryTab).toContain("version {graph?.version_number");
+    expect(summaryTab).toContain("Concise process summary");
     expect(summaryTab).toContain("{graph.summary}");
-    expect(summaryTab).toContain("Draft warnings");
-    expect(summaryTab).toContain("Open follow-ups");
-    expect(summaryTab).toContain("FollowUpSummaryItem");
-    expect(summaryTab).toContain("followUpDescriptionForDisplay");
-    expect(insightsTab).toContain("Generated narrative");
-    expect(insightsTab).toContain("buildInsights");
-    expect(insightsTab).toContain("Systems touched");
-    expect(insightsTab).toContain("Workarounds");
-    expect(insightsTab).toContain("Handoffs");
+    expect(summaryTab).toContain("buildInsights");
+    expect(summaryTab).toContain("Systems touched");
+    expect(summaryTab).toContain("Workarounds");
+    expect(summaryTab).toContain("Handoffs");
+    expect(tabBar).not.toContain("Insights");
+    expect(workspaceClient).not.toContain("InsightsTab");
     expect(riskTab).toContain("Risk follow-ups");
     expect(riskTab).toContain("redaction_failure");
     expect(riskTab).toContain("contradiction|gap|low_confidence|redaction");

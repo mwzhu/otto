@@ -21,7 +21,6 @@ export function TabBar({
   const tabs: TabDef[] = [
     { id: "summary", label: "Summary" },
     { id: "steps", label: "Steps", count: counts.steps },
-    { id: "insights", label: "Insights", count: counts.insights },
     { id: "risk", label: "Risk & Vulnerabilities", count: counts.risk },
   ];
 
@@ -70,5 +69,5 @@ export function TabBar({
 }
 
 function isWorkspaceTab(value: string | null): value is WorkspaceTab {
-  return value === "summary" || value === "steps" || value === "insights" || value === "risk";
+  return value === "summary" || value === "steps" || value === "risk";
 }

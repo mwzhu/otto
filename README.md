@@ -2,7 +2,21 @@
 
 https://otto-pi-sandy.vercel.app/
 
-<div style="position: relative; padding-bottom: 59.36123348017621%; height: 0;"><iframe src="https://www.loom.com/embed/8a03258b6e6b41048ee12055b4724ca2" frameborder="0" webkitallowfullscreen mozallowfullscreen allowfullscreen style="position: absolute; top: 0; left: 0; width: 100%; height: 100%;"></iframe></div>
+---
+
+## Demo
+<div>
+    <a href="https://www.loom.com/share/8a03258b6e6b41048ee12055b4724ca2">
+      <p>Otto Demo - Watch Video</p>
+    </a>
+    <a href="https://www.loom.com/share/8a03258b6e6b41048ee12055b4724ca2">
+      <img style="max-width:300px;" src="https://cdn.loom.com/sessions/thumbnails/8a03258b6e6b41048ee12055b4724ca2-2e90c066dafc182a-full-play.gif#t=0.1">
+    </a>
+  </div>
+
+---
+
+# Description
 
 Otto is an AI operations consultant. It discovers how a business actually runs, maps each
 workflow at fine granularity, and surfaces the highest-ROI automation opportunities. In other

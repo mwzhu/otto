@@ -51,22 +51,12 @@ async def entrypoint(ctx: JobContext) -> None:
         )
 
         from livekit.plugins import silero
-        from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
         session = AgentSession(
             stt=stt_provider(config),
             tts=tts_provider(config),
             vad=silero.VAD.load(),
-            turn_handling=TurnHandlingOptions(
-                turn_detection=MultilingualModel(),
-                endpointing={
-                    "mode": endpointing_mode(config.endpointing_mode),
-                    "min_delay": config.endpointing_min_delay,
-                    "max_delay": config.endpointing_max_delay,
-                    "alpha": config.endpointing_alpha,
-                },
-                interruption={"enabled": True},
-            ),
+            turn_handling=operator_turn_handling(config),
             user_away_timeout=None,
         )
         await session.start(room=ctx.room, agent=agent)
@@ -181,6 +171,25 @@ def cartesia_audio_metadata(config: OperatorAgentConfig) -> dict[str, str | bool
         "vendor_privacy_ack": config.vendor_privacy_ack,
         "privacy_no_retention_ack": config.cartesia_no_retention_ack,
     }
+
+
+def operator_turn_handling(config: OperatorAgentConfig) -> TurnHandlingOptions:
+    turn_handling: TurnHandlingOptions = {
+        "turn_detection": "vad",
+        "endpointing": {
+            "mode": endpointing_mode(config.endpointing_mode),
+            "min_delay": config.endpointing_min_delay,
+            "max_delay": config.endpointing_max_delay,
+            "alpha": config.endpointing_alpha,
+        },
+        "interruption": {"enabled": True, "mode": "vad"},
+    }
+    if config.turn_detector == "multilingual":
+        from livekit.plugins.turn_detector.multilingual import MultilingualModel
+
+        turn_handling["turn_detection"] = MultilingualModel()
+        turn_handling["interruption"] = {"enabled": True}
+    return turn_handling
 
 
 def endpointing_mode(value: str) -> str:

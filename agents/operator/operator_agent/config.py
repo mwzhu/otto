@@ -23,6 +23,7 @@ class OperatorAgentConfig:
     use_livekit_inference: bool
     livekit_agent_name: str
     voice_runtime: str = "planned_cascade"
+    turn_detector: str = "vad"
     endpointing_mode: str = "dynamic"
     endpointing_min_delay: float = 2.2
     endpointing_max_delay: float = 8.0
@@ -85,6 +86,7 @@ class OperatorAgentConfig:
                 os.getenv("LIVEKIT_AGENT_NAME", "otto-operator"),
             ),
             voice_runtime=voice_runtime(os.getenv("OTTO_OPERATOR_VOICE_RUNTIME")),
+            turn_detector=turn_detector(os.getenv("OTTO_OPERATOR_TURN_DETECTOR")),
             endpointing_mode=os.getenv(
                 "OTTO_OPERATOR_ENDPOINTING_MODE",
                 os.getenv("OTTO_DIRECTOR_ENDPOINTING_MODE", "dynamic"),
@@ -130,6 +132,17 @@ def voice_runtime(value: str | None) -> str:
     if normalized not in {"planned_cascade", "steered_cascade"}:
         raise RuntimeError(
             "OTTO_OPERATOR_VOICE_RUNTIME must be planned_cascade or steered_cascade."
+        )
+    return normalized
+
+
+def turn_detector(value: str | None) -> str:
+    normalized = (value or "vad").strip().lower()
+    if normalized in {"off", "none", "disabled"}:
+        return "vad"
+    if normalized not in {"vad", "multilingual"}:
+        raise RuntimeError(
+            "OTTO_OPERATOR_TURN_DETECTOR must be vad or multilingual."
         )
     return normalized
 

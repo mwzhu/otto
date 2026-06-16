@@ -16,7 +16,7 @@ from otto_realtime_core import (
 from operator_agent.agent import OperatorWorkflowAgent
 from operator_agent.config import OperatorAgentConfig
 from operator_agent.otto_api import IngestedTurn, RespondedTurn
-from operator_agent.worker import operator_worker_http_port
+from operator_agent.worker import operator_turn_handling, operator_worker_http_port
 
 
 CAPTURE_SESSION_ID = "14125388-f796-4087-ae34-f18ab845e270"
@@ -49,6 +49,39 @@ class OperatorWorkerContractTests(unittest.TestCase):
 
         self.assertEqual(config.endpointing_min_delay, 2.2)
         self.assertEqual(config.endpointing_max_delay, 8.0)
+        self.assertEqual(config.turn_detector, "vad")
+
+    def test_operator_turn_handling_defaults_to_vad_without_inference_model(self) -> None:
+        config = OperatorAgentConfig(
+            otto_api_base_url="http://localhost:3000",
+            service_token="service-token",
+            language="en",
+            deepgram_model="nova-3",
+            cartesia_model="sonic-2",
+            cartesia_voice_id="voice-id",
+            use_livekit_inference=True,
+            livekit_agent_name="otto-operator",
+        )
+
+        turn_handling = operator_turn_handling(config)
+
+        self.assertEqual(turn_handling["turn_detection"], "vad")
+        self.assertEqual(turn_handling["interruption"]["mode"], "vad")
+
+    def test_operator_turn_detector_can_opt_into_multilingual_model(self) -> None:
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "OTTO_INTERNAL_API_BASE_URL": "http://localhost:3000",
+                "LIVEKIT_AGENT_SERVICE_TOKEN": "service-token",
+                "OTTO_USE_LIVEKIT_INFERENCE": "true",
+                "OTTO_OPERATOR_TURN_DETECTOR": "multilingual",
+            },
+            clear=True,
+        ):
+            config = OperatorAgentConfig.from_env()
+
+        self.assertEqual(config.turn_detector, "multilingual")
 
     def test_shared_realtime_core_covers_operator_worker_primitives(self) -> None:
         self.assertEqual(text_content(SimpleNamespace(content=["Copy", "invoice"])), "Copy invoice")

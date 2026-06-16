@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/Button";
+import { useElapsedSeconds } from "@/components/capture/useElapsedSeconds";
 
 export function CaptureControls({
   onMuteChange,
@@ -22,15 +23,9 @@ export function CaptureControls({
   const router = useRouter();
   const [muted, setMuted] = useState(false);
   const [paused, setPaused] = useState(false);
-  const [elapsed, setElapsed] = useState(0);
   const [completing, setCompleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (paused) return;
-    const t = setInterval(() => setElapsed((e) => e + 1), 1000);
-    return () => clearInterval(t);
-  }, [paused]);
+  const elapsed = useElapsedSeconds(paused);
 
   return (
     <div className="flex items-center justify-center gap-3">

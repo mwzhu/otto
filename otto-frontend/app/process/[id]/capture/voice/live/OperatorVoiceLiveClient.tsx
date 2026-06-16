@@ -9,6 +9,7 @@ import {
   appendCaptureMessage,
   captureMessageFromDataEvent,
 } from "@/components/capture/operatorConversationEvents";
+import { useElapsedSeconds } from "@/components/capture/useElapsedSeconds";
 import {
   OPERATOR_SESSION_KEY,
 } from "@/app/process/[id]/capture/voice/OperatorVoicePreStartClient";
@@ -65,7 +66,7 @@ export function OperatorVoiceLiveClient({
   const router = useRouter();
   const [session, setSession] = useState<OperatorSession | null>(null);
   const [paused, setPaused] = useState(false);
-  const [elapsed, setElapsed] = useState(0);
+  const elapsed = useElapsedSeconds(paused);
   const [completing, setCompleting] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [turnWaitMessage, setTurnWaitMessage] = useState<string | null>(null);
@@ -93,12 +94,6 @@ export function OperatorVoiceLiveClient({
       window.clearTimeout(timer);
     };
   }, [processId]);
-
-  useEffect(() => {
-    if (paused) return;
-    const timer = setInterval(() => setElapsed((value) => value + 1), 1000);
-    return () => clearInterval(timer);
-  }, [paused]);
 
   useEffect(() => {
     if (session?.liveKit?.mode !== "livekit") return;

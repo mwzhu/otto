@@ -41,6 +41,12 @@ type LiveKitTrack = MediaStreamTrack & {
   detach?: () => HTMLMediaElement[];
 };
 
+type LocalTrackPublicationLike = {
+  trackSid?: string;
+  sid?: string;
+  track?: { sid?: string };
+};
+
 type LiveKitRoomLike = {
   connect: (url: string, token: string) => Promise<void>;
   disconnect: () => void;
@@ -50,7 +56,7 @@ type LiveKitRoomLike = {
     publishTrack?: (
       track: MediaStreamTrack | LiveKitTrack,
       options?: { name?: string; source?: string },
-    ) => Promise<unknown>;
+    ) => Promise<LocalTrackPublicationLike>;
     publishData?: (
       payload: Uint8Array,
       options?: { reliable?: boolean; topic?: string },
@@ -105,6 +111,7 @@ export default function ScreenshareClient({
   const samplerCleanupRef = useRef<(() => void) | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaRecorderChunksRef = useRef<Blob[]>([]);
+  const durableRecordingStartedRef = useRef(false);
 
   useEffect(() => {
     if (!session) return;
@@ -150,6 +157,7 @@ export default function ScreenshareClient({
       samplerCleanupRef,
       mediaRecorderRef,
       mediaRecorderChunksRef,
+      durableRecordingStartedRef,
       onScreenStreamChange: setScreenStream,
       onEvent: (message) => {
         if (!cancelled) {
@@ -190,6 +198,7 @@ export default function ScreenshareClient({
     }
     setStarting(true);
     setError(null);
+    durableRecordingStartedRef.current = false;
     let preauthorizedScreenStream: MediaStream | null = null;
     let preauthorizedMicStream: MediaStream | null = null;
     try {
@@ -367,11 +376,15 @@ export default function ScreenshareClient({
           onComplete={async () => {
             setError(null);
             stopScreenFrameSampler(samplerCleanupRef);
-            await stopAndUploadMediaRecorderFallback({
-              mediaRecorderRef,
-              mediaRecorderChunksRef,
-              session,
-            });
+            if (durableRecordingStartedRef.current) {
+              stopMediaRecorderWithoutUpload(mediaRecorderRef);
+            } else {
+              await stopAndUploadMediaRecorderFallback({
+                mediaRecorderRef,
+                mediaRecorderChunksRef,
+                session,
+              });
+            }
             await completeOperatorCapture({
               workspaceId,
               processId,
@@ -553,6 +566,33 @@ async function completeOperatorCapture({
   );
 }
 
+async function startOperatorEgress(input: {
+  session: ScreenshareSession;
+  screenTrackSid: string;
+  durableRecordingStartedRef: MutableRefObject<boolean>;
+}) {
+  const liveKitRoom = input.session.liveKit?.room;
+  if (!liveKitRoom) return;
+  const result = await postJson<{
+    egress?: { mode?: "disabled" | "started"; egressId?: string | null };
+  }>(
+    `/api/processes/${input.session.processId}/operator-captures/${input.session.captureSessionId}/egress`,
+    {
+      workspace_id: input.session.workspaceId,
+      room: liveKitRoom,
+      screen_track_sid: input.screenTrackSid,
+    },
+    `operator-egress-${input.session.captureSessionId}-${input.screenTrackSid}`,
+  );
+  if (result.egress?.mode === "started" && result.egress.egressId) {
+    input.durableRecordingStartedRef.current = true;
+  }
+}
+
+function localTrackPublicationSid(publication: LocalTrackPublicationLike | undefined) {
+  return publication?.trackSid ?? publication?.sid ?? publication?.track?.sid ?? null;
+}
+
 function screenFrameFailureMessage(error: unknown) {
   if (!(error instanceof Error)) return "Could not save a screenshare keyframe.";
   if (
@@ -574,6 +614,7 @@ async function connectScreenshareRoom(input: {
   samplerCleanupRef: MutableRefObject<(() => void) | null>;
   mediaRecorderRef: MutableRefObject<MediaRecorder | null>;
   mediaRecorderChunksRef: MutableRefObject<Blob[]>;
+  durableRecordingStartedRef: MutableRefObject<boolean>;
   onScreenStreamChange: (stream: MediaStream | null) => void;
   onEvent: (message: CaptureConversationMessage) => void;
   onError: (message: string) => void;
@@ -686,10 +727,20 @@ async function connectScreenshareRoom(input: {
     const screenShareSource =
       livekit.Track?.Source?.ScreenShare ?? "screen_share";
     for (const track of screenStream.getVideoTracks()) {
-      await room.localParticipant.publishTrack?.(track, {
+      const publication = await room.localParticipant.publishTrack?.(track, {
         name: `operator-screen-${input.session.captureSessionId}`,
         source: screenShareSource,
       });
+      const screenTrackSid = localTrackPublicationSid(publication);
+      if (screenTrackSid) {
+        startOperatorEgress({
+          session: input.session,
+          screenTrackSid,
+          durableRecordingStartedRef: input.durableRecordingStartedRef,
+        }).catch((error) => {
+          console.warn("Failed to start operator egress", error);
+        });
+      }
     }
     input.onHealthChange({ screenTrackPublishing: true });
     input.samplerCleanupRef.current = startScreenFrameSampler({

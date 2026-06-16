@@ -108,6 +108,28 @@ describe("Phase 2 operator capture contract", () => {
     expect(processCaptureUpload).toContain("uploadArtifactBytes");
   });
 
+  test("operator screenshare starts durable server-side egress before browser upload fallback", () => {
+    const screenshare = read(
+      "app/process/[id]/capture/screenshare/ScreenshareClient.tsx",
+    );
+    const egressRoute = read(
+      "app/api/processes/[processId]/operator-captures/[captureSessionId]/egress/route.ts",
+    );
+    const livekitAdapter = read("lib/adapters/livekit.ts");
+
+    expect(screenshare).toContain("startOperatorEgress");
+    expect(screenshare).toContain("durableRecordingStartedRef");
+    expect(screenshare).toContain(
+      "/operator-captures/${input.session.captureSessionId}/egress",
+    );
+    expect(screenshare).toContain("stopMediaRecorderWithoutUpload");
+    expect(egressRoute).toContain("startOperatorTrackEgress");
+    expect(egressRoute).toContain("capture.operator.egress_start_requested");
+    expect(egressRoute).toContain("browser_track_publication");
+    expect(livekitAdapter).toContain("operatorEgressWebhooks");
+    expect(livekitAdapter).toContain("/api/internal/livekit/webhook");
+  });
+
   test("operator graph migration keeps graph rows canonical and RLS-protected", () => {
     const migration = read("migrations/0005_operator_graph.sql");
     const claimSubjects = JSON.parse(

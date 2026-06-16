@@ -9,6 +9,7 @@ import {
   RoomServiceClient,
   S3Upload,
   TrackSource,
+  WebhookConfig,
   WebhookReceiver,
 } from "livekit-server-sdk";
 import { getServerEnv } from "@/lib/env";
@@ -78,7 +79,11 @@ type EgressClientLike = {
   startTrackCompositeEgress: (
     roomName: string,
     output: unknown,
-    opts: { audioTrackId?: string; videoTrackId?: string },
+    opts: {
+      audioTrackId?: string;
+      videoTrackId?: string;
+      webhooks?: WebhookConfig[];
+    },
   ) => Promise<{ egressId?: string; status?: unknown; fileResults?: unknown[] }>;
   stopEgress: (egressId: string) => Promise<unknown>;
   listEgress: (options?: { roomName?: string; egressId?: string; active?: boolean }) => Promise<unknown[]>;
@@ -471,6 +476,7 @@ export async function startOperatorTrackEgress(input: {
   const egress = await client.startTrackCompositeEgress(input.roomName, output, {
     videoTrackId: input.screenTrackSid,
     audioTrackId: input.audioTrackSid ?? undefined,
+    webhooks: operatorEgressWebhooks(env),
   });
   return {
     mode: "started",
@@ -479,6 +485,19 @@ export async function startOperatorTrackEgress(input: {
     storageKey,
     provider: "livekit-track-composite",
   };
+}
+
+function operatorEgressWebhooks(env: LiveKitEnv) {
+  const baseUrl = configuredEnvValue(env.OTTO_INTERNAL_API_BASE_URL)
+    ? env.OTTO_INTERNAL_API_BASE_URL!.replace(/\/$/, "")
+    : null;
+  if (!baseUrl || !configuredEnvValue(env.LIVEKIT_API_SECRET)) return undefined;
+  return [
+    new WebhookConfig({
+      url: `${baseUrl}/api/internal/livekit/webhook`,
+      signingKey: env.LIVEKIT_API_SECRET!,
+    }),
+  ];
 }
 
 export async function stopOperatorTrackEgress(

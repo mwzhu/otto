@@ -1,13 +1,16 @@
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { Client } from "pg";
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { directorSlotDefinitions } from "@/lib/interview/director/slot-schema";
 
 const root = process.cwd();
 const image = "pgvector/pgvector:pg16";
-const container = `otto-phase1-test-${process.pid}`;
+const container =
+  process.env.OTTO_PHASE1_TEST_CONTAINER ?? `otto-phase1-test-${process.pid}`;
+const keepPhase1TestDb = process.env.OTTO_KEEP_PHASE1_TEST_DB === "true";
 const orgId = "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa";
 const userId = "bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb";
 const workspaceId = "cccccccc-cccc-5ccc-8ccc-cccccccccccc";
@@ -78,6 +81,19 @@ const worksOnCaptureId = "b5b5b5b5-b5b5-5b5b-8b5b-b5b5b5b5b5b5";
 const worksOnEvidenceId = "b6b6b6b6-b6b6-5b6b-8b6b-b6b6b6b6b6b6";
 const gatedTurnCaptureId = "b7b7b7b7-b7b7-5b7b-8b7b-b7b7b7b7b7b7";
 const gatedTurnEvidenceId = "b8b8b8b8-b8b8-5b8b-8b8b-b8b8b8b8b8b8";
+const splitScopeGateCaptureId = "f1f1f1f1-f1f1-5f1f-8f1f-f1f1f1f1f1f1";
+const splitScopeGateEvidenceId = "f2f2f2f2-f2f2-5f2f-8f2f-f2f2f2f2f2f2";
+const directorReplay715CaptureId = "f3f3f3f3-f3f3-5f3f-8f3f-f3f3f3f3f3f3";
+const directorReplay715ScopeEvidenceId = "f4f4f4f4-f4f4-5f4f-8f4f-f4f4f4f4f4f4";
+const directorReplay715ListEvidenceId = "f5f5f5f5-f5f5-5f5f-8f5f-f5f5f5f5f5f5";
+const directorReplay715SwitchEvidenceId = "f6f6f6f6-f6f6-5f6f-8f6f-f6f6f6f6f6f6";
+const directorReplay715NamedEvidenceId = "f7f7f7f7-f7f7-5f7f-8f7f-f7f7f7f7f7f7";
+const directorReplay715BareEvidenceId = "f8f8f8f8-f8f8-5f8f-8f8f-f8f8f8f8f8f8";
+const directorReplay715ScopeTranscriptId = "f9f9f9f9-f9f9-5f9f-8f9f-f9f9f9f9f9f9";
+const directorReplay715ListTranscriptId = "fafafafa-fafa-5afa-8afa-fafafafafafa";
+const directorReplay715SwitchTranscriptId = "fbfbfbfb-fbfb-5bfb-8bfb-fbfbfbfbfbfb";
+const directorReplay715NamedTranscriptId = "fcfcfcfc-fcfc-5cfc-8cfc-fcfcfcfcfcfc";
+const directorReplay715BareTranscriptId = "fdfdfdfd-fdfd-5dfd-8dfd-fdfdfdfdfdfd";
 const roundTwoCaptureId = "c2c2c2c2-c2c2-5c2c-8c2c-c2c2c2c2c2c2";
 const roundTwoEvidenceId = "c3c3c3c3-c3c3-5c3c-8c3c-c3c3c3c3c3c3";
 const coverageCaptureId = "c4c4c4c4-c4c4-5c4c-8c4c-c4c4c4c4c4c4";
@@ -160,9 +176,8 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
   beforeAll(async () => {
     ensureDocker();
     cleanupContainer();
-    execFileSync("docker", [
+    const dockerRunArgs = [
       "run",
-      "--rm",
       "-d",
       "--name",
       container,
@@ -171,52 +186,59 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
       "-e",
       "POSTGRES_DB=otto_test",
       "-p",
-      "127.0.0.1::5432",
-      image,
-    ]);
+      process.env.OTTO_PHASE1_TEST_PORT
+        ? `127.0.0.1:${process.env.OTTO_PHASE1_TEST_PORT}:5432`
+        : "127.0.0.1::5432",
+    ];
+    if (!keepPhase1TestDb) {
+      dockerRunArgs.splice(1, 0, "--rm");
+    } else {
+      dockerRunArgs.push("--restart", "unless-stopped");
+      if (process.env.OTTO_PHASE1_TEST_VOLUME) {
+        dockerRunArgs.push(
+          "-v",
+          `${process.env.OTTO_PHASE1_TEST_VOLUME}:/var/lib/postgresql/data`,
+        );
+      }
+    }
+    dockerRunArgs.push(image);
+    execFileSync("docker", dockerRunArgs);
     waitForPostgres();
 
-    applyMigration("0000_phase0_foundations.sql");
-    applyMigration("0001_phase1_director_intake.sql");
-    applyMigration("0002_workspace_data_tier_real.sql");
-    applyMigration("0003_director_voice_m1.sql");
-    applyMigration("0004_director_process_slots_and_degraded_reasons.sql");
-    applyMigration("0005_operator_graph.sql");
-    applyMigration("0006_capture_evidence.sql");
-    applyMigration("0007_redactions.sql");
-    applyMigration("0008_director_voice_decoupling.sql");
-    applyMigration("0009_provisional_step_sources.sql");
-    applyMigration("0010_operator_visual_comprehension.sql");
-    applyMigration("0011_workflow_semantic_models.sql");
-    applyMigration("0016_works_on_multivalue_claims.sql");
-    execFileSync(
-      "docker",
-      [
-        "exec",
-        "-i",
-        container,
-        "psql",
-        "-v",
-        "ON_ERROR_STOP=1",
-        "-U",
-        "postgres",
-        "-d",
-        "otto_test",
-      ],
-      {
-        input: `
-          CREATE ROLE otto_app LOGIN PASSWORD 'otto_app';
-          GRANT USAGE ON SCHEMA public TO otto_app;
-          GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO otto_app;
-          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO otto_app;
-        `,
-      },
-    );
+    const shouldApplyMigrations =
+      !keepPhase1TestDb ||
+      process.env.OTTO_PHASE1_TEST_REAPPLY_MIGRATIONS === "true" ||
+      !phase1SchemaInitialized();
+    if (shouldApplyMigrations) {
+      applyMigration("0000_phase0_foundations.sql");
+      applyMigration("0001_phase1_director_intake.sql");
+      applyMigration("0002_workspace_data_tier_real.sql");
+      applyMigration("0003_director_voice_m1.sql");
+      applyMigration("0004_director_process_slots_and_degraded_reasons.sql");
+      applyMigration("0005_operator_graph.sql");
+      applyMigration("0006_capture_evidence.sql");
+      applyMigration("0007_redactions.sql");
+      applyMigration("0008_director_voice_decoupling.sql");
+      applyMigration("0009_provisional_step_sources.sql");
+      applyMigration("0010_operator_visual_comprehension.sql");
+      applyMigration("0011_workflow_semantic_models.sql");
+      applyMigration("0016_works_on_multivalue_claims.sql");
+    } else {
+      console.log(
+        `[phase1-db] reusing initialized schema in ${container}; set OTTO_PHASE1_TEST_REAPPLY_MIGRATIONS=true to force migrations`,
+      );
+    }
+    ensureAppRole();
 
     const port = dockerPort();
     connectionString = `postgres://otto_app:otto_app@127.0.0.1:${port}/otto_test`;
     process.env.DATABASE_URL = connectionString;
     process.env.DATABASE_SERVICE_URL = `postgres://postgres:postgres@127.0.0.1:${port}/otto_test`;
+    if (keepPhase1TestDb) {
+      console.log(
+        `[phase1-db] preserving test database ${container}; app URL: ${connectionString}; owner URL: ${process.env.DATABASE_SERVICE_URL}`,
+      );
+    }
     process.env.OTTO_DEV_AUTH_BYPASS = "true";
     appClient = new Client({ connectionString });
     await appClient.connect();
@@ -226,6 +248,12 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
     await appClient?.end().catch(() => undefined);
     const { closeDb } = await import("@/lib/db/client");
     await closeDb();
+    if (keepPhase1TestDb) {
+      console.log(
+        `[phase1-db] kept ${container} running for TablePlus inspection. Remove it with: docker rm -f ${container}`,
+      );
+      return;
+    }
     cleanupContainer();
   });
 
@@ -868,7 +896,6 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
       `,
       [targetedClaimCaptureId],
     );
-
     expect(rows.rows).toEqual([
       {
         proposed_name: "Quote Approvals",
@@ -1350,6 +1377,1343 @@ describe.skipIf(!hasDocker)("Phase 1 database integration", () => {
       tom_links: 0,
     });
   });
+
+  test("extraction-window prompt intent beats advanced prior_intent for candidate minting", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [splitScopeGateCaptureId, orgId, workspaceId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO evidence (id, org_id, workspace_id, source_type, evidence_label, quote)
+        VALUES ($1, $2, $3, 'transcript_segment', 'stated_director', 'I own everything from customer order through picked, shipped, and invoiced.')
+        ON CONFLICT (id) DO NOTHING
+      `,
+      [splitScopeGateEvidenceId, orgId, workspaceId],
+    );
+    await appClient.query(
+      `INSERT INTO interview_state (org_id, workspace_id, capture_session_id, current_phase, prior_intent)
+       VALUES ($1, $2, $3, 'inventory', 'discover_processes')
+       ON CONFLICT (capture_session_id)
+       DO UPDATE SET current_phase = 'inventory', prior_intent = 'discover_processes'`,
+      [orgId, workspaceId, splitScopeGateCaptureId],
+    );
+    await appClient.query(
+      `
+        INSERT INTO director_extraction_windows (
+          extraction_window_id, org_id, workspace_id, capture_session_id,
+          turn_index, transcript_segment_ids, opened_at, closed_at, closed_by,
+          status, metadata_json
+        )
+        VALUES (
+          'split-scope-window', $1, $2, $3, 0, '{}'::uuid[], now(), now(),
+          'assistant_spoke', 'pending',
+          '{"steering_context":{"last_spoken_intent":"orient_interview"}}'::jsonb
+        )
+        ON CONFLICT (extraction_window_id) DO UPDATE
+        SET metadata_json = excluded.metadata_json, status = 'pending'
+      `,
+      [orgId, workspaceId, splitScopeGateCaptureId],
+    );
+
+    const { dispatchDirectorTurnPlan } = await import(
+      "@/lib/interview/director/brain"
+    );
+    const chosenIntent = {
+      intent: "discover_processes",
+      target_slot: "process.inventory",
+      score: 1125,
+      reason: "Advanced state says inventory, but the director answered orient.",
+    };
+    await dispatchDirectorTurnPlan({
+      orgId,
+      workspaceId,
+      captureSessionId: splitScopeGateCaptureId,
+      userId,
+      latestUtterance:
+        "I own everything from customer order through picked, shipped, and invoiced.",
+      transcriptSegmentIds: [],
+      evidenceIds: [splitScopeGateEvidenceId],
+      turnIndex: 0,
+      extractionWindowId: "split-scope-window",
+      plannedAgentUtterance: "What are the main processes your team owns?",
+      decisionStageName: "director.extraction",
+      advanceConversationState: false,
+      plan: {
+        utterance_type: "substantive_answer",
+        slot_updates: [
+          {
+            slot_path: "process.inventory",
+            status: "partial",
+            confidence: 0.7,
+            evidence_ids: [splitScopeGateEvidenceId],
+            priority: 90,
+            value: { processes: ["Order Picking", "Shipping", "Invoicing"] },
+          },
+        ],
+        claims: [],
+        tool_calls: [
+          { name: "recordProcess", arguments: { name: "Order Picking" } },
+          { name: "recordProcess", arguments: { name: "Shipping" } },
+          { name: "recordProcess", arguments: { name: "Invoicing" } },
+        ],
+        contradiction_signals: [],
+        current_phase: "inventory",
+        proposed_next_phase: "expand",
+        phase_transition_ready: true,
+        ranked_intents: [chosenIntent],
+        chosen_intent: chosenIntent,
+        planned_agent_utterance: "What are the main processes your team owns?",
+      },
+    });
+
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    const rows = await appClient.query(
+      `
+        SELECT
+          (SELECT count(*)::int FROM candidate_processes
+            WHERE capture_session_id = $1) AS candidates,
+          (SELECT count(*)::int FROM slot_states
+            WHERE capture_session_id = $1 AND slot_path = 'process.inventory') AS inventory_slots,
+          (SELECT last_new_slot_turn_index FROM interview_state
+            WHERE capture_session_id = $1) AS last_new_slot_turn_index
+      `,
+      [splitScopeGateCaptureId],
+    );
+    expect(rows.rows[0]).toEqual({
+      candidates: 0,
+      inventory_slots: 0,
+      last_new_slot_turn_index: null,
+    });
+  });
+
+  test("replays prod director session 71569919 failure path end-to-end", async () => {
+    await seedWeek2Graph(appClient);
+    await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+      orgId,
+    ]);
+    await appClient.query(
+      "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at) VALUES ($1, $2, $3, 'director_interview', now()) ON CONFLICT (id) DO NOTHING",
+      [directorReplay715CaptureId, orgId, workspaceId],
+    );
+
+    const {
+      buildDirectorSteeringPlan,
+      dispatchDirectorTurnPlan,
+      extractExplicitProcessEnumerationNames,
+      nonAuthoritativeDirectorSteeringPlan,
+      upsertDirectorExtractionWindow,
+    } = await import("@/lib/interview/director/brain");
+
+    const context = {
+      orgId,
+      workspaceId,
+      captureSessionId: directorReplay715CaptureId,
+      userId,
+    };
+    const prodTurns = [
+      {
+        turnIndex: 0,
+        text: "I oversee the I'm the VP of operations. I own everything from when a customer order comes in through getting it picked. Shipped, invoiced, plus purchasing and or vendor payments.",
+      },
+      {
+        turnIndex: 1,
+        text: "Six big ones, order intake. Taking customer orders into the system. Purchasing and replenishment. Vendor invoice processing, inventory cycle counts, new customer onboarding and credit setup, and returns and credit memos.",
+      },
+      {
+        turnIndex: 2,
+        text: "So processing kicks off. When an in a vendor invoice comes in. And that comes in, uh, through Gmail.",
+      },
+      {
+        turnIndex: 3,
+        text: "The business outcome, it is purchasing is inventory availability and working capital. Reorder late, and we stock out and lose the sale. Reorder early, and we tie up cash.",
+      },
+      { turnIndex: 4, text: "My employee, his name is Tim." },
+      {
+        turnIndex: 5,
+        text: "So he first the invoice from Gmail, and then he puts in the order. On Odoo, and then we keep track of it on Google Sheets.",
+      },
+      {
+        turnIndex: 6,
+        text: "He runs through that order cycle about once a week. And he does about, uh, thirty and or about we get about two hundred invoices a month. So and it takes about twelve minutes each to through a match by hand.",
+      },
+      {
+        turnIndex: 7,
+        text: "So We keep track of the metrics. So, like, if we're missing orders or if our inventory is not optimal, then we'll measure it through you know, some we'll we'll look at volume of orders. And customer fulfillment rate.",
+      },
+      { turnIndex: 8, text: "Yeah. Tim handles all of it." },
+      { turnIndex: 9, text: "I'm not sure." },
+      { turnIndex: 10, text: "What do you know about my six processes right now?" },
+      { turnIndex: 11, text: "Let's switch to another process." },
+      { turnIndex: 12, text: "No. Switch right now." },
+      {
+        turnIndex: 13,
+        text: "Already told you. Let's switch to another process.",
+      },
+      { turnIndex: 14, text: "No. Switch it out." },
+      { turnIndex: 15, text: "What is order picking?" },
+      {
+        turnIndex: 16,
+        text: "Which process do you think? Needs the most information?",
+      },
+      {
+        turnIndex: 17,
+        text: "Alright. Let's actually talk about um, let's talk about returns and credit memos.",
+      },
+      { turnIndex: 18, text: "Returns." },
+      { turnIndex: 19, text: "Returns." },
+      { turnIndex: 20, text: "Returns." },
+    ] as const;
+    const prodTurn = (turnIndex: number) => {
+      const row = prodTurns.find((turn) => turn.turnIndex === turnIndex);
+      if (!row) throw new Error(`Missing replay turn ${turnIndex}`);
+      const suffix = String(turnIndex).padStart(12, "0");
+      return {
+        ...row,
+        transcriptId: `d7150000-0000-5000-8000-${suffix}`,
+        evidenceId: `d7150000-0000-5000-9000-${suffix}`,
+        extractionWindowId: `replay-715-window-${turnIndex}`,
+      };
+    };
+
+    async function insertDirectorTurn(
+      turnIndex: number,
+      transcriptId: string,
+      evidenceId: string,
+      text: string,
+    ) {
+      await appClient.query(
+        `
+          INSERT INTO transcript_segments (
+            id, org_id, workspace_id, capture_session_id, speaker,
+            speaker_role, turn_index, start_ms, end_ms, text, timing_source
+          )
+          VALUES ($1, $2, $3, $4, 'Director', 'director', $5, $6, $7, $8, 'test')
+          ON CONFLICT (id) DO NOTHING
+        `,
+        [
+          transcriptId,
+          orgId,
+          workspaceId,
+          directorReplay715CaptureId,
+          turnIndex,
+          turnIndex * 1000,
+          turnIndex * 1000 + 750,
+          text,
+        ],
+      );
+      await appClient.query(
+        `
+          INSERT INTO evidence (id, org_id, workspace_id, source_type, evidence_label, quote)
+          VALUES ($1, $2, $3, 'transcript_segment', 'stated_director', $4)
+          ON CONFLICT (id) DO NOTHING
+        `,
+        [evidenceId, orgId, workspaceId, text],
+      );
+    }
+
+    function intent(
+      intentName: string,
+      targetSlot: string,
+      targetProcess: string | undefined,
+      score: number,
+      reason: string,
+      styleHint?: string,
+    ) {
+      return {
+        intent: intentName,
+        target_slot: targetSlot,
+        ...(targetProcess ? { target_process: targetProcess } : {}),
+        score,
+        reason,
+        ...(styleHint ? { style_hint: styleHint } : {}),
+      };
+    }
+
+    async function dispatchManualRespond(input: {
+      turnIndex: number;
+      utterance: string;
+      transcriptId: string;
+      evidenceId: string;
+      extractionWindowId: string;
+      lastSpokenIntent: string;
+      chosenIntent: ReturnType<typeof intent>;
+      currentPhase: "orient" | "inventory" | "expand" | "enrich" | "closeout";
+      nextPhase: "orient" | "inventory" | "expand" | "enrich" | "closeout";
+      plannedUtterance: string;
+    }) {
+      await insertDirectorTurn(
+        input.turnIndex,
+        input.transcriptId,
+        input.evidenceId,
+        input.utterance,
+      );
+      await upsertDirectorExtractionWindow({
+        context,
+        extractionWindowId: input.extractionWindowId,
+        turnIndex: input.turnIndex,
+        transcriptSegmentIds: [input.transcriptId],
+        closedBy: "assistant_spoke",
+        status: "pending",
+        metadataJson: {
+          steering_context: {
+            last_spoken_intent: input.lastSpokenIntent,
+            last_spoken_objective: input.lastSpokenIntent,
+          },
+          enumerated_process_names: extractExplicitProcessEnumerationNames(
+            input.utterance,
+          ),
+        },
+      });
+      await dispatchDirectorTurnPlan({
+        ...context,
+        latestUtterance: input.utterance,
+        transcriptSegmentIds: [input.transcriptId],
+        evidenceIds: [input.evidenceId],
+        turnIndex: input.turnIndex,
+        plannedAgentUtterance: input.plannedUtterance,
+        deliveredAgentUtterance: input.plannedUtterance,
+        deliveryStatus: "completed",
+        spokenFraction: 1,
+        advanceConversationState: true,
+        plan: {
+          utterance_type: "substantive_answer",
+          slot_updates: [],
+          claims: [],
+          tool_calls: [],
+          contradiction_signals: [],
+          current_phase: input.currentPhase,
+          proposed_next_phase: input.nextPhase,
+          phase_transition_ready: input.currentPhase !== input.nextPhase,
+          ranked_intents: [input.chosenIntent],
+          chosen_intent: input.chosenIntent,
+          planned_agent_utterance: input.plannedUtterance,
+        },
+      });
+    }
+
+    async function dispatchReplayExtraction(input: {
+      turnIndex: number;
+      utterance: string;
+      transcriptId: string;
+      evidenceId: string;
+      extractionWindowId: string;
+      currentPhase: "orient" | "inventory" | "expand" | "enrich" | "closeout";
+      nextPhase: "orient" | "inventory" | "expand" | "enrich" | "closeout";
+      chosenIntent: ReturnType<typeof intent>;
+      slotUpdates: Array<Record<string, unknown>>;
+      toolCalls: Array<{ name: string; arguments: Record<string, unknown> }>;
+    }) {
+      await dispatchDirectorTurnPlan({
+        ...context,
+        latestUtterance: input.utterance,
+        transcriptSegmentIds: [input.transcriptId],
+        evidenceIds: [input.evidenceId],
+        turnIndex: input.turnIndex,
+        extractionWindowId: input.extractionWindowId,
+        plannedAgentUtterance: "spoken fast response",
+        deliveredAgentUtterance: "spoken fast response",
+        deliveryStatus: "completed",
+        spokenFraction: 1,
+        decisionStageName: "director.extraction",
+        advanceConversationState: false,
+        plan: {
+          utterance_type: "substantive_answer",
+          slot_updates: input.slotUpdates as never,
+          claims: [],
+          tool_calls: input.toolCalls,
+          contradiction_signals: [],
+          current_phase: input.currentPhase,
+          proposed_next_phase: input.nextPhase,
+          phase_transition_ready: input.currentPhase !== input.nextPhase,
+          ranked_intents: [input.chosenIntent],
+          chosen_intent: input.chosenIntent,
+          planned_agent_utterance: "spoken fast response",
+        },
+      });
+    }
+
+    async function dispatchSteeredRespond(input: {
+      turnIndex: number;
+      utterance: string;
+      transcriptId: string;
+      evidenceId: string;
+      extractionWindowId: string;
+      lastSpokenIntent: string;
+      userIntentSignal?: {
+        action: "continue_interview" | "switch_focus_named" | "switch_focus_next";
+        target_process?: string;
+        confidence: number;
+        reason: string;
+      };
+    }) {
+      await insertDirectorTurn(
+        input.turnIndex,
+        input.transcriptId,
+        input.evidenceId,
+        input.utterance,
+      );
+      const turnInput = {
+        ...context,
+        latestUtterance: input.utterance,
+        transcriptSegmentIds: [input.transcriptId],
+        evidenceIds: [input.evidenceId],
+        turnIndex: input.turnIndex,
+        pendingExtractionTurns: [],
+        pendingSlotPaths: [],
+        lastSpokenIntent: input.lastSpokenIntent,
+        userIntentSignal: input.userIntentSignal,
+      };
+      const steering = await buildDirectorSteeringPlan(turnInput);
+      await upsertDirectorExtractionWindow({
+        context,
+        extractionWindowId: input.extractionWindowId,
+        turnIndex: input.turnIndex,
+        transcriptSegmentIds: [input.transcriptId],
+        closedBy: "assistant_spoke",
+        status: "pending",
+        metadataJson: {
+          steering_context: steering.steering_context,
+          enumerated_process_names: extractExplicitProcessEnumerationNames(
+            input.utterance,
+          ),
+        },
+      });
+      const responsePlan = nonAuthoritativeDirectorSteeringPlan(steering.plan);
+      const plannedUtterance =
+        steering.plan.planned_agent_utterance ??
+        "What should we cover next?";
+      return dispatchDirectorTurnPlan({
+        ...context,
+        latestUtterance: input.utterance,
+        transcriptSegmentIds: [input.transcriptId],
+        evidenceIds: [input.evidenceId],
+        turnIndex: input.turnIndex,
+        plannedAgentUtterance: plannedUtterance,
+        deliveredAgentUtterance: plannedUtterance,
+        deliveryStatus: "completed",
+        spokenFraction: 1,
+        advanceConversationState: true,
+        plan: responsePlan,
+        metadata: steering.metadata,
+        deliveryJsonOverrides: {
+          steering_context: steering.steering_context,
+          extraction_window_id: input.extractionWindowId,
+        },
+      });
+    }
+
+    await dispatchManualRespond({
+      turnIndex: 0,
+      utterance: prodTurn(0).text,
+      transcriptId: prodTurn(0).transcriptId,
+      evidenceId: prodTurn(0).evidenceId,
+      extractionWindowId: prodTurn(0).extractionWindowId,
+      lastSpokenIntent: "orient_interview",
+      currentPhase: "orient",
+      nextPhase: "inventory",
+      chosenIntent: intent(
+        "discover_processes",
+        "process.inventory",
+        undefined,
+        1125,
+        "The director gave scope; ask for the recurring process inventory.",
+      ),
+      plannedUtterance:
+        "What are the main recurring processes your team owns? A rough list is fine.",
+    });
+    await dispatchReplayExtraction({
+      turnIndex: 0,
+      utterance: prodTurn(0).text,
+      transcriptId: prodTurn(0).transcriptId,
+      evidenceId: prodTurn(0).evidenceId,
+      extractionWindowId: prodTurn(0).extractionWindowId,
+      currentPhase: "orient",
+      nextPhase: "inventory",
+      chosenIntent: intent(
+        "discover_processes",
+        "process.inventory",
+        undefined,
+        1125,
+        "Old extractor output attempted to mint scope verbs.",
+      ),
+      slotUpdates: [
+        {
+          slot_path: "process.inventory",
+          status: "partial",
+          confidence: 0.72,
+          evidence_ids: [prodTurn(0).evidenceId],
+          priority: 90,
+          value: {
+            processes: [
+              "Order Management",
+              "Order Picking",
+              "Shipping",
+              "Invoicing",
+              "Purchasing",
+              "Vendor Payments",
+            ],
+          },
+        },
+      ],
+      toolCalls: [
+        { name: "recordProcess", arguments: { name: "Order Management" } },
+        { name: "recordProcess", arguments: { name: "Order Picking" } },
+        { name: "recordProcess", arguments: { name: "Shipping" } },
+        { name: "recordProcess", arguments: { name: "Invoicing" } },
+        { name: "recordProcess", arguments: { name: "Purchasing" } },
+        { name: "recordProcess", arguments: { name: "Vendor Payments" } },
+      ],
+    });
+
+    let rows = await appClient.query(
+      `SELECT proposed_name FROM candidate_processes WHERE capture_session_id = $1`,
+      [directorReplay715CaptureId],
+    );
+    expect(rows.rows).toEqual([]);
+
+    await dispatchManualRespond({
+      turnIndex: 1,
+      utterance: prodTurn(1).text,
+      transcriptId: prodTurn(1).transcriptId,
+      evidenceId: prodTurn(1).evidenceId,
+      extractionWindowId: prodTurn(1).extractionWindowId,
+      lastSpokenIntent: "discover_processes",
+      currentPhase: "inventory",
+      nextPhase: "expand",
+      chosenIntent: intent(
+        "define_process_boundary",
+        "scope.boundaries",
+        "Order Intake",
+        1200,
+        "The director listed processes; ask for a boundary.",
+      ),
+      plannedUtterance: "Let's zoom into Order Intake. Where does it start?",
+    });
+    await dispatchReplayExtraction({
+      turnIndex: 1,
+      utterance: prodTurn(1).text,
+      transcriptId: prodTurn(1).transcriptId,
+      evidenceId: prodTurn(1).evidenceId,
+      extractionWindowId: prodTurn(1).extractionWindowId,
+      currentPhase: "inventory",
+      nextPhase: "expand",
+      chosenIntent: intent(
+        "define_process_boundary",
+        "scope.boundaries",
+        "Order Intake",
+        1200,
+        "Old extraction emitted the real list; the gate must allow it.",
+      ),
+      slotUpdates: [
+        {
+          slot_path: "process.inventory",
+          status: "filled",
+          confidence: 0.9,
+          evidence_ids: [prodTurn(1).evidenceId],
+          priority: 90,
+          value: {
+            processes: [
+              "Order Intake",
+              "Purchasing And Replenishment",
+              "Vendor Invoice Processing",
+              "Inventory Cycle Counts",
+              "New Customer Onboarding And Credit Setup",
+              "Returns And Credit Memos",
+            ],
+          },
+        },
+      ],
+      toolCalls: [
+        { name: "recordProcess", arguments: { name: "order intake" } },
+        {
+          name: "recordProcess",
+          arguments: { name: "purchasing and replenishment" },
+        },
+        {
+          name: "recordProcess",
+          arguments: { name: "vendor invoice processing" },
+        },
+        { name: "recordProcess", arguments: { name: "inventory cycle counts" } },
+        {
+          name: "recordProcess",
+          arguments: { name: "new customer onboarding and credit setup" },
+        },
+        {
+          name: "recordProcess",
+          arguments: { name: "returns and credit memos" },
+        },
+      ],
+    });
+
+    rows = await appClient.query(
+      `
+        SELECT proposed_name
+        FROM candidate_processes
+        WHERE capture_session_id = $1
+        ORDER BY proposed_name
+      `,
+      [directorReplay715CaptureId],
+    );
+    const candidateNames = rows.rows.map((row) => row.proposed_name);
+    expect(candidateNames).toEqual([
+      "Inventory Cycle Counts",
+      "New Customer Onboarding And Credit Setup",
+      "Order Intake",
+      "Purchasing And Replenishment",
+      "Returns And Credit Memos",
+      "Vendor Invoice Processing",
+    ]);
+    expect(candidateNames).not.toEqual(
+      expect.arrayContaining([
+        "Order Management",
+        "Order Picking",
+        "Shipping",
+        "Invoicing",
+        "Vendor Payments",
+      ]),
+    );
+
+    const candidateRows = await appClient.query<{ id: string; proposed_name: string }>(
+      `
+        SELECT id, proposed_name
+        FROM candidate_processes
+        WHERE capture_session_id = $1
+      `,
+      [directorReplay715CaptureId],
+    );
+    const candidateIdByName = new Map(
+      candidateRows.rows.map((row) => [row.proposed_name, row.id]),
+    );
+    const purchasingId = candidateIdByName.get("Purchasing And Replenishment");
+    const returnsId = candidateIdByName.get("Returns And Credit Memos");
+    expect(purchasingId).toBeDefined();
+    expect(returnsId).toBeDefined();
+
+    await appClient.query(
+      `
+        INSERT INTO interview_state (
+          org_id, workspace_id, capture_session_id, current_phase,
+          focus_candidate_process_id, prior_intent, last_new_slot_turn_index
+        )
+        VALUES ($1, $2, $3, 'enrich', $4, 'capture_variants', 1)
+        ON CONFLICT (capture_session_id)
+        DO UPDATE SET
+          current_phase = 'enrich',
+          focus_candidate_process_id = $4,
+          prior_intent = 'capture_variants',
+          last_new_slot_turn_index = 1
+      `,
+      [orgId, workspaceId, directorReplay715CaptureId, purchasingId],
+    );
+
+    const purchasingReplay = [
+      {
+        turnIndex: 2,
+        lastSpokenIntent: "define_process_boundary",
+        chosenIntent: intent(
+          "capture_outcome",
+          "outcomes.business_outcomes",
+          "Purchasing And Replenishment",
+          1000,
+          "Boundary answer for purchasing.",
+        ),
+        slotPath: "scope.boundaries",
+        value: {
+          trigger: "Vendor invoice comes in through Gmail.",
+          source: "director_replay",
+        },
+        plannedUtterance:
+          "What business outcome does Purchasing And Replenishment protect?",
+      },
+      {
+        turnIndex: 3,
+        lastSpokenIntent: "capture_outcome",
+        chosenIntent: intent(
+          "identify_owner",
+          "ownership.roles",
+          "Purchasing And Replenishment",
+          1000,
+          "Outcome answer for purchasing.",
+        ),
+        slotPath: "outcomes.business_outcomes",
+        value: {
+          outcome:
+            "Inventory availability and working capital; late reorders stock out and early reorders tie up cash.",
+          source: "director_replay",
+        },
+        plannedUtterance:
+          "Who owns Purchasing And Replenishment day to day?",
+      },
+      {
+        turnIndex: 4,
+        lastSpokenIntent: "identify_owner",
+        chosenIntent: intent(
+          "map_systems",
+          "systems.systems_of_record",
+          "Purchasing And Replenishment",
+          1000,
+          "Owner answer for purchasing.",
+        ),
+        slotPath: "ownership.roles",
+        value: { owner: "Tim", source: "director_replay" },
+        plannedUtterance:
+          "What systems does Tim use for Purchasing And Replenishment?",
+      },
+      {
+        turnIndex: 5,
+        lastSpokenIntent: "map_systems",
+        chosenIntent: intent(
+          "capture_frequency_volume",
+          "frequency.volume",
+          "Purchasing And Replenishment",
+          1000,
+          "Systems answer for purchasing.",
+        ),
+        slotPath: "systems.systems_of_record",
+        value: {
+          systems: ["Gmail", "Odoo", "Google Sheets"],
+          source: "director_replay",
+        },
+        plannedUtterance:
+          "How often does Tim run that order cycle, and roughly how much volume is there?",
+      },
+      {
+        turnIndex: 6,
+        lastSpokenIntent: "capture_frequency_volume",
+        chosenIntent: intent(
+          "capture_metrics",
+          "metrics.kpis",
+          "Purchasing And Replenishment",
+          1000,
+          "Frequency answer for purchasing.",
+        ),
+        slotPath: "frequency.volume",
+        value: {
+          cadence: "Weekly",
+          volume: "About 200 invoices per month",
+          effort: "About 12 minutes each by hand",
+          source: "director_replay",
+        },
+        plannedUtterance:
+          "What metrics tell you Purchasing And Replenishment is working well or poorly?",
+      },
+      {
+        turnIndex: 7,
+        lastSpokenIntent: "capture_metrics",
+        chosenIntent: intent(
+          "capture_risk_spof",
+          "risk.spofs",
+          "Purchasing And Replenishment",
+          1000,
+          "Metrics answer for purchasing.",
+        ),
+        slotPath: "metrics.kpis",
+        value: {
+          metrics: [
+            "Missing orders",
+            "Inventory optimality",
+            "Order volume",
+            "Customer fulfillment rate",
+          ],
+          source: "director_replay",
+        },
+        plannedUtterance:
+          "Is Tim the only person who can handle that flow, or is there backup?",
+      },
+      {
+        turnIndex: 8,
+        lastSpokenIntent: "capture_risk_spof",
+        chosenIntent: intent(
+          "capture_controls",
+          "controls.compliance",
+          "Purchasing And Replenishment",
+          1000,
+          "SPOF answer for purchasing.",
+        ),
+        slotPath: "risk.spofs",
+        value: { risk: "Tim handles all of it.", source: "director_replay" },
+        plannedUtterance:
+          "What review points or controls catch mistakes in Purchasing And Replenishment?",
+      },
+      {
+        turnIndex: 9,
+        lastSpokenIntent: "capture_controls",
+        chosenIntent: intent(
+          "capture_friction",
+          "friction.pain_points",
+          "Purchasing And Replenishment",
+          1000,
+          "Unknown controls answer for purchasing.",
+        ),
+        slotPath: "controls.compliance",
+        value: { response: "unknown", source: "director_replay" },
+        status: "asked_unknown" as const,
+        plannedUtterance:
+          "Where does Purchasing And Replenishment create the most friction today?",
+      },
+      {
+        turnIndex: 10,
+        lastSpokenIntent: "capture_friction",
+        chosenIntent: intent(
+          "select_process_to_expand",
+          "scope.boundaries",
+          "Purchasing And Replenishment",
+          1000,
+          "Director asked for a summary of known processes.",
+        ),
+        slotPath: "friction.pain_points",
+        value: {
+          question: "What do you know about my six processes right now?",
+          source: "director_replay",
+        },
+        plannedUtterance:
+          "I have the six-process inventory and detail on Purchasing And Replenishment so far.",
+      },
+    ] as const;
+
+    for (const replay of purchasingReplay) {
+      const turn = prodTurn(replay.turnIndex);
+      await dispatchManualRespond({
+        turnIndex: replay.turnIndex,
+        utterance: turn.text,
+        transcriptId: turn.transcriptId,
+        evidenceId: turn.evidenceId,
+        extractionWindowId: turn.extractionWindowId,
+        lastSpokenIntent: replay.lastSpokenIntent,
+        currentPhase: replay.turnIndex === 2 ? "expand" : "enrich",
+        nextPhase: "enrich",
+        chosenIntent: replay.chosenIntent,
+        plannedUtterance: replay.plannedUtterance,
+      });
+      await dispatchReplayExtraction({
+        turnIndex: replay.turnIndex,
+        utterance: turn.text,
+        transcriptId: turn.transcriptId,
+        evidenceId: turn.evidenceId,
+        extractionWindowId: turn.extractionWindowId,
+        currentPhase: replay.turnIndex === 2 ? "expand" : "enrich",
+        nextPhase: "enrich",
+        chosenIntent: replay.chosenIntent,
+        slotUpdates: [
+          {
+            slot_path: replay.slotPath,
+            status: "status" in replay ? replay.status : "filled",
+            confidence: 0.9,
+            evidence_ids: [turn.evidenceId],
+            priority: 80,
+            value: replay.value,
+          },
+        ],
+        toolCalls: [],
+      });
+    }
+
+    await appClient.query(
+      `
+        INSERT INTO interview_state (
+          org_id, workspace_id, capture_session_id, current_phase,
+          focus_candidate_process_id, prior_intent, last_new_slot_turn_index
+        )
+        VALUES ($1, $2, $3, 'enrich', $4, 'capture_friction', 10)
+        ON CONFLICT (capture_session_id)
+        DO UPDATE SET
+          current_phase = 'enrich',
+          focus_candidate_process_id = $4,
+          prior_intent = 'capture_friction',
+          last_new_slot_turn_index = 10
+      `,
+      [orgId, workspaceId, directorReplay715CaptureId, purchasingId],
+    );
+
+    const switchResult = await dispatchSteeredRespond({
+      turnIndex: 11,
+      utterance: prodTurn(11).text,
+      transcriptId: prodTurn(11).transcriptId,
+      evidenceId: prodTurn(11).evidenceId,
+      extractionWindowId: prodTurn(11).extractionWindowId,
+      lastSpokenIntent: "capture_variants",
+      userIntentSignal: {
+        action: "switch_focus_next",
+        confidence: 0.96,
+        reason: "The director asked to switch to another process.",
+      },
+    });
+    expect(switchResult.chosen_intent.intent).toBe("select_process_to_expand");
+    expect(switchResult.chosen_intent.target_process).toBeDefined();
+    expect(candidateNames).toContain(switchResult.chosen_intent.target_process);
+    expect(switchResult.chosen_intent.target_process).not.toBe(
+      "Purchasing And Replenishment",
+    );
+    expect(switchResult.chosen_intent.target_process).not.toMatch(
+      /Order Management|Order Picking|Shipping|Invoicing|Vendor Payments/i,
+    );
+    expect(switchResult.next_prompt).toContain(
+      switchResult.chosen_intent.target_process!,
+    );
+    expect(switchResult.next_prompt).not.toMatch(
+      /What part of the business do you oversee|Which process should we focus on (?:first|next)/i,
+    );
+
+    const switchTargets = [switchResult.chosen_intent.target_process];
+    for (const turnIndex of [12, 13, 14] as const) {
+      const turn = prodTurn(turnIndex);
+      const result = await dispatchSteeredRespond({
+        turnIndex,
+        utterance: turn.text,
+        transcriptId: turn.transcriptId,
+        evidenceId: turn.evidenceId,
+        extractionWindowId: turn.extractionWindowId,
+        lastSpokenIntent: "select_process_to_expand",
+        userIntentSignal: {
+          action: "switch_focus_next",
+          confidence: 0.96,
+          reason: "The director repeated that they want to switch process focus.",
+        },
+      });
+      expect(result.chosen_intent.intent).toBe("select_process_to_expand");
+      expect(result.chosen_intent.target_process).toBeDefined();
+      expect(candidateNames).toContain(result.chosen_intent.target_process);
+      expect(result.chosen_intent.target_process).not.toMatch(
+        /Order Management|Order Picking|Shipping|Invoicing|Vendor Payments/i,
+      );
+      expect(result.next_prompt).toContain(result.chosen_intent.target_process!);
+      expect(result.next_prompt).not.toMatch(
+        /What part of the business do you oversee|Which process should we focus on (?:first|next)|Order Management/i,
+      );
+      switchTargets.push(result.chosen_intent.target_process);
+    }
+    expect(new Set(switchTargets).size).toBe(switchTargets.length);
+
+    const orderPickingResult = await dispatchSteeredRespond({
+      turnIndex: 15,
+      utterance: prodTurn(15).text,
+      transcriptId: prodTurn(15).transcriptId,
+      evidenceId: prodTurn(15).evidenceId,
+      extractionWindowId: prodTurn(15).extractionWindowId,
+      lastSpokenIntent: "select_process_to_expand",
+    });
+    expect(orderPickingResult.next_prompt).not.toMatch(
+      /Order Management|Order Picking is actually downstream|Which process should we focus on (?:first|next)/i,
+    );
+
+    const infoNeedResult = await dispatchSteeredRespond({
+      turnIndex: 16,
+      utterance: prodTurn(16).text,
+      transcriptId: prodTurn(16).transcriptId,
+      evidenceId: prodTurn(16).evidenceId,
+      extractionWindowId: prodTurn(16).extractionWindowId,
+      lastSpokenIntent: orderPickingResult.chosen_intent.intent,
+    });
+    expect(infoNeedResult.next_prompt).not.toMatch(
+      /Order Management|Order Picking|Which process should we focus on (?:first|next)/i,
+    );
+
+    const namedResult = await dispatchSteeredRespond({
+      turnIndex: 17,
+      utterance: prodTurn(17).text,
+      transcriptId: prodTurn(17).transcriptId,
+      evidenceId: prodTurn(17).evidenceId,
+      extractionWindowId: prodTurn(17).extractionWindowId,
+      lastSpokenIntent: infoNeedResult.chosen_intent.intent,
+      userIntentSignal: {
+        action: "switch_focus_named",
+        target_process: "Returns And Credit Memos",
+        confidence: 0.97,
+        reason: "The director explicitly asked to talk about returns and credit memos.",
+      },
+    });
+    expect(namedResult.chosen_intent.intent).toBe("select_process_to_expand");
+    expect(namedResult.chosen_intent.target_process).toBe(
+      "Returns And Credit Memos",
+    );
+    expect(namedResult.next_prompt).toContain("Returns And Credit Memos");
+    expect(namedResult.next_prompt).not.toMatch(
+      /What part of the business do you oversee|Which process should we focus on (?:first|next)/i,
+    );
+
+    const returnsPrompts = [namedResult.next_prompt];
+    for (const turnIndex of [18, 19, 20] as const) {
+      const turn = prodTurn(turnIndex);
+      const result = await dispatchSteeredRespond({
+        turnIndex,
+        utterance: turn.text,
+        transcriptId: turn.transcriptId,
+        evidenceId: turn.evidenceId,
+        extractionWindowId: turn.extractionWindowId,
+        lastSpokenIntent: "select_process_to_expand",
+        userIntentSignal: {
+          action: "switch_focus_named",
+          target_process: "Returns And Credit Memos",
+          confidence: 0.97,
+          reason: "The director repeated the returns process name.",
+        },
+      });
+      expect(result.next_prompt).not.toMatch(
+        /What part of the business do you oversee|Which process should we focus on (?:first|next)|Order Management|Order Picking/i,
+      );
+      returnsPrompts.push(result.next_prompt);
+    }
+    expect(
+      returnsPrompts.every((prompt) => prompt.includes("Returns And Credit Memos")),
+    ).toBe(true);
+
+    const finalState = await appClient.query(
+      `
+        SELECT cp.proposed_name AS focus_name
+        FROM interview_state s
+        JOIN candidate_processes cp ON cp.id = s.focus_candidate_process_id
+        WHERE s.capture_session_id = $1
+      `,
+      [directorReplay715CaptureId],
+    );
+    expect(finalState.rows[0].focus_name).toBe("Returns And Credit Memos");
+
+    const promptRows = await appClient.query<{ sanitized_agent_utterance: string }>(
+      `
+        SELECT sanitized_agent_utterance
+        FROM agent_decision_log
+        WHERE capture_session_id = $1
+          AND stage_name = 'director.turn'
+          AND turn_index BETWEEN 11 AND 20
+        ORDER BY turn_index
+      `,
+      [directorReplay715CaptureId],
+    );
+    const prompts = promptRows.rows.map((row) => row.sanitized_agent_utterance);
+    expect(prompts).toHaveLength(10);
+    expect(prompts.filter((prompt) => /Which process should we focus on (?:first|next)/i.test(prompt))).toHaveLength(0);
+    expect(prompts.filter((prompt) => /What part of the business do you oversee/i.test(prompt))).toHaveLength(0);
+    expect(
+      prompts.some((prompt) => prompt.includes("Returns And Credit Memos")),
+    ).toBe(true);
+
+    rows = await appClient.query(
+      `
+        SELECT proposed_name
+        FROM candidate_processes
+        WHERE capture_session_id = $1
+        ORDER BY proposed_name
+      `,
+      [directorReplay715CaptureId],
+    );
+    expect(rows.rows.map((row) => row.proposed_name)).toEqual(candidateNames);
+  }, 60_000);
+
+  test.skipIf(process.env.OTTO_RUN_DIRECTOR_PRODUCT_REPLAY !== "true")(
+    "replays prod director session 71569919 through split product path",
+    async () => {
+      const productReplayCaptureId =
+        process.env.OTTO_DIRECTOR_PRODUCT_REPLAY_CAPTURE_ID ?? randomUUID();
+      const replayRunId = randomUUID();
+      console.log(
+        `[director-product-replay] capture_session_id=${productReplayCaptureId} replay_run_id=${replayRunId}`,
+      );
+
+      await seedWeek2Graph(appClient);
+      await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+        orgId,
+      ]);
+      await appClient.query(
+        "INSERT INTO capture_sessions (id, org_id, workspace_id, capture_type, started_at, metadata_json) VALUES ($1, $2, $3, 'director_interview', now(), $4::jsonb) ON CONFLICT (id) DO NOTHING",
+        [
+          productReplayCaptureId,
+          orgId,
+          workspaceId,
+          JSON.stringify({
+            replay_source_capture_session_id:
+              "71569919-775d-44bd-bd33-f5b6faf096f1",
+            replay_kind: "split_product_path_no_injected_extraction",
+            replay_run_id: replayRunId,
+            replay_capture_session_id: productReplayCaptureId,
+            director_user_id: userId,
+          }),
+        ],
+      );
+
+      const {
+        buildDirectorSteeringPlan,
+        dispatchDirectorTurnPlan,
+        extractDirectorTurn,
+        extractExplicitProcessEnumerationNames,
+        nonAuthoritativeDirectorSteeringPlan,
+        phraseDirectorSteeringTurn,
+        upsertDirectorExtractionWindow,
+        updateDirectorExtractionStatus,
+        voiceMetadataDegrades,
+      } = await import("@/lib/interview/director/brain");
+      const { ingestDirectorTurn } = await import(
+        "@/lib/interview/director/turn-transaction"
+      );
+
+      const context = {
+        orgId,
+        workspaceId,
+        captureSessionId: productReplayCaptureId,
+        userId,
+        language: "en",
+      };
+      const prodTurns = [
+        "I oversee the I'm the VP of operations. I own everything from when a customer order comes in through getting it picked. Shipped, invoiced, plus purchasing and or vendor payments.",
+        "Six big ones, order intake. Taking customer orders into the system. Purchasing and replenishment. Vendor invoice processing, inventory cycle counts, new customer onboarding and credit setup, and returns and credit memos.",
+        "So processing kicks off. When an in a vendor invoice comes in. And that comes in, uh, through Gmail.",
+        "The business outcome, it is purchasing is inventory availability and working capital. Reorder late, and we stock out and lose the sale. Reorder early, and we tie up cash.",
+        "My employee, his name is Tim.",
+        "So he first the invoice from Gmail, and then he puts in the order. On Odoo, and then we keep track of it on Google Sheets.",
+        "He runs through that order cycle about once a week. And he does about, uh, thirty and or about we get about two hundred invoices a month. So and it takes about twelve minutes each to through a match by hand.",
+        "So We keep track of the metrics. So, like, if we're missing orders or if our inventory is not optimal, then we'll measure it through you know, some we'll we'll look at volume of orders. And customer fulfillment rate.",
+        "Yeah. Tim handles all of it.",
+        "I'm not sure.",
+        "What do you know about my six processes right now?",
+        "Let's switch to another process.",
+        "No. Switch right now.",
+        "Already told you. Let's switch to another process.",
+        "No. Switch it out.",
+        "What is order picking?",
+        "Which process do you think? Needs the most information?",
+        "Alright. Let's actually talk about um, let's talk about returns and credit memos.",
+        "Returns.",
+        "Returns.",
+        "Returns.",
+      ];
+
+      for (const [turnIndex, utterance] of prodTurns.entries()) {
+        const ingested = await appClient.query("SELECT set_config('app.current_org_id', $1, false)", [
+          orgId,
+        ]).then(() =>
+          ingestDirectorTurn({
+            context,
+            utterance,
+          }),
+        );
+        const extractionWindowId = `product-replay-715-window-${turnIndex}`;
+        const turnInput = {
+          orgId,
+          workspaceId,
+          captureSessionId: productReplayCaptureId,
+          userId,
+          latestUtterance: ingested.latest_utterance,
+          transcriptSegmentIds: ingested.transcript_segment_ids,
+          evidenceIds: ingested.evidence_ids,
+          turnIndex: ingested.turn_index,
+          pendingExtractionTurns: [],
+          pendingSlotPaths: [],
+        };
+        const steering = await buildDirectorSteeringPlan(turnInput);
+        const phrased = await phraseDirectorSteeringTurn(steering);
+        await upsertDirectorExtractionWindow({
+          context,
+          extractionWindowId,
+          turnIndex,
+          transcriptSegmentIds: ingested.transcript_segment_ids,
+          closedBy: "assistant_spoke",
+          status: "pending",
+          metadataJson: {
+            local_turn_correlation_id: `product-replay-715-${turnIndex}`,
+            steering_context: steering.steering_context,
+            enumerated_process_names: extractExplicitProcessEnumerationNames(
+              ingested.latest_utterance,
+            ),
+          },
+        });
+        const responsePlan = nonAuthoritativeDirectorSteeringPlan(steering.plan);
+        await dispatchDirectorTurnPlan({
+          orgId,
+          workspaceId,
+          captureSessionId: productReplayCaptureId,
+          userId,
+          latestUtterance: ingested.latest_utterance,
+          transcriptSegmentIds: ingested.transcript_segment_ids,
+          evidenceIds: ingested.evidence_ids,
+          turnIndex: ingested.turn_index,
+          plan: responsePlan,
+          plannedAgentUtterance: phrased.utterance,
+          deliveredAgentUtterance: phrased.utterance,
+          metadata: steering.metadata,
+          voiceMetadata: phrased.metadata,
+          degradedQuality: voiceMetadataDegrades(phrased.metadata),
+          degradedReasons: voiceMetadataDegrades(phrased.metadata)
+            ? ["voice_phrase_fallback"]
+            : [],
+          startedAt: steering.started_at,
+          deliveryStatus: "completed",
+          spokenFraction: 1,
+          localTurnCorrelationId: `product-replay-715-${turnIndex}`,
+          advanceConversationState: true,
+          deliveryJsonOverrides: {
+            speech_delivery_status: "completed",
+            extraction_status: "pending",
+            extraction_window_id: extractionWindowId,
+            agent_utterance_source: "fast_phrase",
+            steering_intent: steering.plan.chosen_intent,
+            spoken_agent_utterance: phrased.utterance,
+            steering_context: steering.steering_context,
+          },
+        });
+
+        const planned = await extractDirectorTurn({
+          orgId,
+          workspaceId,
+          captureSessionId: productReplayCaptureId,
+          userId,
+          latestUtterance: ingested.latest_utterance,
+          transcriptSegmentIds: ingested.transcript_segment_ids,
+          evidenceIds: ingested.evidence_ids,
+          turnIndex: ingested.turn_index,
+          extractionWindowId,
+        });
+        const extracted = await dispatchDirectorTurnPlan({
+          orgId,
+          workspaceId,
+          captureSessionId: productReplayCaptureId,
+          userId,
+          latestUtterance: ingested.latest_utterance,
+          transcriptSegmentIds: ingested.transcript_segment_ids,
+          evidenceIds: ingested.evidence_ids,
+          turnIndex: ingested.turn_index,
+          extractionWindowId,
+          plan: planned.plan,
+          plannedAgentUtterance: phrased.utterance,
+          deliveredAgentUtterance: phrased.utterance,
+          metadata: planned.metadata,
+          voiceMetadata: {
+            ...planned.metadata,
+            utterance_source: "spoken_fast_phrase",
+            llm_call_elided: true,
+          },
+          degradedQuality:
+            planned.degraded_quality || voiceMetadataDegrades(planned.metadata),
+          degradedReasons: planned.degraded_reasons,
+          startedAt: planned.started_at,
+          deliveryStatus: "completed",
+          spokenFraction: 1,
+          localTurnCorrelationId: `product-replay-715-${turnIndex}`,
+          decisionStageName: "director.extraction",
+          advanceConversationState: false,
+          deliveryJsonOverrides: {
+            extraction_status: "complete",
+            extraction_window_id: extractionWindowId,
+            extraction_advisory_utterance:
+              planned.plan.planned_agent_utterance ?? null,
+            window_turn_indexes: [turnIndex],
+          },
+        });
+        await upsertDirectorExtractionWindow({
+          context,
+          extractionWindowId,
+          turnIndex,
+          transcriptSegmentIds: ingested.transcript_segment_ids,
+          closedBy: "assistant_spoke",
+          status: "complete",
+          metadataJson: {
+            local_turn_correlation_id: `product-replay-715-${turnIndex}`,
+            extraction_decision_log_id: extracted.decision_log_id,
+            window_turn_indexes: [turnIndex],
+          },
+        });
+        await updateDirectorExtractionStatus({
+          context,
+          turnIndex,
+          extractionStatus: "complete",
+          extractionDecisionLogId: extracted.decision_log_id,
+          localTurnCorrelationId: `product-replay-715-${turnIndex}`,
+          extractionWindowId,
+        });
+      }
+
+      const rows = await appClient.query(
+        `
+          SELECT proposed_name
+          FROM candidate_processes
+          WHERE capture_session_id = $1
+          ORDER BY proposed_name
+        `,
+        [productReplayCaptureId],
+      );
+      expect(rows.rows.map((row) => row.proposed_name)).toEqual(
+        expect.arrayContaining([
+          "Order Intake",
+          "Purchasing And Replenishment",
+          "Vendor Invoice Processing",
+          "Inventory Cycle Counts",
+          "New Customer Onboarding And Credit Setup",
+          "Returns And Credit Memos",
+        ]),
+      );
+      const turnOneProcessCalls = await appClient.query<{ name: string }>(
+        `
+          SELECT tool->'arguments'->>'name' AS name
+          FROM agent_decision_log d
+          CROSS JOIN LATERAL jsonb_array_elements(d.tool_calls) AS tool
+          WHERE d.capture_session_id = $1
+            AND d.stage_name = 'director.extraction'
+            AND d.turn_index = 1
+            AND tool->>'name' = 'recordProcess'
+            AND tool->'execution'->>'status' = 'succeeded'
+          ORDER BY name
+        `,
+        [productReplayCaptureId],
+      );
+      expect(turnOneProcessCalls.rows.map((row) => row.name)).toEqual([
+        "Inventory Cycle Counts",
+        "New Customer Onboarding And Credit Setup",
+        "Order Intake",
+        "Purchasing And Replenishment",
+        "Returns And Credit Memos",
+        "Vendor Invoice Processing",
+      ]);
+
+      const targetPromptRows = await appClient.query<{
+        turn_index: number;
+        sanitized_agent_utterance: string;
+        target_process: string;
+        voice_reason: string | null;
+        degraded_reasons: string[];
+      }>(
+        `
+          SELECT
+            turn_index,
+            sanitized_agent_utterance,
+            chosen_intent->>'target_process' AS target_process,
+            delivery_json->'voice_metadata'->>'reason' AS voice_reason,
+            COALESCE(degraded_reasons, '[]'::jsonb) AS degraded_reasons
+          FROM agent_decision_log
+          WHERE capture_session_id = $1
+            AND stage_name = 'director.turn'
+            AND chosen_intent->>'intent' = 'select_process_to_expand'
+            AND chosen_intent ? 'target_process'
+            AND turn_index BETWEEN 11 AND 20
+          ORDER BY turn_index
+        `,
+        [productReplayCaptureId],
+      );
+      expect(targetPromptRows.rows.length).toBeGreaterThanOrEqual(4);
+      for (const row of targetPromptRows.rows) {
+        expect(row.sanitized_agent_utterance).toContain(row.target_process);
+        expect(row.sanitized_agent_utterance).not.toMatch(
+          /Which process should we focus on (?:first|next)/i,
+        );
+        expect(row.voice_reason).toBe("required_target_phrase");
+        expect(row.degraded_reasons).toEqual([]);
+      }
+      const returnsFocusRows = targetPromptRows.rows.filter(
+        (row) => row.turn_index >= 17 && row.turn_index <= 20,
+      );
+      expect(returnsFocusRows).toHaveLength(4);
+      expect(
+        returnsFocusRows.every(
+          (row) => row.target_process === "Returns And Credit Memos",
+        ),
+      ).toBe(true);
+    },
+    300_000,
+  );
 
   test("round 2: dispatch normalizes SPOF risks and works_on links; system names canonicalize", async () => {
     await seedWeek2Graph(appClient);
@@ -6686,6 +8050,57 @@ function applyMigration(filename: string) {
     ],
     { input: readFileSync(join(root, "migrations", filename)) },
   );
+}
+
+function ensureAppRole() {
+  execFileSync(
+    "docker",
+    [
+      "exec",
+      "-i",
+      container,
+      "psql",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-U",
+      "postgres",
+      "-d",
+      "otto_test",
+    ],
+    {
+      input: `
+        DO $$
+        BEGIN
+          CREATE ROLE otto_app LOGIN PASSWORD 'otto_app';
+        EXCEPTION WHEN duplicate_object THEN
+          ALTER ROLE otto_app WITH LOGIN PASSWORD 'otto_app';
+        END
+        $$;
+        GRANT USAGE ON SCHEMA public TO otto_app;
+        GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO otto_app;
+        GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO otto_app;
+      `,
+    },
+  );
+}
+
+function phase1SchemaInitialized() {
+  const output = execFileSync(
+    "docker",
+    [
+      "exec",
+      container,
+      "psql",
+      "-U",
+      "postgres",
+      "-d",
+      "otto_test",
+      "-tAc",
+      "SELECT to_regclass('public.capture_sessions') IS NOT NULL",
+    ],
+    { encoding: "utf8" },
+  );
+  return output.trim() === "t";
 }
 
 function ensureDocker() {

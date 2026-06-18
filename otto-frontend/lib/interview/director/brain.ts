@@ -15,6 +15,7 @@ import {
 import { StructuredOutputError, structured } from "@/lib/adapters/llm";
 import { writeAgentDecisionInTransaction } from "@/lib/db/write-agent-decision";
 import {
+  directorCoreCoverageSlotPaths,
   directorSlotDefinitions,
   isCaptureLevelDirectorSlot,
   missingFilledSlotComponents,
@@ -86,6 +87,8 @@ export type DirectorTurnInput = DirectorToolContext & {
   transcriptSegmentIds: string[];
   evidenceIds: string[];
   turnIndex: number;
+  extractionWindowId?: string;
+  userIntentSignal?: DirectorUserIntentSignal;
 };
 
 export type DirectorTurnResult = {
@@ -217,6 +220,19 @@ const looseSlotExtractionSchema = z.object({
 
 type LooseSlotExtraction = z.infer<typeof looseSlotExtractionSchema>;
 
+const directorUserIntentSignalSchema = z.object({
+  action: z.enum([
+    "continue_interview",
+    "switch_focus_named",
+    "switch_focus_next",
+  ]),
+  target_process: z.string().optional(),
+  confidence: z.number().min(0).max(1),
+  reason: z.string().min(1),
+}).strict();
+
+export type DirectorUserIntentSignal = z.infer<typeof directorUserIntentSignalSchema>;
+
 export type DirectorSteeringContext = {
   /** Imperative instruction for the chosen intent (kept equal to `directive`). */
   next_objective: string;
@@ -246,6 +262,7 @@ export type DirectorSteeringContext = {
   last_spoken_intent?: string;
   last_spoken_objective?: string;
   focus_candidate_process_id?: string;
+  user_intent_signal?: DirectorUserIntentSignal;
 };
 
 export type DirectorSteeringPlanResult = {
@@ -442,6 +459,15 @@ export async function buildDirectorSteeringPlan(
   // F1: candidates whose core slots are already covered, so rotation keeps
   // cycling through under-captured processes until each is filled/exhausted.
   const expandedCandidateProcessNames = await readCoreCoveredCandidateNames(context);
+  const recentlySelectedCandidateProcessNames = candidateSummaries
+    .filter((candidate) =>
+      probeFiringRows.some(
+        (firing) =>
+          firing.probeId === "select_process_to_expand" &&
+          firing.targetCandidateProcessId === candidate.id,
+      ),
+    )
+    .map((candidate) => candidate.proposedName);
   // Task 11: probes the director substantively answered this session are
   // excluded even if their slot landed partial or mis-scoped, with focus
   // selection / inventory firing at most once once satisfied.
@@ -453,6 +479,15 @@ export async function buildDirectorSteeringPlan(
     focusCandidateProcessId: state.focusCandidateProcessId,
     recentTurns,
   });
+  const userIntentSignal =
+    input.userIntentSignal ??
+    (await classifyDirectorUserIntent({
+      latestUtterance: input.latestUtterance,
+      recentTurns,
+      candidateProcessNames,
+      focusProcessName: focusCandidateName,
+      currentPhase: state.currentPhase,
+    }));
   const plan = deterministicTurnPlan({
     latestUtterance: input.latestUtterance,
     evidenceIds: input.evidenceIds,
@@ -468,6 +503,8 @@ export async function buildDirectorSteeringPlan(
     answeredProbeIntents,
     focusProcessName: focusCandidateName,
     expandedCandidateProcessNames,
+    recentlySelectedCandidateProcessNames,
+    userIntentSignal,
   });
   const rankedIntents = plan.ranked_intents.length
     ? plan.ranked_intents
@@ -491,9 +528,15 @@ export async function buildDirectorSteeringPlan(
     focusCandidateName ??
     chosenIntent.target_process ??
     candidateSummaries[0]?.proposedName;
+  const steeringPlan = alignDirectorPlanTargetsToFocus(
+    normalizedPlan,
+    focusProcessName,
+  );
+  const steeringChosenIntent = steeringPlan.chosen_intent;
+  const steeringRankedIntents = steeringPlan.ranked_intents;
   const metadata = fallbackMetadata("director.turn.steering", started);
   return {
-    plan: normalizedPlan,
+    plan: steeringPlan,
     current_slots: currentSlots,
     recent_turns: recentTurns,
     coverage_summary: summarizeCoverage(currentSlots),
@@ -505,8 +548,8 @@ export async function buildDirectorSteeringPlan(
     },
     started_at: started,
     steering_context: buildDirectorSteeringContext({
-      chosenIntent,
-      rankedIntents,
+      chosenIntent: steeringChosenIntent,
+      rankedIntents: steeringRankedIntents,
       filledSlotPaths: filledSlots,
       currentSlots,
       recentTurns,
@@ -521,6 +564,7 @@ export async function buildDirectorSteeringPlan(
       lastSpokenIntent: input.lastSpokenIntent,
       focusCandidateProcessId: state.focusCandidateProcessId,
       focusProcessName,
+      userIntentSignal,
     }),
   };
 }
@@ -543,6 +587,7 @@ export function buildDirectorSteeringContext(input: {
   lastSpokenIntent?: string;
   focusCandidateProcessId?: string;
   focusProcessName?: string;
+  userIntentSignal?: DirectorUserIntentSignal;
 }): DirectorSteeringContext {
   const chosenIntent = input.chosenIntent;
   const directive = directorIntentDirective(chosenIntent, input.focusProcessName);
@@ -602,6 +647,103 @@ export function buildDirectorSteeringContext(input: {
     last_spoken_intent: input.lastSpokenIntent,
     last_spoken_objective: input.lastSpokenIntent,
     focus_candidate_process_id: input.focusCandidateProcessId,
+    user_intent_signal: input.userIntentSignal,
+  };
+}
+
+async function classifyDirectorUserIntent(input: {
+  latestUtterance: string;
+  recentTurns: string[];
+  candidateProcessNames: string[];
+  focusProcessName?: string;
+  currentPhase: DirectorInterviewPhase;
+}): Promise<DirectorUserIntentSignal> {
+  const fallback = continueDirectorUserIntent("No LLM user-intent signal.");
+  if (input.candidateProcessNames.length === 0) return fallback;
+  try {
+    const result = await structured({
+      prompt_template_id: "director.user-intent.classify",
+      prompt_template_version: "1",
+      schema_name: "director-user-intent-signal",
+      schema: directorUserIntentSignalSchema,
+      static_input: [
+        "You classify the director's latest utterance for conversation control.",
+        "Return only the director's control intent, not extracted business facts.",
+        "Actions:",
+        "- continue_interview: they are answering, asking a meta question, giving facts, or not requesting a process switch.",
+        "- switch_focus_named: they ask to discuss/switch/focus/zoom into a specific known candidate process.",
+        "- switch_focus_next: they ask to move to another/next/different process but do not name which one.",
+        "For switch_focus_named, target_process MUST exactly match one item from Known candidate processes.",
+        "If the user gives a short name like 'Returns' and it clearly refers to a known candidate, output the exact known candidate name.",
+        "A very short utterance that is just a known candidate name, abbreviation, or unmistakable subset of a known candidate is switch_focus_named, even when it repeats the current focus; treat it as reinforcing or correcting focus.",
+        "If no known candidate is clearly targeted, use continue_interview.",
+      ].join("\n"),
+      dynamic_input: JSON.stringify(
+        {
+          current_phase: input.currentPhase,
+          focus_process: input.focusProcessName ?? null,
+          known_candidate_processes: input.candidateProcessNames,
+          recent_turns: input.recentTurns.slice(-4),
+          latest_utterance: input.latestUtterance,
+        },
+        null,
+        2,
+      ),
+      input:
+        "Classify latest_utterance as continue_interview, switch_focus_named, or switch_focus_next.",
+      anthropic_tool: {
+        name: "emit_director_user_intent_signal",
+        description:
+          "Emit the director's conversation-control intent for this turn, including exact target_process when switching to a known candidate.",
+        input_schema: z.toJSONSchema(directorUserIntentSignalSchema) as Record<string, unknown>,
+        strict: true,
+      },
+      mock: fallback,
+    });
+    return normalizeDirectorUserIntentSignal(
+      result.value,
+      input.candidateProcessNames,
+    );
+  } catch {
+    return fallback;
+  }
+}
+
+function continueDirectorUserIntent(reason: string): DirectorUserIntentSignal {
+  return {
+    action: "continue_interview",
+    confidence: 0,
+    reason,
+  };
+}
+
+function normalizeDirectorUserIntentSignal(
+  signal: DirectorUserIntentSignal,
+  candidateProcessNames: string[],
+): DirectorUserIntentSignal {
+  if (signal.confidence < 0.55) {
+    return continueDirectorUserIntent(`Low confidence user intent: ${signal.reason}`);
+  }
+  if (signal.action === "switch_focus_next") {
+    return signal;
+  }
+  if (signal.action !== "switch_focus_named") {
+    return { ...signal, target_process: undefined };
+  }
+  const normalizedTarget = signal.target_process
+    ? normalizeCandidateProcessName(signal.target_process)
+    : undefined;
+  const exactTarget = candidateProcessNames.find(
+    (name) => normalizeCandidateProcessName(name) === normalizedTarget,
+  );
+  if (!exactTarget) {
+    return continueDirectorUserIntent(
+      `Named switch target did not exactly match a known candidate: ${signal.target_process ?? "none"}`,
+    );
+  }
+  return {
+    ...signal,
+    target_process: exactTarget,
   };
 }
 
@@ -614,7 +756,7 @@ const nonProbeIntentDirectives: Record<string, string> = {
   orient_interview:
     "Orient the director: explain in one sentence that you are mapping how their function operates, then ask what part of the business they oversee.",
   select_process_to_expand:
-    "Ask the director which of their named processes to zoom into first — the most important or most painful one. Do not start drilling into steps.",
+    "Ask the director which of their named processes to zoom into next — the most important or most painful one. Do not start drilling into steps.",
   clarify_previous_question:
     "Briefly answer the director's clarification, then re-ask the active question in plainer words.",
   reconcile_conflict:
@@ -913,46 +1055,93 @@ function directorEnumeratedProcessesInTranscript(recentTurns?: string[]) {
   if (!recentTurns?.length) return false;
   return recentTurns.some((turn) => {
     if (!turn.startsWith("Director: ")) return false;
-    return extractProcessNames(turn.slice("Director: ".length)).length >= 2;
+    return directorUtteranceIsExplicitProcessEnumeration(
+      turn.slice("Director: ".length),
+    );
   });
 }
 
-/**
- * F1a: the director explicitly asked to leave the current process ("start
- * asking me about the other processes", "move on", "next one"). Prod session
- * 667b5809 asked four times across turns 12-17 and the planner never switched
- * — there was no directive recognition at all. Deterministic, so the switch
- * cannot depend on extractor compliance.
- */
-export function directorRequestedFocusSwitch(text: string): boolean {
+export function directorUtteranceIsExplicitProcessEnumeration(text: string): boolean {
+  return extractExplicitProcessEnumerationNames(text).length >= 2;
+}
+
+export function extractExplicitProcessEnumerationNames(text: string): string[] {
   const cleaned = text.trim();
-  if (!cleaned) return false;
-  // "ask/talk/tell/switch ... about the other/next/remaining processes" — a
-  // request verb must appear within a few words of the process reference so
-  // workflow narration ("it depends on other processes upstream") does not
-  // read as a switch request.
-  if (
-    /\b(?:ask|asking|tell|telling|talk|talking|switch|go|start|cover|discuss|move|what)\W+(?:\w+\W+){0,5}(?:other|next|remaining|rest of(?: the)?|different)\s+(?:\w+\s+){0,2}process(?:es)?\b/i.test(
-      cleaned,
-    )
-  ) {
-    return true;
-  }
-  if (/\b(?:remember\s+)?(?:those|the)\s+other\s+ones\b/i.test(cleaned)) {
-    return true;
-  }
-  // "move on" only as an imperative: sentence-initial (optionally after
-  // no/yeah/ok/please/let's) or sentence-final — narration like "it then
-  // moves on to picking" must not match.
-  if (
-    /(?:^|[.!?]\s*)(?:no[.,!]?\s*)?(?:yeah[.,!]?\s*)?(?:ok(?:ay)?[.,!]?\s*)?(?:please\s+)?(?:let'?s\s+)?move\s+on\b/i.test(
+  if (!cleaned || looksLikeScopeChain(cleaned)) return [];
+  const listFraming =
+    /\b(?:\d+|two|three|four|five|six|seven|eight|nine|ten)\s+(?:big|main|key|major|core|critical)?\s*(?:ones|processes|workflows|areas)\b/i.test(
       cleaned,
     ) ||
-    /\bmove\s+on\s*(?:now|please)?[.!?]?$/i.test(cleaned)
-  ) {
-    return true;
+    /\b(?:processes|workflows|cadences|main ones|big ones|key ones|core areas)\s*(?:are|include|:)\b/i.test(
+      cleaned,
+    ) ||
+    /\b(?:we|my team|our team)\s+(?:manage|run|own|handle)\s*(?:the\s+)?(?:following|these|those)?\s*(?:processes|workflows|cadences|ones)?\s*[:,-]/i.test(
+      cleaned,
+    );
+  const names = new Set(extractProcessNames(cleaned));
+  if (listFraming) {
+    for (const candidate of extractPunctuationDelimitedProcessNames(cleaned)) {
+      names.add(candidate);
+    }
   }
-  return /\b(?:done|enough)\s+(?:with|about)\s+(?:this|that|it)\b/i.test(cleaned);
+  return unique(
+    [...names].filter((name) => !looksLikeEnumerationDescription(name)),
+  );
+}
+
+function looksLikeScopeChain(text: string) {
+  return (
+    /\bfrom\b[\s\S]{0,140}\bthrough\b/i.test(text) ||
+    /\bwhen\b[\s\S]{0,80}\b(?:order|invoice|request|ticket)\b[\s\S]{0,80}\b(?:comes|come)\s+in\b[\s\S]{0,80}\bthrough\b/i.test(
+      text,
+    ) ||
+    /\bgetting\s+it\b[\s\S]{0,80}\b(?:picked|shipped|invoiced)\b/i.test(text)
+  );
+}
+
+function extractPunctuationDelimitedProcessNames(text: string) {
+  return normalizeEnumerationText(text)
+    .split(/[.;]+/)
+    .flatMap((part) => part.split(/,(?=\s*(?:and\s+)?[a-z0-9])/i))
+    .map((item) =>
+      normalizeProcessName(
+        cleanPhrase(item)
+          .replace(
+            /^(?:(?:the\s+)?(?:\d+|two|three|four|five|six|seven|eight|nine|ten)\s+(?:big|main|key|major|core|critical)?\s*(?:ones|processes|workflows|areas)\s*[:,.-]?\s*)/i,
+            "",
+          )
+          .replace(/^(?:and|also|plus|including)\s+/i, ""),
+      ),
+    )
+    .filter((name) => isPlausibleDirectorProcessName(name));
+}
+
+function normalizeEnumerationText(text: string) {
+  return text
+    .replace(/\s+/g, " ")
+    .replace(/\b(?:and\s+)?(?:lastly|finally)\b/gi, ".")
+    .trim();
+}
+
+function looksLikeEnumerationDescription(name: string) {
+  return /^(?:taking|processing|getting|handling|working|making|keeping|looking|tracking|checking|matching|entering)\b/i.test(
+    name,
+  );
+}
+
+function processNameMatchScore(mention: string, candidate: string) {
+  const mentionNorm = normalizeCandidateProcessName(mention);
+  const candidateNorm = normalizeCandidateProcessName(candidate);
+  if (mentionNorm === candidateNorm) return 1;
+  const mentionTokens = candidateNameTokenSet(mention);
+  const candidateTokens = candidateNameTokenSet(candidate);
+  if (isTokenSubset(mentionTokens, candidateTokens)) {
+    return mentionTokens.size / candidateTokens.size >= 0.5 ? 0.92 : 0.78;
+  }
+  if (isTokenSubset(candidateTokens, mentionTokens)) return 0.86;
+  const overlap = [...mentionTokens].filter((token) => candidateTokens.has(token)).length;
+  const union = new Set([...mentionTokens, ...candidateTokens]).size;
+  return union === 0 ? 0 : overlap / union;
 }
 
 /**
@@ -963,6 +1152,7 @@ export function directorRequestedFocusSwitch(text: string): boolean {
 export function nextDirectorFocusCandidate(input: {
   candidateProcessNames: string[];
   expandedCandidateProcessNames?: string[];
+  softExcludedCandidateProcessNames?: string[];
   focusProcessName?: string;
 }): string | undefined {
   const excluded = new Set(
@@ -971,9 +1161,74 @@ export function nextDirectorFocusCandidate(input: {
   if (input.focusProcessName) {
     excluded.add(normalizeCandidateProcessName(input.focusProcessName));
   }
-  return input.candidateProcessNames.find(
-    (name) => !excluded.has(normalizeCandidateProcessName(name)),
+  const softExcluded = new Set(
+    (input.softExcludedCandidateProcessNames ?? []).map(normalizeCandidateProcessName),
   );
+  const freshTarget = input.candidateProcessNames.find((name) => {
+    const normalized = normalizeCandidateProcessName(name);
+    return !excluded.has(normalized) && !softExcluded.has(normalized);
+  });
+  return (
+    freshTarget ??
+    input.candidateProcessNames.find(
+      (name) => !excluded.has(normalizeCandidateProcessName(name)),
+    )
+  );
+}
+
+function focusSwitchFromUserIntentSignal(input: {
+  signal?: DirectorUserIntentSignal;
+  candidateProcessNames: string[];
+  expandedCandidateProcessNames?: string[];
+  recentlySelectedCandidateProcessNames?: string[];
+  focusProcessName?: string;
+}): { targetProcess: string; styleHint: string; reason: string } | undefined {
+  const signal = input.signal;
+  if (!signal) return undefined;
+  if (signal.action === "switch_focus_named") {
+    const target = signal.target_process
+      ? input.candidateProcessNames.find(
+          (name) =>
+            normalizeCandidateProcessName(name) ===
+            normalizeCandidateProcessName(signal.target_process!),
+        )
+      : undefined;
+    if (!target) return undefined;
+    return {
+      targetProcess: target,
+      styleHint: "named_focus_switch",
+      reason: `LLM user-intent classifier selected a named process switch: ${signal.reason}`,
+    };
+  }
+  if (signal.action !== "switch_focus_next") return undefined;
+  const target = nextDirectorFocusCandidate({
+    candidateProcessNames: input.candidateProcessNames,
+    expandedCandidateProcessNames: input.expandedCandidateProcessNames,
+    softExcludedCandidateProcessNames: input.recentlySelectedCandidateProcessNames,
+    focusProcessName: input.focusProcessName,
+  });
+  return target
+    ? {
+        targetProcess: target,
+        styleHint: "focus_switch",
+        reason: `LLM user-intent classifier selected a next-process switch: ${signal.reason}`,
+      }
+    : undefined;
+}
+
+function switchFocusCandidateToolCall(
+  targetProcess: string,
+  signal?: DirectorUserIntentSignal,
+): DirectorTurnPlan["tool_calls"][number] {
+  return {
+    name: "switchFocusCandidate",
+    arguments: {
+      targetProcess,
+      userIntentAction: signal?.action,
+      confidence: signal?.confidence,
+      reason: signal?.reason,
+    },
+  };
 }
 
 /**
@@ -997,7 +1252,65 @@ export function withFocusSwitchCandidate(
   const target = candidateSummaries.find(
     (candidate) => normalizeCandidateProcessName(candidate.proposedName) === targetName,
   );
-  return target ? { ...plan, focus_candidate_process_id: target.id } : plan;
+  if (!target) return plan;
+  return {
+    ...plan,
+    focus_candidate_process_id: target.id,
+    tool_calls: plan.tool_calls.map((tool) =>
+      tool.name === "switchFocusCandidate"
+        ? {
+            ...tool,
+            arguments: {
+              ...tool.arguments,
+              candidateProcessId: target.id,
+              targetProcess: target.proposedName,
+            },
+          }
+        : tool,
+    ),
+  };
+}
+
+function alignDirectorPlanTargetsToFocus(
+  plan: DirectorTurnPlan,
+  focusProcessName?: string,
+): DirectorTurnPlan {
+  if (!focusProcessName) return plan;
+  return {
+    ...plan,
+    chosen_intent: alignDirectorIntentTargetToFocus(
+      plan.chosen_intent,
+      focusProcessName,
+    ),
+    ranked_intents: plan.ranked_intents.map((intent) =>
+      alignDirectorIntentTargetToFocus(intent, focusProcessName),
+    ),
+  };
+}
+
+function alignDirectorIntentTargetToFocus(
+  intent: DirectorIntent,
+  focusProcessName: string,
+): DirectorIntent {
+  if (!directorIntentScopesToFocusProcess(intent)) return intent;
+  if (
+    intent.target_process &&
+    normalizeCandidateProcessName(intent.target_process) ===
+      normalizeCandidateProcessName(focusProcessName)
+  ) {
+    return intent;
+  }
+  return {
+    ...intent,
+    target_process: focusProcessName,
+  };
+}
+
+function directorIntentScopesToFocusProcess(intent: DirectorIntent) {
+  if (intent.intent === "select_process_to_expand") return false;
+  if (intent.intent === "open_questions_closeout") return true;
+  if (!intent.target_slot) return false;
+  return !["function.name", "process.inventory"].includes(intent.target_slot);
 }
 
 /**
@@ -1045,7 +1358,9 @@ export function nonAuthoritativeDirectorSteeringPlan(
     ...plan,
     claims: [],
     slot_updates: [],
-    tool_calls: [],
+    tool_calls: plan.tool_calls.filter(
+      (tool) => tool.name === "switchFocusCandidate",
+    ),
   };
 }
 
@@ -1514,7 +1829,13 @@ function preferIncomingCandidate(
 
 function processNamesFromInventoryValue(value: unknown): string[] {
   if (typeof value === "string") return splitProcessList(value);
-  if (Array.isArray(value)) return value.flatMap(processNamesFromInventoryValue);
+  if (Array.isArray(value)) {
+    return value.flatMap((item) =>
+      typeof item === "string"
+        ? [normalizeProcessName(item)].filter(isPlausibleDirectorProcessName)
+        : processNamesFromInventoryValue(item),
+    );
+  }
   if (!value || typeof value !== "object") return [];
   const record = value as Record<string, unknown>;
   const listValue =
@@ -1871,6 +2192,29 @@ export async function dispatchDirectorTurnPlan(
       { candidateProcessId: state.focusCandidateProcessId },
       tx,
     );
+    const promptingContext = await readExtractionPromptingContext(
+      context,
+      {
+        extractionWindowId: input.extractionWindowId,
+        turnIndex: input.turnIndex,
+      },
+      tx,
+    );
+    const currentExplicitEnumerationNames = extractExplicitProcessEnumerationNames(
+      input.latestUtterance,
+    );
+    const storedInventoryNames = inventoryNamesFromValue(
+      currentSlotsBeforeDispatch.get("process.inventory")?.value,
+    );
+    const enumeratedRepairNames = unique([
+      ...storedInventoryNames,
+      ...promptingContext.enumeratedProcessNames,
+      ...currentExplicitEnumerationNames,
+    ]);
+    const legacyNoWindowInventoryGate =
+      !input.extractionWindowId &&
+      (state.currentPhase === "inventory" ||
+        state.priorIntent === "discover_processes");
     const candidateProcessIds: string[] = [];
     const candidateProcessIdsByName = new Map<string, string>();
     const toolExecutionLog: DirectorToolExecutionLog[] = [];
@@ -1973,19 +2317,16 @@ export async function dispatchDirectorTurnPlan(
       );
     }
 
-    // Candidate minting is gated on pre-existing conversation state — the
-    // phase recorded before this extraction ran, or the probe the agent asked
-    // in the previous turn targeting process.inventory (discover_processes).
-    // Deliberately NOT the current plan's own slot updates or utterance_type:
-    // a bad scope answer could self-authorize by emitting a bad inventory
-    // slot update. On gated turns names may still merge into existing
-    // candidates (recordProcess token-subset reconciliation) but never mint
-    // new ones — that kills scope-sentence sub-steps ("picked, shipped, and
-    // invoiced") and ownership answers ("we manage all of it").
-    const allowCandidateMinting =
-      state.currentPhase === "inventory" ||
-      state.priorIntent === "discover_processes";
-    if (!allowCandidateMinting) {
+    // Candidate minting is gated on the prompt the director actually answered,
+    // not interview_state.priorIntent (respond advances that before extraction).
+    // Explicit director enumerations are also allowed, covering users who dump
+    // the whole list in the opening orient answer. Later single-name repairs are
+    // handled per recordProcess call below and do not authorize inventory slots.
+    const allowInventoryCandidateMinting =
+      promptingContext.promptingIntent === "discover_processes" ||
+      currentExplicitEnumerationNames.length >= 2 ||
+      legacyNoWindowInventoryGate;
+    if (!allowInventoryCandidateMinting) {
       // The gate must close both candidate sources: recordProcess inserts
       // (below) AND process.inventory slot updates — otherwise a gated scope
       // answer still writes its junk names into slot_states and marks the
@@ -2002,6 +2343,13 @@ export async function dispatchDirectorTurnPlan(
       if (processTool.name !== "recordProcess") continue;
       const args = processTool.arguments;
       const processName = stringArg(args.name);
+      const canonicalRepairName = canonicalEnumeratedProcessName(
+        processName,
+        enumeratedRepairNames,
+      );
+      const candidateNameToWrite = canonicalRepairName ?? processName;
+      const allowNewCandidate =
+        allowInventoryCandidateMinting || Boolean(canonicalRepairName);
       if (!isPlausibleDirectorProcessName(processName)) {
         degradedQuality = true;
         degradedReasons.add("invalid_process_name");
@@ -2024,6 +2372,7 @@ export async function dispatchDirectorTurnPlan(
         );
         continue;
       }
+      const processNameToRecord = candidateNameToWrite ?? processName;
       const toolStarted = Date.now();
       // Materialized calls carry per-candidate evidence (possibly unioned
       // across collapsed members); honor it, filtered to the turn's allowed
@@ -2035,14 +2384,14 @@ export async function dispatchDirectorTurnPlan(
       const candidate = await recordProcess(
         context,
         {
-          name: normalizeProcessName(processName),
+          name: normalizeProcessName(processNameToRecord),
           proposedFunction: stringArg(args.proposedFunction),
           frequency: stringArg(args.frequency),
           complexityHint: stringArg(args.complexityHint),
           confidence: numberArg(args.confidence) ?? 0.74,
           evidenceIds:
             toolEvidenceIds.length > 0 ? toolEvidenceIds : input.evidenceIds,
-          allowNewCandidate: allowCandidateMinting,
+          allowNewCandidate,
         },
         { tx },
       );
@@ -2058,7 +2407,7 @@ export async function dispatchDirectorTurnPlan(
           {
             taskType: "low_confidence_claim",
             title: "Review skipped director process candidate",
-            description: allowCandidateMinting
+            description: allowNewCandidate
               ? "A proposed process name matched a junk-name pattern and was not recorded."
               : "Candidate minting is gated to inventory-enumeration turns; the name had no existing candidate to merge into.",
             targetType: "capture_session",
@@ -2067,7 +2416,7 @@ export async function dispatchDirectorTurnPlan(
             contextJson: {
               proposed_name: processName,
               evidence_ids: input.evidenceIds,
-              minting_gate_open: allowCandidateMinting,
+              minting_gate_open: allowNewCandidate,
             },
           },
           { tx },
@@ -2125,6 +2474,30 @@ export async function dispatchDirectorTurnPlan(
         },
         { tx },
       );
+    }
+    for (const [toolIndex, tool] of plan.tool_calls.entries()) {
+      if (tool.name !== "switchFocusCandidate") continue;
+      const requestedCandidateId = stringArg(tool.arguments.candidateProcessId);
+      const succeeded =
+        Boolean(requestedCandidateId) && requestedCandidateId === activeCandidateId;
+      toolExecutionLog.push(
+        directorToolExecutionLogEntry({
+          input,
+          toolIndex,
+          toolName: tool.name,
+          toolArguments: tool.arguments,
+          targetCandidateId: requestedCandidateId,
+          status: succeeded ? "succeeded" : "failed",
+          startedAtMs: Date.now(),
+          error: succeeded
+            ? undefined
+            : new Error("switchFocusCandidate did not resolve to the active focus candidate."),
+        }),
+      );
+      if (!succeeded) {
+        degradedQuality = true;
+        degradedReasons.add("invalid_focus_candidate");
+      }
     }
 
     for (const tool of plan.tool_calls) {
@@ -2417,6 +2790,10 @@ export async function dispatchDirectorTurnPlan(
         ),
       );
     }
+    const hasNewSlotCoverage = hasMeaningfulNewSlotCoverage(
+      currentSlotsBeforeDispatch,
+      plan.slot_updates,
+    );
     if (advanceConversationState) {
       await writeInterviewState(
         context,
@@ -2428,12 +2805,7 @@ export async function dispatchDirectorTurnPlan(
             ? state.lowInfoTurnCount + 1
             : 0,
           lastNewSlotTurnIndex:
-            hasMeaningfulNewSlotCoverage(
-              currentSlotsBeforeDispatch,
-              plan.slot_updates,
-            )
-              ? input.turnIndex
-              : state.lastNewSlotTurnIndex,
+            hasNewSlotCoverage ? input.turnIndex : state.lastNewSlotTurnIndex,
           phaseHistory: appendPhaseHistory(state.phaseHistory, {
             turn_index: input.turnIndex,
             from: state.currentPhase,
@@ -2466,6 +2838,19 @@ export async function dispatchDirectorTurnPlan(
                   tx,
                 )
             : undefined,
+        },
+        tx,
+      );
+    } else if (hasNewSlotCoverage) {
+      await writeInterviewState(
+        context,
+        {
+          currentPhase: state.currentPhase,
+          focusCandidateProcessId: state.focusCandidateProcessId,
+          priorIntent: state.priorIntent,
+          lowInfoTurnCount: state.lowInfoTurnCount,
+          lastNewSlotTurnIndex: input.turnIndex,
+          phaseHistory: state.phaseHistory,
         },
         tx,
       );
@@ -2630,7 +3015,10 @@ export async function upsertDirectorExtractionWindow(input: {
             closedAt: input.closedAt ?? now,
             closedBy: input.closedBy ?? "assistant_spoke",
             status: input.status ?? "pending",
-            metadataJson: input.metadataJson ?? {},
+            metadataJson:
+              input.metadataJson === undefined
+                ? directorExtractionWindows.metadataJson
+                : input.metadataJson,
             updatedAt: now,
           },
         })
@@ -3288,9 +3676,10 @@ slot_updates[] fields:
 claims[] fields:
 - subject_type, subject_id, field, value, confidence, evidence_ids, metadata.
 tool_calls[] fields:
-- name: recordProcess, recordSystem, recordPerson, recordPainPoint, recordSpof, recordCandidateProcessClaim, updateSlotState, createFollowUpTask.
+- name: recordProcess, switchFocusCandidate, recordSystem, recordPerson, recordPainPoint, recordSpof, recordCandidateProcessClaim, updateSlotState, createFollowUpTask.
 - arguments: JSON object matching the tool name.
 - Use recordProcess whenever the director names candidate processes in process.inventory. Do not represent new process names as recordCandidateProcessClaim(proposed_name).
+- Use switchFocusCandidate when the LLM user-intent classifier selects a validated existing candidate process to focus next.
 - Use recordCandidateProcessClaim only for long-tail facts about a process that already has a known candidate_process id or targetProcess name; include targetProcess, field, value, and optional confidence.
 - Never invent candidate_process ids, process ids, or evidence ids. Never use an evidence id as a claim subject_id.
 Allowed claim fields:
@@ -3341,9 +3730,10 @@ slot_updates[] fields:
 claims[] fields:
 - subject_type, subject_id, field, value, confidence, evidence_ids, metadata.
 tool_calls[] fields:
-- name: recordProcess, recordSystem, recordPerson, recordPainPoint, recordSpof, recordCandidateProcessClaim, updateSlotState, createFollowUpTask.
+- name: recordProcess, switchFocusCandidate, recordSystem, recordPerson, recordPainPoint, recordSpof, recordCandidateProcessClaim, updateSlotState, createFollowUpTask.
 - arguments: JSON object matching the tool name.
 - Use recordProcess whenever the director names candidate processes in process.inventory. Do not represent new process names as recordCandidateProcessClaim(proposed_name).
+- Use switchFocusCandidate when the LLM user-intent classifier selects a validated existing candidate process to focus next.
 - Use recordCandidateProcessClaim only for long-tail facts about a process that already has a known candidate_process id or targetProcess name; include targetProcess, field, value, and optional confidence.
 - Never invent candidate_process ids, process ids, or evidence ids. Never use an evidence id as a claim subject_id.
 Allowed claim fields:
@@ -3818,6 +4208,11 @@ async function explicitCandidateProcessIdForTool(
       normalizeCandidateProcessName(targetProcessName),
     );
     if (createdCandidateId) return createdCandidateId;
+    const relatedCreatedCandidateId = relatedCandidateProcessIdByName(
+      targetProcessName,
+      candidateProcessIdsByName,
+    );
+    if (relatedCreatedCandidateId) return relatedCreatedCandidateId;
     const existingCandidateId = await candidateProcessIdByName(
       context,
       targetProcessName,
@@ -3827,6 +4222,24 @@ async function explicitCandidateProcessIdForTool(
   }
 
   return undefined;
+}
+
+function relatedCandidateProcessIdByName(
+  processName: string,
+  candidateProcessIdsByName: Map<string, string>,
+) {
+  const matches = [...candidateProcessIdsByName.entries()]
+    .map(([candidateName, candidateId]) => ({
+      candidateId,
+      score: processNameMatchScore(processName, candidateName),
+    }))
+    .filter((match) => match.score >= 0.72)
+    .sort((a, b) => b.score - a.score);
+  if (matches.length === 0) return undefined;
+  if (matches[1] && matches[0].score - matches[1].score < 0.15) {
+    return undefined;
+  }
+  return matches[0].candidateId;
 }
 
 async function candidateProcessIdForTool(
@@ -3851,7 +4264,7 @@ async function candidateProcessIdByName(
   processName: string,
   tx: ClaimWriteTx,
 ) {
-  const rows = await tx.execute<{ id: string }>(sql`
+  const exactRows = await tx.execute<{ id: string }>(sql`
     SELECT id
     FROM candidate_processes
     WHERE org_id = ${context.orgId}
@@ -3862,7 +4275,29 @@ async function candidateProcessIdByName(
     ORDER BY created_at DESC
     LIMIT 1
   `);
-  return rows.rows[0]?.id;
+  if (exactRows.rows[0]?.id) return exactRows.rows[0].id;
+
+  const relatedRows = await tx.execute<{ id: string; proposed_name: string }>(sql`
+    SELECT id, proposed_name
+    FROM candidate_processes
+    WHERE org_id = ${context.orgId}
+      AND workspace_id = ${context.workspaceId}
+      AND capture_session_id = ${context.captureSessionId}
+      AND status = 'pending'
+    ORDER BY created_at DESC
+  `);
+  const matches = relatedRows.rows
+    .map((row) => ({
+      id: row.id,
+      score: processNameMatchScore(processName, row.proposed_name),
+    }))
+    .filter((match) => match.score >= 0.72)
+    .sort((a, b) => b.score - a.score);
+  if (matches.length === 0) return undefined;
+  if (matches[1] && matches[0].score - matches[1].score < 0.15) {
+    return undefined;
+  }
+  return matches[0].id;
 }
 
 function normalizeCandidateProcessName(processName: string) {
@@ -3887,9 +4322,7 @@ async function recordCandidateProcessClaimFromTool(
   if (rawValue === undefined) {
     throw new Error("recordCandidateProcessClaim requires a value.");
   }
-  // F2: free-text SPOF risks rewrite to the canonical recordSpof shape so the
-  // overview SPOF metric can match them.
-  const value = field === "risk" ? normalizeRiskClaimValue(rawValue) : rawValue;
+  const value = normalizeDirectorCandidateClaimValue(field, rawValue);
   const claim = {
     subject_type: "candidate_process",
     subject_id: candidateProcessId,
@@ -3932,6 +4365,51 @@ async function recordCandidateProcessClaimFromTool(
     route: "director-tool/record-candidate-process-claim",
     metadata: claim.metadata,
   });
+}
+
+function normalizeDirectorCandidateClaimValue(field: string, value: unknown) {
+  if (field === "risk") return normalizeRiskClaimValue(value);
+  if (field === "proposed_name" && typeof value === "string" && value.trim()) {
+    return normalizeProcessName(value);
+  }
+  if (
+    (field === "kpi" ||
+      field === "upstream_dependency" ||
+      field === "downstream_dependency") &&
+    typeof value === "string" &&
+    value.trim()
+  ) {
+    return { name: normalizeNamedClaimText(value, field) };
+  }
+  if (
+    (field === "kpi" ||
+      field === "upstream_dependency" ||
+      field === "downstream_dependency") &&
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value)
+  ) {
+    const record = value as Record<string, unknown>;
+    const name = stringArg(record.name);
+    if (name) {
+      return {
+        ...record,
+        name: normalizeNamedClaimText(name, field),
+      };
+    }
+  }
+  return value;
+}
+
+function normalizeNamedClaimText(value: string, field: string) {
+  let cleaned = value
+    .replace(/\s*\([^)]*\)\s*/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (field === "upstream_dependency" || field === "downstream_dependency") {
+    cleaned = cleaned.replace(/\b(?:team|department|group)\b$/i, "").trim();
+  }
+  return cleaned;
 }
 
 type DirectorPlanClaim = DirectorTurnPlan["claims"][number];
@@ -4026,8 +4504,7 @@ async function dispatchPlanClaims(
       );
       continue;
     }
-    // F2: free-text SPOF risks rewrite to the canonical recordSpof shape.
-    let value = claim.field === "risk" ? normalizeRiskClaimValue(claim.value) : claim.value;
+    let value = normalizeDirectorCandidateClaimValue(claim.field, claim.value);
     // F3: works_on links must carry a session candidate id — the extractor
     // emits shapes like {"process": "Order intake"} which the people_count
     // join cannot use. Resolve the name; drop with a retry task when no
@@ -4810,13 +5287,28 @@ async function applyDirectorController(
     : rankedIntents.find((candidate) => candidate.intent === plan.chosen_intent.intent) ??
       rankedIntents[0] ??
       intent("playback_summary", undefined, 100, "No probe is currently eligible.");
+  const focusProcessName = candidateSummaries.find(
+    (candidate) => candidate.id === state.focusCandidateProcessId,
+  )?.proposedName;
+  const coreCoveredCandidateNames = await readCoreCoveredCandidateNames(context);
+  const projectedCoreCoveredCandidateNames =
+    focusProcessName && directorCoreCoverageComplete(currentSlots, slotUpdates)
+      ? unique([...coreCoveredCandidateNames, focusProcessName])
+      : coreCoveredCandidateNames;
+  const coreRotationIntent = coreCoverageRotationIntent({
+    currentSlots,
+    slotUpdates,
+    candidateProcessNames: candidateSummaries.map((candidate) => candidate.proposedName),
+    expandedCandidateProcessNames: projectedCoreCoveredCandidateNames,
+    focusProcessName,
+  });
   const { chosenIntent, rankedIntents: phaseRankedIntents } = selectPhaseGatedDirectorIntent(
     gatedPhase,
     currentSlots,
     candidateSummaries,
     slotUpdates,
     rankedIntents,
-    requestedIntent,
+    coreRotationIntent ?? requestedIntent,
   );
 
   return withControllerPlannedUtterance(plan, {
@@ -4952,12 +5444,7 @@ export function gateDirectorPhase(
     plan.tool_calls.some((tool) => tool.name === "recordProcess") ||
     slotCoveredForPhase("process.inventory", currentSlots, slotUpdates, true);
   if (!hasInventory) return "inventory";
-  const coreSlots: string[] = [
-    "scope.boundaries",
-    "ownership.roles",
-    "systems.systems_of_record",
-  ];
-  if (!coreSlots.every((slot) => slotCoveredForPhase(slot, currentSlots, slotUpdates))) {
+  if (missingDirectorCoreSlot(currentSlots, slotUpdates)) {
     return "expand";
   }
   return plan.proposed_next_phase;
@@ -4977,6 +5464,49 @@ function slotCoveredForPhase(
     status === "filled" ||
     status === "asked_unknown" ||
     (allowPartial && status === "partial")
+  );
+}
+
+function missingDirectorCoreSlot(
+  currentSlots: Map<string, { status: string; confidence: string | number | null }>,
+  slotUpdates: DirectorTurnPlan["slot_updates"],
+) {
+  return directorCoreCoverageSlotPaths.find(
+    (slotPath) => !slotCoveredForPhase(slotPath, currentSlots, slotUpdates),
+  );
+}
+
+function directorCoreCoverageComplete(
+  currentSlots: Map<string, { status: string; confidence: string | number | null }>,
+  slotUpdates: DirectorTurnPlan["slot_updates"],
+) {
+  return missingDirectorCoreSlot(currentSlots, slotUpdates) === undefined;
+}
+
+function coreCoverageRotationIntent(input: {
+  currentSlots: Map<string, { status: string; confidence: string | number | null }>;
+  slotUpdates: DirectorTurnPlan["slot_updates"];
+  candidateProcessNames: string[];
+  expandedCandidateProcessNames?: string[];
+  focusProcessName?: string;
+}) {
+  if (!input.focusProcessName) return undefined;
+  if (!directorCoreCoverageComplete(input.currentSlots, input.slotUpdates)) {
+    return undefined;
+  }
+  const rotationTarget = nextDirectorFocusCandidate({
+    candidateProcessNames: input.candidateProcessNames,
+    expandedCandidateProcessNames: input.expandedCandidateProcessNames,
+    focusProcessName: input.focusProcessName,
+  });
+  if (!rotationTarget) return undefined;
+  return intent(
+    "select_process_to_expand",
+    "scope.boundaries",
+    1350,
+    "The focus process has core coverage; rotate to another process before asking non-core enrichment questions.",
+    rotationTarget,
+    "core_coverage_rotation",
   );
 }
 
@@ -5030,10 +5560,13 @@ function phaseAllowsIntent(phase: DirectorInterviewPhase, candidate: DirectorInt
       "capture_owner_roles",
       "capture_systems",
       "quantify_frequency_volume",
+      "capture_friction",
+      "capture_risk_spof",
       "reconcile_conflict",
       "clarify_previous_question",
     ],
     enrich: [
+      "select_process_to_expand",
       "capture_dependencies",
       "capture_handoffs",
       "capture_metrics",
@@ -5091,20 +5624,13 @@ function phaseRepairIntent(
     return intent("discover_processes", "process.inventory", 1300, "Phase gate requires a process inventory before selecting one to expand.");
   }
   if (phase === "expand") {
-    const coreSlots = [
-      "scope.boundaries",
-      "ownership.roles",
-      "systems.systems_of_record",
-    ];
-    const missingCoreSlot = coreSlots.find(
-      (slotPath) => !slotCoveredForPhase(slotPath, currentSlots, slotUpdates),
-    );
+    const missingCoreSlot = missingDirectorCoreSlot(currentSlots, slotUpdates);
     if (missingCoreSlot) {
       return intent(
         intentNameForSlot(missingCoreSlot),
         missingCoreSlot,
         1300,
-        "Phase gate requires core process coverage before enrichment or closeout.",
+        "Phase gate requires complete core process coverage before non-core enrichment.",
         targetProcess,
       );
     }
@@ -5410,6 +5936,83 @@ async function readPendingDirectorExtractionWindows(
   return { turnIndexes: [...turnIndexes], slotPaths: [...slotPaths] };
 }
 
+async function readExtractionPromptingContext(
+  context: DirectorToolContext,
+  input: { extractionWindowId?: string; turnIndex: number },
+  tx: ClaimWriteTx,
+): Promise<{ promptingIntent?: string; enumeratedProcessNames: string[] }> {
+  const rows = await tx
+    .select({
+      metadataJson: directorExtractionWindows.metadataJson,
+    })
+    .from(directorExtractionWindows)
+    .where(
+      and(
+        eq(directorExtractionWindows.orgId, context.orgId),
+        eq(directorExtractionWindows.workspaceId, context.workspaceId),
+        eq(directorExtractionWindows.captureSessionId, context.captureSessionId),
+        input.extractionWindowId
+          ? eq(directorExtractionWindows.extractionWindowId, input.extractionWindowId)
+          : eq(directorExtractionWindows.turnIndex, input.turnIndex),
+      ),
+    )
+    .orderBy(desc(directorExtractionWindows.updatedAt))
+    .limit(1);
+  const metadata =
+    rows[0]?.metadataJson && typeof rows[0].metadataJson === "object"
+      ? (rows[0].metadataJson as Record<string, unknown>)
+      : undefined;
+  const steering =
+    metadata?.steering_context && typeof metadata.steering_context === "object"
+      ? (metadata.steering_context as Record<string, unknown>)
+      : undefined;
+  return {
+    promptingIntent:
+      typeof steering?.last_spoken_intent === "string"
+        ? steering.last_spoken_intent
+        : undefined,
+    enumeratedProcessNames: Array.isArray(metadata?.enumerated_process_names)
+      ? metadata.enumerated_process_names.filter(
+          (name): name is string => typeof name === "string" && name.trim().length > 0,
+        )
+      : [],
+  };
+}
+
+function inventoryNamesFromValue(value: unknown): string[] {
+  if (!value || typeof value !== "object") return [];
+  const record = value as Record<string, unknown>;
+  const arrays = [
+    record.processes,
+    record.candidate_processes,
+    record.newly_mentioned,
+  ];
+  return unique(
+    arrays.flatMap((candidate) =>
+      Array.isArray(candidate)
+        ? candidate
+            .filter((name): name is string => typeof name === "string")
+            .map(normalizeProcessName)
+            .filter(isPlausibleDirectorProcessName)
+        : [],
+    ),
+  );
+}
+
+function canonicalEnumeratedProcessName(
+  processName: string | undefined,
+  enumeratedNames: string[],
+) {
+  if (!processName || enumeratedNames.length === 0) return undefined;
+  const matches = enumeratedNames
+    .map((name) => ({ name, score: processNameMatchScore(processName, name) }))
+    .filter((match) => match.score >= 0.78)
+    .sort((a, b) => b.score - a.score);
+  if (matches.length === 0) return undefined;
+  if (matches[1] && matches[0].score - matches[1].score < 0.15) return undefined;
+  return matches[0].name;
+}
+
 function bumpProbeSummary(
   summaries: Map<string, ProbeFiringSummary>,
   key: string,
@@ -5698,6 +6301,10 @@ export function deterministicTurnPlan(input: {
   focusProcessName?: string;
   /** Candidates a probe has already targeted this session, for rotation (F1). */
   expandedCandidateProcessNames?: string[];
+  /** Candidates recently offered as focus targets; skipped first for explicit switch requests. */
+  recentlySelectedCandidateProcessNames?: string[];
+  /** LLM-classified director control intent for this latest user message. */
+  userIntentSignal?: DirectorUserIntentSignal;
 }): DirectorTurnPlan {
   const slotUpdates: Array<{
     slot_path: string;
@@ -5982,6 +6589,7 @@ export function deterministicTurnPlan(input: {
       unknownSlot,
       conflictingSlot,
       lowInfoTurnCount: input.lowInfoTurnCount ?? 0,
+      slotUpdates,
     }),
     {
       probeFiringSummaries: input.probeFiringSummaries,
@@ -5993,43 +6601,69 @@ export function deterministicTurnPlan(input: {
       expandedCandidateProcessNames: input.expandedCandidateProcessNames,
     },
   );
-  // F1a: an explicit "ask me about the other processes" / "move on" overrides
-  // slot-coverage probing — rotate focus to the next untouched candidate. This
-  // returns before the forced-closeout check so repeated switch requests
-  // (which classify as low-information turns) cannot push the interview into
-  // closeout instead of honoring the request.
-  if (directorRequestedFocusSwitch(text)) {
-    const switchTarget = nextDirectorFocusCandidate({
-      candidateProcessNames: input.candidateProcessNames,
-      expandedCandidateProcessNames: input.expandedCandidateProcessNames,
-      focusProcessName: input.focusProcessName,
-    });
-    if (switchTarget) {
-      const switchIntent = intent(
-        "select_process_to_expand",
-        "scope.boundaries",
-        1500,
-        "The director asked to move to another process; rotating focus.",
-        switchTarget,
-        "focus_switch",
-      );
-      const plan = {
-        utterance_type: utteranceType,
-        slot_updates: slotUpdates,
-        claims: [],
-        tool_calls: toolCalls,
-        contradiction_signals: contradictionSignals(utteranceType, text),
-        current_phase: currentPhase,
-        proposed_next_phase: "expand" as const,
-        phase_transition_ready: currentPhase !== "expand",
-        ranked_intents: ensureIntentRanked(switchIntent, rankedIntents),
-        chosen_intent: switchIntent,
-      };
-      return {
-        ...plan,
-        planned_agent_utterance: deterministicPhrase(plan),
-      };
-    }
+  const userIntentFocusSwitch = focusSwitchFromUserIntentSignal({
+    signal: input.userIntentSignal,
+    candidateProcessNames: input.candidateProcessNames,
+    expandedCandidateProcessNames: input.expandedCandidateProcessNames,
+    recentlySelectedCandidateProcessNames: input.recentlySelectedCandidateProcessNames,
+    focusProcessName: input.focusProcessName,
+  });
+  if (userIntentFocusSwitch) {
+    const namedSwitchIntent = intent(
+      "select_process_to_expand",
+      "scope.boundaries",
+      userIntentFocusSwitch.styleHint === "named_focus_switch" ? 1600 : 1500,
+      userIntentFocusSwitch.reason,
+      userIntentFocusSwitch.targetProcess,
+      userIntentFocusSwitch.styleHint,
+    );
+    const plan = {
+      utterance_type: utteranceType,
+      slot_updates: slotUpdates,
+      claims: [],
+      tool_calls: [
+        ...toolCalls,
+        switchFocusCandidateToolCall(
+          userIntentFocusSwitch.targetProcess,
+          input.userIntentSignal,
+        ),
+      ],
+      contradiction_signals: contradictionSignals(utteranceType, text),
+      current_phase: currentPhase,
+      proposed_next_phase: "expand" as const,
+      phase_transition_ready: currentPhase !== "expand",
+      ranked_intents: ensureIntentRanked(namedSwitchIntent, rankedIntents),
+      chosen_intent: namedSwitchIntent,
+    };
+    return {
+      ...plan,
+      planned_agent_utterance: deterministicPhrase(plan),
+    };
+  }
+  const coreRotationIntent = coreCoverageRotationIntent({
+    currentSlots: input.currentSlots,
+    slotUpdates,
+    candidateProcessNames: input.candidateProcessNames,
+    expandedCandidateProcessNames: input.expandedCandidateProcessNames,
+    focusProcessName: input.focusProcessName,
+  });
+  if (coreRotationIntent) {
+    const plan = {
+      utterance_type: utteranceType,
+      slot_updates: slotUpdates,
+      claims: [],
+      tool_calls: toolCalls,
+      contradiction_signals: contradictionSignals(utteranceType, text),
+      current_phase: currentPhase,
+      proposed_next_phase: "expand" as const,
+      phase_transition_ready: currentPhase !== "expand",
+      ranked_intents: ensureIntentRanked(coreRotationIntent, rankedIntents),
+      chosen_intent: coreRotationIntent,
+    };
+    return {
+      ...plan,
+      planned_agent_utterance: deterministicPhrase(plan),
+    };
   }
   const forceCloseout = shouldForceDirectorCloseout({
     utteranceType,
@@ -6304,7 +6938,9 @@ function chooseFocusProcess(
   knownProcesses: string[],
   text: string,
 ) {
-  const allProcesses = [...extractedProcesses, ...knownProcesses];
+  const allProcesses = unique([...extractedProcesses, ...knownProcesses]);
+  const factTarget = strongestFactTargetProcess(allProcesses, text);
+  if (factTarget) return factTarget;
   const explicitlyMentioned = knownProcesses.find((processName) =>
     new RegExp(`\\b${escapeRegExp(processName)}\\b`, "i").test(text),
   );
@@ -6315,6 +6951,37 @@ function chooseFocusProcess(
     ).test(text),
   );
   return explicitPain ?? extractedProcesses[0] ?? explicitlyMentioned ?? knownProcesses[0];
+}
+
+function strongestFactTargetProcess(processNames: string[], text: string) {
+  const scored = processNames
+    .map((processName) => {
+      const escaped = escapeRegExp(processName);
+      const mentions = [...text.matchAll(new RegExp(`\\b${escaped}\\b`, "gi"))].length;
+      let score = mentions;
+      if (
+        new RegExp(
+          `\\b${escaped}\\b[^.]{0,100}\\b(?:painful|manual|slow|delay|bottleneck|break|stuck|cleanup|tracked by|measured by|metric|kpi|gets? pulled in)\\b`,
+          "i",
+        ).test(text)
+      ) {
+        score += 3;
+      }
+      if (
+        new RegExp(
+          `\\b(?:tracked by|measured by|metric|kpi|because|when)\\b[^.]{0,100}\\b${escaped}\\b`,
+          "i",
+        ).test(text)
+      ) {
+        score += 2;
+      }
+      return { processName, score };
+    })
+    .filter((candidate) => candidate.score > 0)
+    .sort((a, b) => b.score - a.score);
+  if (scored.length === 0) return undefined;
+  if (scored[1] && scored[0].score === scored[1].score) return undefined;
+  return scored[0].processName;
 }
 
 function hasBoundarySignal(text: string) {
@@ -6425,7 +7092,7 @@ function chooseNextPhase(input: {
   functionName?: string;
   processNames: string[];
   candidateProcessNames: string[];
-  slotUpdates: Array<{ slot_path: string }>;
+  slotUpdates: DirectorTurnPlan["slot_updates"];
 }): DirectorInterviewPhase {
   if (isLowInfoUtterance(input.utteranceType)) return input.currentPhase;
   const hasFunction =
@@ -6440,7 +7107,10 @@ function chooseNextPhase(input: {
   if (!hasFunction) return "orient";
   if (!hasInventory) return "inventory";
   if (input.currentPhase === "orient" || input.currentPhase === "inventory") return "expand";
-  if (input.currentPhase === "expand" && hasSlot(input.currentSlots, "scope.boundaries")) {
+  if (
+    input.currentPhase === "expand" &&
+    directorCoreCoverageComplete(input.currentSlots, input.slotUpdates)
+  ) {
     return "enrich";
   }
   return input.currentPhase;
@@ -6458,6 +7128,7 @@ function deterministicIntents(input: {
   unknownSlot?: string;
   conflictingSlot?: string;
   lowInfoTurnCount: number;
+  slotUpdates: DirectorTurnPlan["slot_updates"];
 }) {
   if (input.utteranceType === "greeting") {
     return [
@@ -6567,6 +7238,20 @@ function deterministicIntents(input: {
       intent("discover_function", "function.name", 700, "Function context may need refinement."),
     ];
   }
+  const missingCoreSlots = directorCoreCoverageSlotPaths.filter(
+    (slotPath) => !slotCoveredForPhase(slotPath, input.currentSlots, input.slotUpdates),
+  );
+  if (missingCoreSlots.length > 0) {
+    return missingCoreSlots.map((slotPath, index) =>
+      intent(
+        intentNameForSlot(slotPath),
+        slotPath,
+        1300 - index * 25 + slotPriority(slotPath) / 100,
+        "Complete core process coverage before asking non-core enrichment questions.",
+        input.focusProcess,
+      ),
+    );
+  }
   const ranked = directorSlotDefinitions
     .map((definition) => {
       const state = input.currentSlots.get(definition.path);
@@ -6614,13 +7299,10 @@ function metaContinuationIntent(input: {
     );
   }
   if (input.currentPhase === "expand") {
-    const coreSlots = [
-      "scope.boundaries",
-      "ownership.roles",
-      "systems.systems_of_record",
-    ];
     const missingCoreSlot =
-      coreSlots.find((slotPath) => !hasSlot(input.currentSlots, slotPath)) ??
+      directorCoreCoverageSlotPaths.find(
+        (slotPath) => !hasSlot(input.currentSlots, slotPath),
+      ) ??
       "scope.boundaries";
     return intent(
       target ? intentNameForSlot(missingCoreSlot) : "select_process_to_expand",
@@ -6997,6 +7679,7 @@ function uniqueStrings(values: string[]) {
 }
 
 export function voiceMetadataDegrades(metadata: DirectorModelMetadata) {
+  if (metadata.reason === "required_target_phrase") return false;
   return metadata.mocked === true || metadata.utterance_source === "deterministic_phrase_fallback";
 }
 

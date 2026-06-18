@@ -8,7 +8,9 @@ import {
   consecutivePriorIntentFirings,
   deterministicTurnPlan,
   directorIntentDirective,
-  directorRequestedFocusSwitch,
+  directorUtteranceIsExplicitProcessEnumeration,
+  extractExplicitProcessEnumerationNames,
+  materializeDirectorProcessInventory,
   withFocusSwitchCandidate,
   directorInvalidClaimRecoverable,
   probeFiringSummariesFromRows,
@@ -16,6 +18,7 @@ import {
   provisionallyAnsweredSlotPaths,
   resolveDirectorSlotCandidateProcessId,
   type DirectorProbeFiringRow,
+  type DirectorUserIntentSignal,
 } from "@/lib/interview/director/brain";
 import { phraseDirectorTurnDetailed } from "@/lib/interview/director/voice";
 import {
@@ -69,6 +72,23 @@ function steeringContextFixture(
   });
 }
 
+function switchNextSignal(reason = "Director asked to move to another process."): DirectorUserIntentSignal {
+  return {
+    action: "switch_focus_next",
+    confidence: 0.9,
+    reason,
+  };
+}
+
+function switchNamedSignal(targetProcess: string): DirectorUserIntentSignal {
+  return {
+    action: "switch_focus_named",
+    target_process: targetProcess,
+    confidence: 0.9,
+    reason: `Director asked to discuss ${targetProcess}.`,
+  };
+}
+
 describe("steering context directive and anchors (Task 1)", () => {
   test("steering context carries an imperative directive and YAML anchor phrasings", () => {
     const context = steeringContextFixture({
@@ -117,6 +137,45 @@ describe("steering context directive and anchors (Task 1)", () => {
       intentFixture({ intent: "playback_summary", target_slot: undefined }),
     );
     expect(directive).toMatch(/play back/i);
+  });
+
+  test("voice phrasing speaks selected focus targets deterministically", async () => {
+    const phrased = await phraseDirectorTurnDetailed({
+      plan: {
+        utterance_type: "non_answer",
+        slot_updates: [],
+        claims: [],
+        tool_calls: [],
+        contradiction_signals: [],
+        current_phase: "enrich",
+        proposed_next_phase: "expand",
+        phase_transition_ready: true,
+        ranked_intents: [],
+        chosen_intent: intentFixture({
+          intent: "select_process_to_expand",
+          target_slot: "scope.boundaries",
+          target_process: "Vendor Invoice Processing",
+          style_hint: "focus_switch",
+        }),
+      },
+      recentTurns: ["Director: No. Switch right now."],
+      coverageSummary: "",
+      focusProcessName: "Vendor Invoice Processing",
+      forceSeparateVoiceLlm: true,
+      steering: {
+        directive: "Move focus to Vendor Invoice Processing.",
+        anchorPhrasings: [
+          "Which process should we focus on next?",
+          "Where does this process start?",
+        ],
+        doNotAsk: [],
+        verbatimRequired: true,
+      },
+    });
+    expect(phrased.utterance).toContain("Vendor Invoice Processing");
+    expect((phrased.metadata as { reason?: string }).reason).toBe(
+      "required_target_phrase",
+    );
   });
 });
 
@@ -592,7 +651,7 @@ describe("focus-authoritative slot scoping (Task 10)", () => {
 
 describe("answered-but-not-filled re-ask guard (Task 11)", () => {
   test("focus selection fires once: re-asked after the director answered, the probe is excluded", () => {
-    // "Which process should we focus on first?" maps to define_process_boundary.
+    // "Which process should we focus on next?" maps to define_process_boundary.
     const firings = [firing("define_process_boundary", "scope.boundaries", 2, 5_000)];
     const answered = answeredProbeIntentsThisSession({
       recentFirings: firings,
@@ -772,33 +831,176 @@ describe("claim_subject_validation_failed degrade gating (Task 12)", () => {
   });
 });
 
+describe("director process enumeration detection", () => {
+  test("detects the split-session explicit six-process inventory", () => {
+    const text =
+      "Six big ones, order intake. Taking customer orders into the system. Purchasing and replenishment. Vendor invoice processing, inventory cycle counts, new customer onboarding and credit setup, and returns and credit memos.";
+    expect(directorUtteranceIsExplicitProcessEnumeration(text)).toBe(true);
+    expect(extractExplicitProcessEnumerationNames(text)).toEqual(
+      expect.arrayContaining([
+        "Order Intake",
+        "Purchasing And Replenishment",
+        "Vendor Invoice Processing",
+        "Inventory Cycle Counts",
+        "New Customer Onboarding And Credit Setup",
+        "Returns And Credit Memos",
+      ]),
+    );
+  });
+
+  test("materialized inventory tool calls do not split compound array names", () => {
+    const plan = materializeDirectorProcessInventory({
+      utterance_type: "substantive_answer",
+      slot_updates: [
+        {
+          slot_path: "process.inventory",
+          value: {
+            processes: [
+              "order intake",
+              "purchasing and replenishment",
+              "vendor invoice processing",
+              "inventory cycle counts",
+              "new customer onboarding and credit setup",
+              "returns and credit memos",
+            ],
+          },
+          status: "partial",
+          confidence: 0.97,
+          evidence_ids: [evidenceId],
+          priority: 105,
+        },
+      ],
+      claims: [],
+      tool_calls: [],
+      contradiction_signals: [],
+      current_phase: "inventory",
+      proposed_next_phase: "expand",
+      phase_transition_ready: true,
+      ranked_intents: [],
+      chosen_intent: intentFixture(),
+    });
+
+    expect(
+      plan.tool_calls
+        .filter((tool) => tool.name === "recordProcess")
+        .map((tool) => tool.arguments.name),
+    ).toEqual([
+      "Order Intake",
+      "Purchasing And Replenishment",
+      "Vendor Invoice Processing",
+      "Inventory Cycle Counts",
+      "New Customer Onboarding And Credit Setup",
+      "Returns And Credit Memos",
+    ]);
+  });
+
+  test("rejects a substantive scope chain as non-inventory", () => {
+    const text =
+      "I own everything from when a customer order comes in through getting it picked, shipped, invoiced, plus purchasing and vendor payments.";
+    expect(directorUtteranceIsExplicitProcessEnumeration(text)).toBe(false);
+    expect(extractExplicitProcessEnumerationNames(text)).toEqual([]);
+  });
+});
+
+describe("director deterministic extraction targeting", () => {
+  test("targets same-turn process facts to the repeated fact-bearing process", () => {
+    const plan = deterministicTurnPlan({
+      latestUtterance:
+        "I run rev ops. We own forecasting and quote approvals. Quote approvals are painful because finance gets pulled in late. Quote approvals are tracked by approval cycle time.",
+      evidenceIds: [evidenceId],
+      currentSlots: new Map(),
+      currentPhase: "inventory",
+      candidateProcessNames: [],
+      priorIntent: "discover_processes",
+    });
+
+    expect(plan.tool_calls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "recordProcess",
+          arguments: expect.objectContaining({ name: "Quote Approvals" }),
+        }),
+        expect.objectContaining({
+          name: "recordCandidateProcessClaim",
+          arguments: expect.objectContaining({
+            targetProcess: "Quote Approvals",
+            field: "kpi",
+            value: { name: "approval cycle time" },
+          }),
+        }),
+        expect.objectContaining({
+          name: "recordCandidateProcessClaim",
+          arguments: expect.objectContaining({
+            targetProcess: "Quote Approvals",
+            field: "upstream_dependency",
+            value: { name: "finance" },
+          }),
+        }),
+      ]),
+    );
+  });
+});
+
+describe("director core-slot prioritization", () => {
+  test("missing core slots outrank controls and documentation", () => {
+    const plan = deterministicTurnPlan({
+      latestUtterance:
+        "That sounds right. There may be some compliance review, but I can come back to that.",
+      evidenceIds: [evidenceId],
+      currentSlots: new Map([
+        ["function.name", { status: "filled", confidence: 0.9 }],
+        ["process.inventory", { status: "filled", confidence: 0.9 }],
+        ["scope.boundaries", { status: "filled", confidence: 0.9 }],
+        ["outcomes.business_outcomes", { status: "filled", confidence: 0.9 }],
+        ["ownership.roles", { status: "filled", confidence: 0.9 }],
+        ["systems.systems_of_record", { status: "filled", confidence: 0.9 }],
+        ["frequency.volume", { status: "filled", confidence: 0.9 }],
+      ]),
+      currentPhase: "enrich",
+      candidateProcessNames: ["Order intake", "Returns and credit memos"],
+      focusProcessName: "Order intake",
+      priorIntent: "capture_frequency_volume",
+    });
+
+    expect(plan.chosen_intent.target_slot).toBe("friction.pain_points");
+    expect(
+      plan.ranked_intents.map((candidate) => candidate.target_slot),
+    ).not.toEqual(
+      expect.arrayContaining(["controls.compliance", "documentation.maturity"]),
+    );
+  });
+
+  test("rotates to another process once the focus process has core coverage", () => {
+    const plan = deterministicTurnPlan({
+      latestUtterance: "Yes, Tim handles the backup risk there.",
+      evidenceIds: [evidenceId],
+      currentSlots: new Map([
+        ["function.name", { status: "filled", confidence: 0.9 }],
+        ["process.inventory", { status: "filled", confidence: 0.9 }],
+        ["scope.boundaries", { status: "filled", confidence: 0.9 }],
+        ["outcomes.business_outcomes", { status: "filled", confidence: 0.9 }],
+        ["ownership.roles", { status: "filled", confidence: 0.9 }],
+        ["systems.systems_of_record", { status: "filled", confidence: 0.9 }],
+        ["frequency.volume", { status: "filled", confidence: 0.9 }],
+        ["friction.pain_points", { status: "filled", confidence: 0.9 }],
+        ["risk.spofs", { status: "filled", confidence: 0.9 }],
+      ]),
+      currentPhase: "enrich",
+      candidateProcessNames: ["Order intake", "Returns and credit memos"],
+      focusProcessName: "Order intake",
+      expandedCandidateProcessNames: ["Order intake"],
+      priorIntent: "capture_risk_spof",
+    });
+
+    expect(plan.chosen_intent.intent).toBe("select_process_to_expand");
+    expect(plan.chosen_intent.target_process).toBe("Returns and credit memos");
+    expect(plan.chosen_intent.style_hint).toBe("core_coverage_rotation");
+  });
+});
+
 // F1: focus rotation — prod session 667b5809 asked to switch four times
 // (turns 12, 15, 16, 17) and the planner never left "Order intake".
 describe("F1 — director-requested focus switch", () => {
-  const prodSwitchRequests = [
-    "Can you start asking me about the other five processes now?",
-    "Yo. Start asking me about the other processes now.",
-    "No. Move on.",
-    "Oh, asking me about, like, the other processes. Remember those other ones that we talked about earlier in the conversation?",
-  ];
-  for (const utterance of prodSwitchRequests) {
-    test(`detects: "${utterance.slice(0, 50)}"`, () => {
-      expect(directorRequestedFocusSwitch(utterance)).toBe(true);
-    });
-  }
-
-  const narration = [
-    "It then moves on to picking and shipping.",
-    "It depends on other processes upstream of intake.",
-    "Marcus keys the order and we move the data into Odoo.",
-    "Order intake easily. It's the highest volume process.",
-  ];
-  for (const utterance of narration) {
-    test(`ignores narration: "${utterance.slice(0, 50)}"`, () => {
-      expect(directorRequestedFocusSwitch(utterance)).toBe(false);
-    });
-  }
-
   const sixCandidates = [
     "Order intake",
     "Purchasing and replenishment",
@@ -820,14 +1022,63 @@ describe("F1 — director-requested focus switch", () => {
       focusProcessName: "Order intake",
       expandedCandidateProcessNames: ["Order intake"],
       priorIntent: "capture_variants",
+      userIntentSignal: {
+        action: "switch_focus_next",
+        confidence: 0.93,
+        reason: "The director asked to move to another process.",
+      },
     });
     expect(plan.chosen_intent.intent).toBe("select_process_to_expand");
     expect(plan.chosen_intent.target_process).toBeDefined();
     expect(plan.chosen_intent.target_process!.toLowerCase()).not.toBe("order intake");
+    expect(plan.tool_calls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "switchFocusCandidate",
+          arguments: expect.objectContaining({
+            targetProcess: plan.chosen_intent.target_process,
+            userIntentAction: "switch_focus_next",
+          }),
+        }),
+      ]),
+    );
     expect(plan.proposed_next_phase).toBe("expand");
     // The spoken utterance must follow the rotation, not pay lip service.
     expect((plan.planned_agent_utterance ?? "").toLowerCase()).toContain(
       plan.chosen_intent.target_process!.toLowerCase(),
+    );
+  });
+
+  test("a named process request resolves to that candidate instead of generic rotation", () => {
+    const plan = deterministicTurnPlan({
+      latestUtterance: "Let's actually talk about returns and credit memos.",
+      evidenceIds: ["00000000-0000-0000-0000-000000000301"],
+      currentSlots: new Map(),
+      currentPhase: "enrich",
+      candidateProcessNames: sixCandidates,
+      focusProcessName: "Order intake",
+      expandedCandidateProcessNames: ["Order intake"],
+      priorIntent: "capture_variants",
+      userIntentSignal: {
+        action: "switch_focus_named",
+        target_process: "Returns and credit memos",
+        confidence: 0.95,
+        reason: "The director named returns and credit memos.",
+      },
+    });
+    expect(plan.chosen_intent.intent).toBe("select_process_to_expand");
+    expect(plan.chosen_intent.target_process).toBe("Returns and credit memos");
+    expect(plan.chosen_intent.style_hint).toBe("named_focus_switch");
+    expect(plan.tool_calls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "switchFocusCandidate",
+          arguments: expect.objectContaining({
+            targetProcess: "Returns and credit memos",
+            userIntentAction: "switch_focus_named",
+          }),
+        }),
+      ]),
     );
   });
 
@@ -840,6 +1091,11 @@ describe("F1 — director-requested focus switch", () => {
       candidateProcessNames: ["Order intake"],
       focusProcessName: "Order intake",
       expandedCandidateProcessNames: ["Order intake"],
+      userIntentSignal: {
+        action: "switch_focus_next",
+        confidence: 0.93,
+        reason: "The director asked to move on.",
+      },
     });
     expect(plan.chosen_intent.intent).not.toBe("select_process_to_expand");
   });
@@ -852,6 +1108,11 @@ describe("F1 — director-requested focus switch", () => {
       currentPhase: "enrich",
       candidateProcessNames: sixCandidates,
       focusProcessName: "Order intake",
+      userIntentSignal: {
+        action: "switch_focus_next",
+        confidence: 0.93,
+        reason: "The director asked to move to another process.",
+      },
     });
     const summaries = sixCandidates.map((proposedName, index) => ({
       id: `00000000-0000-0000-0000-00000000010${index}`,

@@ -491,6 +491,24 @@ describe("Week 3 director brain and document pipeline", () => {
         [{ id: "candidate-1", proposedName: "Forecasting" }],
         [],
       ),
+    ).toBe("expand");
+    expect(
+      gateDirectorPhase(
+        prematurePlan,
+        new Map([
+          ["function.name", { status: "filled", confidence: 0.8 }],
+          ["process.inventory", { status: "filled", confidence: 0.8 }],
+          ["scope.boundaries", { status: "asked_unknown", confidence: 1 }],
+          ["outcomes.business_outcomes", { status: "filled", confidence: 0.8 }],
+          ["ownership.roles", { status: "filled", confidence: 0.8 }],
+          ["systems.systems_of_record", { status: "filled", confidence: 0.8 }],
+          ["frequency.volume", { status: "filled", confidence: 0.8 }],
+          ["friction.pain_points", { status: "filled", confidence: 0.8 }],
+          ["risk.spofs", { status: "filled", confidence: 0.8 }],
+        ]),
+        [{ id: "candidate-1", proposedName: "Forecasting" }],
+        [],
+      ),
     ).toBe("closeout");
   });
 

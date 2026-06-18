@@ -121,8 +121,19 @@ export function candidateNameTokenSet(name: string): Set<string> {
   const tokens = normalizeCandidateProcessName(name)
     .replace(/[^a-z0-9\s]+/g, " ")
     .split(/\s+/)
+    .map(normalizeCandidateNameToken)
     .filter((token) => token.length > 0 && !CANDIDATE_NAME_STOPWORDS.has(token));
   return new Set(tokens);
+}
+
+function normalizeCandidateNameToken(token: string) {
+  if (token.length > 4 && token.endsWith("ies")) {
+    return `${token.slice(0, -3)}y`;
+  }
+  if (token.length > 4 && /s$/.test(token) && !/(ss|is|us)$/.test(token)) {
+    return token.slice(0, -1);
+  }
+  return token;
 }
 
 export function isTokenSubset(subset: Set<string>, superset: Set<string>): boolean {

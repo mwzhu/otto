@@ -26,6 +26,16 @@ import {
 } from "@/lib/interview/director/slot-schema";
 import { normalizeDirectorSlotValue } from "@/lib/interview/director/slot-values";
 import { isNonAnswerSlotExtraction } from "@/lib/interview/director/slot-non-answer";
+import {
+  directorSlotPolicy,
+  mergeSlotStringLists,
+  slotValuesEqual,
+} from "@/lib/interview/director/slot-policy";
+import type {
+  DirectorProcessReconciliationDecision,
+  DirectorSlotChangeKind,
+  DirectorSlotReconciliationDecision,
+} from "@/lib/interview/director/reconciliation";
 import { stableStringify } from "@/lib/http/json";
 import { sanitizeForLogs, sanitizeJsonForLogs } from "@/lib/security/sanitize";
 import {
@@ -51,10 +61,19 @@ export type SlotUpdateInput = {
   evidenceIds?: string[];
   candidates?: unknown[];
   lastAskedAt?: Date;
+  changeKind?: DirectorSlotChangeKind;
 };
 
 type DirectorToolTx = ClaimWriteTx;
-type DirectorToolOptions = { tx?: DirectorToolTx };
+type DirectorToolOptions = {
+  tx?: DirectorToolTx;
+  onSlotReconciliationDecision?: (
+    decision: DirectorSlotReconciliationDecision,
+  ) => void;
+  onProcessReconciliationDecision?: (
+    decision: DirectorProcessReconciliationDecision,
+  ) => void;
+};
 
 export async function createTranscriptEvidence(input: {
   orgId: string;
@@ -171,25 +190,40 @@ export async function updateSlotState(
           status: slotStates.status,
           confidence: slotStates.confidence,
           value: slotStates.value,
+          evidenceIds: slotStates.evidenceIds,
+          candidates: slotStates.candidates,
         })
         .from(slotStates)
         .where(slotIdentityWhere(context, update.slotPath, update.candidateProcessId))
         .limit(1)
         .for("update")
     )[0];
-    // Task 9: do not let a non-answer or a strictly weaker extraction clobber an
-    // already-`filled` slot. The garbled deflection "those employees I just
-    // mentioned" was extracted as a value and overwrote a good "VP of operations"
-    // on function.name. When the guard fires we never downgrade the value,
-    // status, or confidence of the filled slot — only re-stamp last_asked_at if
-    // we were explicitly asked to.
-    if (
-      existing &&
-      shouldBlockSlotDowngrade(
-        { status: existing.status, confidence: existing.confidence },
-        { value, confidence: update.confidence },
-      )
-    ) {
+    const reconciliation = reconcileSlotUpdate(
+      existing
+        ? {
+            slotPath: update.slotPath,
+            candidateProcessId: update.candidateProcessId,
+            value: existing.value,
+            status: existing.status,
+            confidence: Number(existing.confidence),
+            evidenceIds: existing.evidenceIds ?? [],
+            candidates: arrayCandidates(existing.candidates),
+          }
+        : undefined,
+      {
+        slotPath: update.slotPath,
+        candidateProcessId: update.candidateProcessId,
+        value,
+        status: update.status,
+        confidence: update.confidence,
+        evidenceIds: update.evidenceIds ?? [],
+        candidates: update.candidates ?? [],
+        changeKind: update.changeKind,
+      },
+    );
+    options.onSlotReconciliationDecision?.(reconciliation.decision);
+
+    if (existing && reconciliation.write === "ignore") {
       if (update.lastAskedAt) {
         await tx
           .update(slotStates)
@@ -205,13 +239,13 @@ export async function updateSlotState(
       )[0];
     }
     const values = {
-      value,
-      status: update.status,
-      confidence: String(update.confidence),
-      evidenceIds: update.evidenceIds ?? [],
+      value: reconciliation.value,
+      status: reconciliation.status,
+      confidence: String(reconciliation.confidence),
+      evidenceIds: reconciliation.evidenceIds,
       lastAskedAt: update.lastAskedAt,
       priority: slotPriority(update.slotPath),
-      candidates: update.candidates,
+      candidates: reconciliation.candidates,
       updatedAt: new Date(),
     };
     if (existing) {
@@ -239,6 +273,251 @@ export async function updateSlotState(
   });
 }
 
+type ReconcileSlotRecord = {
+  slotPath: string;
+  candidateProcessId?: string;
+  value: unknown;
+  status: DirectorSlotStatus;
+  confidence: number;
+  evidenceIds: string[];
+  candidates: unknown[];
+};
+
+type ReconcileIncomingSlotRecord = ReconcileSlotRecord & {
+  changeKind?: DirectorSlotChangeKind;
+};
+
+type ReconciledSlotUpdate = {
+  write: "upsert" | "ignore";
+  value: unknown;
+  status: DirectorSlotStatus;
+  confidence: number;
+  evidenceIds: string[];
+  candidates?: unknown[];
+  decision: DirectorSlotReconciliationDecision;
+};
+
+export function reconcileSlotUpdate(
+  existing: ReconcileSlotRecord | undefined,
+  incoming: ReconcileIncomingSlotRecord,
+): ReconciledSlotUpdate {
+  const policy = directorSlotPolicy(incoming.slotPath);
+  const incomingEvidenceIds = incoming.evidenceIds ?? [];
+  const existingEvidenceIds = existing?.evidenceIds ?? [];
+  const mergedEvidenceIds = unique([...existingEvidenceIds, ...incomingEvidenceIds]);
+  const baseDecision = {
+    slotPath: incoming.slotPath,
+    candidateProcessId: incoming.candidateProcessId,
+    backing: policy.backing,
+    confidence: incoming.confidence,
+    evidenceIds: mergedEvidenceIds,
+    changeKind: incoming.changeKind,
+    previousValue: existing?.value,
+  } satisfies Partial<DirectorSlotReconciliationDecision>;
+
+  if (!existing) {
+    return {
+      write: "upsert",
+      value: incoming.value,
+      status: incoming.status,
+      confidence: incoming.confidence,
+      evidenceIds: incomingEvidenceIds,
+      candidates: mergeSlotCandidates([], incoming.candidates),
+      decision: {
+        ...baseDecision,
+        action: "create",
+        value: incoming.value,
+        rationale: "No existing slot state; accepted incoming value.",
+      },
+    };
+  }
+
+  const existingCandidates = arrayCandidates(existing.candidates);
+  const incomingCandidates = arrayCandidates(incoming.candidates);
+  const existingHasValue = existing.value !== undefined && existing.value !== null;
+  const incomingIsNonAnswer = isNonAnswerSlotExtraction(incoming.value);
+  const explicitCorrection = incoming.changeKind === "correction";
+
+  if (incomingIsNonAnswer && existingHasValue) {
+    return ignoredSlotUpdate(existing, incoming, {
+      evidenceIds: mergedEvidenceIds,
+      candidates: existingCandidates,
+      decision: {
+        ...baseDecision,
+        action: "ignore",
+        value: existing.value,
+        confidence: existing.confidence,
+        rationale: "Ignored non-answer so it cannot clobber existing slot state.",
+      },
+    });
+  }
+
+  const sameValue = slotValuesEqual(incoming.slotPath, existing.value, incoming.value);
+  if (sameValue) {
+    return {
+      write: "upsert",
+      value: existing.value ?? incoming.value,
+      status: strongerSlotStatus(existing.status, incoming.status),
+      confidence: Math.max(existing.confidence, incoming.confidence),
+      evidenceIds: mergedEvidenceIds,
+      candidates: mergeSlotCandidates(existingCandidates, incomingCandidates),
+      decision: {
+        ...baseDecision,
+        action: "confirm",
+        value: existing.value ?? incoming.value,
+        confidence: Math.max(existing.confidence, incoming.confidence),
+        rationale: "Incoming value confirms existing slot state.",
+      },
+    };
+  }
+
+  if (
+    existingHasValue &&
+    !explicitCorrection &&
+    policy.shape !== "string_list" &&
+    incoming.confidence < existing.confidence
+  ) {
+    return ignoredSlotUpdate(existing, incoming, {
+      evidenceIds: mergedEvidenceIds,
+      candidates: mergeSlotCandidates(existingCandidates, incomingCandidates),
+      decision: {
+        ...baseDecision,
+        action: "ignore",
+        value: existing.value,
+        confidence: existing.confidence,
+        rationale: "Ignored lower-confidence conflicting update without correction intent.",
+      },
+    });
+  }
+
+  if (explicitCorrection) {
+    return {
+      write: "upsert",
+      value: incoming.value,
+      status: incoming.status === "empty" ? "partial" : incoming.status,
+      confidence: incoming.confidence,
+      evidenceIds: mergedEvidenceIds,
+      candidates: mergeSlotCandidates(
+        [
+          ...existingCandidates,
+          slotCandidate(existing.value, {
+            reason: "previous_value_before_correction",
+            evidenceIds: existingEvidenceIds,
+            confidence: existing.confidence,
+          }),
+        ],
+        incomingCandidates,
+      ),
+      decision: {
+        ...baseDecision,
+        action: "correct",
+        value: incoming.value,
+        rationale: "Incoming update is marked as an explicit correction.",
+      },
+    };
+  }
+
+  if (policy.backing === "claim") {
+    return {
+      write: "upsert",
+      value: existing.value ?? incoming.value,
+      status: strongerSlotStatus(existing.status, incoming.status),
+      confidence: Math.max(existing.confidence, incoming.confidence),
+      evidenceIds: mergedEvidenceIds,
+      candidates: mergeSlotCandidates(existingCandidates, [
+        ...incomingCandidates,
+        slotCandidate(incoming.value, {
+          reason: "claim_layer_value_summary",
+          evidenceIds: incomingEvidenceIds,
+          confidence: incoming.confidence,
+        }),
+      ]),
+      decision: {
+        ...baseDecision,
+        action: "enrich",
+        value: existing.value ?? incoming.value,
+        confidence: Math.max(existing.confidence, incoming.confidence),
+        rationale:
+          "Claim-backed slot keeps slot_states as coverage summary; durable merge happens in claims.",
+      },
+    };
+  }
+
+  if (policy.shape === "string_list") {
+    const mergedValue = mergeSlotStringLists(existing.value, incoming.value);
+    return {
+      write: "upsert",
+      value: mergedValue,
+      status: strongerSlotStatus(existing.status, incoming.status),
+      confidence: Math.max(existing.confidence, incoming.confidence),
+      evidenceIds: mergedEvidenceIds,
+      candidates: mergeSlotCandidates(existingCandidates, incomingCandidates),
+      decision: {
+        ...baseDecision,
+        action: "merge",
+        value: mergedValue,
+        confidence: Math.max(existing.confidence, incoming.confidence),
+        rationale: "Merged unique values for slot-state-backed list slot.",
+      },
+    };
+  }
+
+  if (
+    policy.shape === "structured" &&
+    policy.reconcile === "enrich_or_replace_on_correction"
+  ) {
+    const enrichedValue = mergeStructuredSlotValue(existing.value, incoming.value);
+    return {
+      write: "upsert",
+      value: enrichedValue,
+      status: strongerSlotStatus(existing.status, incoming.status),
+      confidence: Math.max(existing.confidence, incoming.confidence),
+      evidenceIds: mergedEvidenceIds,
+      candidates: mergeSlotCandidates(existingCandidates, incomingCandidates),
+      decision: {
+        ...baseDecision,
+        action: "enrich",
+        value: enrichedValue,
+        confidence: Math.max(existing.confidence, incoming.confidence),
+        rationale: "Enriched structured slot value without discarding prior fields.",
+      },
+    };
+  }
+
+  return {
+    write: "upsert",
+    value: existing.value,
+    status: "conflicting",
+    confidence: Math.max(existing.confidence, incoming.confidence),
+    evidenceIds: mergedEvidenceIds,
+    candidates: mergeSlotCandidates(existingCandidates, [
+      slotCandidate(existing.value, {
+        reason: "current_value",
+        evidenceIds: existingEvidenceIds,
+        confidence: existing.confidence,
+      }),
+      slotCandidate(incoming.value, {
+        reason: "conflicting_incoming_value",
+        evidenceIds: incomingEvidenceIds,
+        confidence: incoming.confidence,
+      }),
+      ...incomingCandidates,
+    ]),
+    decision: {
+      ...baseDecision,
+      action: "conflict",
+      value: existing.value,
+      confidence: Math.max(existing.confidence, incoming.confidence),
+      followUpQuestion: clarificationQuestionForSlot(
+        incoming.slotPath,
+        existing.value,
+        incoming.value,
+      ),
+      rationale: "Scalar slot value differs without correction or scope signal.",
+    },
+  };
+}
+
 // Task 9 downgrade guard (pure decision, unit-tested). Block a slot write that
 // would weaken an already-`filled` slot: either the incoming value is a
 // non-answer, or it is strictly lower confidence than what is stored. Empty,
@@ -255,6 +534,127 @@ export function shouldBlockSlotDowngrade(
   return (
     Number.isFinite(existingConfidence) && incoming.confidence < existingConfidence
   );
+}
+
+function ignoredSlotUpdate(
+  existing: ReconcileSlotRecord,
+  incoming: ReconcileIncomingSlotRecord,
+  result: Pick<
+    ReconciledSlotUpdate,
+    "evidenceIds" | "candidates" | "decision"
+  >,
+): ReconciledSlotUpdate {
+  return {
+    write: "ignore",
+    value: existing.value,
+    status: existing.status,
+    confidence: existing.confidence,
+    evidenceIds: result.evidenceIds,
+    candidates: result.candidates,
+    decision: {
+      ...result.decision,
+      slotPath: incoming.slotPath,
+      candidateProcessId: incoming.candidateProcessId,
+      previousValue: existing.value,
+      evidenceIds: result.evidenceIds,
+    },
+  };
+}
+
+function strongerSlotStatus(
+  existing: DirectorSlotStatus,
+  incoming: DirectorSlotStatus,
+): DirectorSlotStatus {
+  return statusRank(incoming) > statusRank(existing) ? incoming : existing;
+}
+
+function statusRank(status: DirectorSlotStatus): number {
+  switch (status) {
+    case "filled":
+      return 5;
+    case "conflicting":
+      return 4;
+    case "partial":
+      return 3;
+    case "asked_unknown":
+      return 2;
+    case "pending_re_extract":
+      return 1;
+    case "empty":
+      return 0;
+  }
+}
+
+function arrayCandidates(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function mergeSlotCandidates(existing: unknown[], incoming: unknown[]): unknown[] {
+  const merged: unknown[] = [];
+  const seen = new Set<string>();
+  for (const candidate of [...existing, ...incoming].filter(
+    (entry) => entry !== undefined && entry !== null,
+  )) {
+    const key = stableStringify(candidate);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(candidate);
+  }
+  return merged.length > 0 ? merged : [];
+}
+
+function slotCandidate(
+  value: unknown,
+  input: { reason: string; evidenceIds: string[]; confidence: number },
+) {
+  return {
+    value,
+    reason: input.reason,
+    evidence_ids: input.evidenceIds,
+    confidence: input.confidence,
+  };
+}
+
+function mergeStructuredSlotValue(existing: unknown, incoming: unknown): unknown {
+  if (!isRecord(existing) || !isRecord(incoming)) return incoming ?? existing;
+  const merged: Record<string, unknown> = { ...existing };
+  for (const [key, value] of Object.entries(incoming)) {
+    const current = merged[key];
+    if (Array.isArray(current) || Array.isArray(value)) {
+      merged[key] = mergeSlotStringLists(current, value);
+    } else if (current === undefined || current === null || current === "") {
+      merged[key] = value;
+    } else if (isRecord(current) && isRecord(value)) {
+      merged[key] = mergeStructuredSlotValue(current, value);
+    } else if (slotValuesEqual("function.name", current, value)) {
+      merged[key] = current;
+    } else {
+      merged[key] = value;
+    }
+  }
+  return merged;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function clarificationQuestionForSlot(
+  slotPath: string,
+  existingValue: unknown,
+  incomingValue: unknown,
+): string {
+  return `Should ${slotPath} be ${briefSlotValue(existingValue)}, ${briefSlotValue(incomingValue)}, or are both true in different scopes?`;
+}
+
+function briefSlotValue(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (isRecord(value)) {
+    for (const key of ["name", "text", "value", "label", "function_name"]) {
+      if (typeof value[key] === "string") return value[key] as string;
+    }
+  }
+  return stableStringify(value);
 }
 
 function slotIdentityWhere(
@@ -311,9 +711,17 @@ export async function recordProcess(
   // fragments, bare system names) runs at write time so direct callers like
   // the document pipeline cannot insert a name the brain would reject.
   if (!isPlausibleCandidateProcessName(input.name)) {
+    options.onProcessReconciliationDecision?.({
+      incomingName: input.name,
+      action: "discard_as_junk",
+      confidence: input.confidence ?? 0,
+      evidenceIds: input.evidenceIds,
+      rationale: "Rejected by candidate process name plausibility guard.",
+    });
     return null;
   }
-  const normalized = normalizeName(input.name);
+  const displayName = canonicalProcessDisplayName(input.name);
+  const normalized = normalizeName(displayName);
   return withDirectorToolTx(context, options, async (tx) => {
     // Session-wide reconciliation lock — deliberately NOT per-name. Related
     // names ("Purchasing" vs "Purchasing And Replenishment") hash to different
@@ -351,7 +759,7 @@ export async function recordProcess(
     // contains (or is contained by) an existing pending candidate's is the
     // same process at different granularity — turn 0's "Purchasing" followed
     // by turn 1's "Purchasing And Replenishment" must end as one row.
-    const incomingTokens = candidateNameTokenSet(input.name);
+    const incomingTokens = candidateNameTokenSet(displayName);
     const relatedRow =
       exactRow ??
       (incomingTokens.size > 0
@@ -374,14 +782,15 @@ export async function recordProcess(
       // the incoming name strictly contains the stored one, rename the row.
       const relatedTokens = candidateNameTokenSet(relatedRow.proposed_name);
       const shouldRename =
-        !exactRow &&
-        relatedTokens.size < incomingTokens.size &&
-        isTokenSubset(relatedTokens, incomingTokens);
+        (!exactRow &&
+          relatedTokens.size < incomingTokens.size &&
+          isTokenSubset(relatedTokens, incomingTokens)) ||
+        normalizeName(relatedRow.proposed_name) === normalized;
       candidate = (
         await tx
           .update(candidateProcesses)
           .set({
-            ...(shouldRename ? { proposedName: input.name.trim() } : {}),
+            ...(shouldRename ? { proposedName: displayName } : {}),
             proposedFunction: input.proposedFunction ?? relatedRow.proposed_function ?? undefined,
             frequency: input.frequency ?? relatedRow.frequency ?? undefined,
             complexityHint: input.complexityHint ?? relatedRow.complexity_hint ?? undefined,
@@ -401,17 +810,36 @@ export async function recordProcess(
           subjectType: "candidate_process",
           subjectId: relatedRow.id,
           metadataJson: sanitizeJsonForLogs({
-            incoming_name: input.name.trim(),
+            incoming_name: displayName,
             stored_name: relatedRow.proposed_name,
             action: shouldRename ? "renamed_to_compound" : "merged_into_existing",
             capture_session_id: context.captureSessionId,
           }) as Record<string, unknown>,
         });
       }
+      options.onProcessReconciliationDecision?.({
+        incomingName: displayName,
+        action: shouldRename ? "rename_candidate" : "merge_candidate",
+        targetCandidateProcessId: relatedRow.id,
+        canonicalName: candidate.proposedName,
+        confidence: input.confidence ?? 0.75,
+        evidenceIds: mergedEvidenceIds,
+        rationale: shouldRename
+          ? "Incoming name is a fuller related phrase; renamed existing candidate."
+          : "Incoming name matched or related to an existing pending candidate.",
+      });
     } else {
       // Non-enumeration turns may only merge into existing candidates; a name
       // with no related pending candidate is not minted (B1 gate).
       if (input.allowNewCandidate === false) {
+        options.onProcessReconciliationDecision?.({
+          incomingName: displayName,
+          action: "demote_to_candidate_detail",
+          confidence: input.confidence ?? 0.75,
+          evidenceIds: input.evidenceIds,
+          rationale:
+            "Candidate minting gate is closed and no related candidate exists.",
+        });
         return null;
       }
       candidate = (
@@ -421,7 +849,7 @@ export async function recordProcess(
             orgId: context.orgId,
             workspaceId: context.workspaceId,
             captureSessionId: context.captureSessionId,
-            proposedName: input.name.trim(),
+            proposedName: displayName,
             proposedFunction: input.proposedFunction,
             frequency: input.frequency,
             complexityHint: input.complexityHint,
@@ -430,6 +858,15 @@ export async function recordProcess(
           })
           .returning()
       )[0];
+      options.onProcessReconciliationDecision?.({
+        incomingName: displayName,
+        action: "create_candidate",
+        targetCandidateProcessId: candidate.id,
+        canonicalName: candidate.proposedName,
+        confidence: input.confidence ?? 0.75,
+        evidenceIds: input.evidenceIds,
+        rationale: "Created candidate under the safe inventory creation floor.",
+      });
     }
 
     await writeCandidateClaim(
@@ -826,6 +1263,16 @@ async function withNamedEntityTx<T>(
 
 function normalizeName(name: string) {
   return name.trim().toLowerCase();
+}
+
+function canonicalProcessDisplayName(name: string) {
+  return name
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/\b[A-Za-z][A-Za-z0-9'-]*\b/g, (word) => {
+      if (/^[A-Z0-9]{2,4}$/.test(word)) return word;
+      return `${word[0].toUpperCase()}${word.slice(1).toLowerCase()}`;
+    });
 }
 
 function unique<T>(values: T[]) {

@@ -66,6 +66,11 @@ import {
   validateDirectorPlanClaim,
 } from "@/lib/interview/director/claim-allowlist";
 import {
+  boundedDirectorReconciliationTrace,
+  type DirectorProcessReconciliationDecision,
+  type DirectorSlotReconciliationDecision,
+} from "@/lib/interview/director/reconciliation";
+import {
   directorClaimZodSchema,
   directorClaimsAnthropicSchema,
   readSharedSchemaArtifact,
@@ -1874,6 +1879,8 @@ export async function dispatchDirectorTurnPlan(
     const candidateProcessIds: string[] = [];
     const candidateProcessIdsByName = new Map<string, string>();
     const toolExecutionLog: DirectorToolExecutionLog[] = [];
+    const slotReconciliationDecisions: DirectorSlotReconciliationDecision[] = [];
+    const processReconciliationDecisions: DirectorProcessReconciliationDecision[] = [];
     // Task 5: track every entity this dispatch creates so claim subject
     // resolution can see same-turn rows and queued retry-claim tasks can be
     // drained once their target entity exists.
@@ -2003,6 +2010,14 @@ export async function dispatchDirectorTurnPlan(
       const args = processTool.arguments;
       const processName = stringArg(args.name);
       if (!isPlausibleDirectorProcessName(processName)) {
+        processReconciliationDecisions.push({
+          incomingName: processName ?? "",
+          action: "discard_as_junk",
+          confidence: numberArg(args.confidence) ?? 0,
+          evidenceIds: input.evidenceIds,
+          rationale:
+            "Rejected by dispatcher candidate process name plausibility guard.",
+        });
         degradedQuality = true;
         degradedReasons.add("invalid_process_name");
         await createFollowUpTask(
@@ -2044,7 +2059,12 @@ export async function dispatchDirectorTurnPlan(
             toolEvidenceIds.length > 0 ? toolEvidenceIds : input.evidenceIds,
           allowNewCandidate: allowCandidateMinting,
         },
-        { tx },
+        {
+          tx,
+          onProcessReconciliationDecision: (decision) => {
+            processReconciliationDecisions.push(decision);
+          },
+        },
       );
       if (!candidate) {
         // Either the write-time junk guard refused the name (defense in depth
@@ -2317,7 +2337,12 @@ export async function dispatchDirectorTurnPlan(
           evidenceIds: slotUpdate.evidence_ids,
           candidates: slotUpdate.candidates,
         },
-        { tx },
+        {
+          tx,
+          onSlotReconciliationDecision: (decision) => {
+            slotReconciliationDecisions.push(decision);
+          },
+        },
       );
     }
     // Task 5: entity-creating tool calls and candidate materialization have
@@ -2492,6 +2517,10 @@ export async function dispatchDirectorTurnPlan(
         brain_metadata: metadata,
         voice_metadata: input.voiceMetadata ?? null,
         local_turn_correlation_id: input.localTurnCorrelationId ?? null,
+        reconciliation: boundedDirectorReconciliationTrace({
+          slotDecisions: slotReconciliationDecisions,
+          processDecisions: processReconciliationDecisions,
+        }),
         ...input.deliveryJsonOverrides,
       },
       promptTemplateId: metadata.prompt_template_id,
@@ -6238,6 +6267,10 @@ function extractProcessNames(text: string) {
       );
     }),
   );
+}
+
+export function extractExplicitProcessEnumerationNames(text: string): string[] {
+  return extractProcessNames(text);
 }
 
 function normalizeProcessListContinuations(text: string) {

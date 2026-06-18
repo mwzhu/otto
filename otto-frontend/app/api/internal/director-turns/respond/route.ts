@@ -10,6 +10,7 @@ import {
 import {
   buildDirectorSteeringPlan,
   dispatchDirectorTurnPlan,
+  extractExplicitProcessEnumerationNames,
   nonAuthoritativeDirectorSteeringPlan,
   phraseDirectorSteeringTurn,
   upsertDirectorExtractionWindow,
@@ -137,6 +138,9 @@ export async function POST(request: Request) {
           metadataJson: {
             local_turn_correlation_id: body.local_turn_correlation_id,
             steering_context: steering.steering_context,
+            enumerated_process_names: extractExplicitProcessEnumerationNames(
+              body.latest_utterance,
+            ),
           },
         });
       }

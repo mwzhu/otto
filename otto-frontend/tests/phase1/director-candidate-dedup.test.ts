@@ -3,7 +3,10 @@ import {
   materializeDirectorProcessInventory,
   candidateProcessBelongsToSession,
 } from "@/lib/interview/director/brain";
-import { shouldBlockSlotDowngrade } from "@/lib/interview/director/tools";
+import {
+  reconcileSlotUpdate,
+  shouldBlockSlotDowngrade,
+} from "@/lib/interview/director/tools";
 import {
   isNonAnswerSlotExtraction,
   extractionValueText,
@@ -337,5 +340,144 @@ describe("Task 9 — slot downgrade guard", () => {
         },
       ),
     ).toBe(true);
+  });
+});
+
+describe("Director continuous slot reconciliation", () => {
+  test("slot-state-backed lists merge unique values and evidence", () => {
+    const result = reconcileSlotUpdate(
+      {
+        slotPath: "outcomes.business_outcomes",
+        value: ["on-time delivery"],
+        status: "partial",
+        confidence: 0.7,
+        evidenceIds: ["00000000-0000-0000-0000-000000000301"],
+        candidates: [],
+      },
+      {
+        slotPath: "outcomes.business_outcomes",
+        value: ["On-Time Delivery", "fewer credits"],
+        status: "filled",
+        confidence: 0.65,
+        evidenceIds: ["00000000-0000-0000-0000-000000000302"],
+        candidates: [],
+        changeKind: "addition",
+      },
+    );
+
+    expect(result.write).toBe("upsert");
+    expect(result.value).toEqual(["on-time delivery", "fewer credits"]);
+    expect(result.status).toBe("filled");
+    expect(result.evidenceIds).toEqual([
+      "00000000-0000-0000-0000-000000000301",
+      "00000000-0000-0000-0000-000000000302",
+    ]);
+    expect(result.decision.action).toBe("merge");
+  });
+
+  test("conflicting scalar values preserve both candidates", () => {
+    const result = reconcileSlotUpdate(
+      {
+        slotPath: "frequency.volume",
+        candidateProcessId: "00000000-0000-0000-0000-000000000401",
+        value: "weekly",
+        status: "filled",
+        confidence: 0.8,
+        evidenceIds: ["00000000-0000-0000-0000-000000000301"],
+        candidates: [],
+      },
+      {
+        slotPath: "frequency.volume",
+        candidateProcessId: "00000000-0000-0000-0000-000000000401",
+        value: "daily",
+        status: "filled",
+        confidence: 0.85,
+        evidenceIds: ["00000000-0000-0000-0000-000000000302"],
+        candidates: [],
+      },
+    );
+
+    expect(result.write).toBe("upsert");
+    expect(result.status).toBe("conflicting");
+    expect(result.value).toBe("weekly");
+    expect(result.decision.action).toBe("conflict");
+    expect(result.candidates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ value: "weekly", reason: "current_value" }),
+        expect.objectContaining({
+          value: "daily",
+          reason: "conflicting_incoming_value",
+        }),
+      ]),
+    );
+  });
+
+  test("explicit scalar correction replaces value but preserves prior value", () => {
+    const result = reconcileSlotUpdate(
+      {
+        slotPath: "frequency.volume",
+        value: "weekly",
+        status: "filled",
+        confidence: 0.8,
+        evidenceIds: ["00000000-0000-0000-0000-000000000301"],
+        candidates: [],
+      },
+      {
+        slotPath: "frequency.volume",
+        value: "daily",
+        status: "filled",
+        confidence: 0.75,
+        evidenceIds: ["00000000-0000-0000-0000-000000000302"],
+        candidates: [],
+        changeKind: "correction",
+      },
+    );
+
+    expect(result.write).toBe("upsert");
+    expect(result.value).toBe("daily");
+    expect(result.status).toBe("filled");
+    expect(result.decision.action).toBe("correct");
+    expect(result.candidates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          value: "weekly",
+          reason: "previous_value_before_correction",
+        }),
+      ]),
+    );
+  });
+
+  test("claim-backed slot summaries do not become a second merged list", () => {
+    const result = reconcileSlotUpdate(
+      {
+        slotPath: "systems.systems_of_record",
+        value: { systems: ["Salesforce"] },
+        status: "filled",
+        confidence: 0.8,
+        evidenceIds: ["00000000-0000-0000-0000-000000000301"],
+        candidates: [],
+      },
+      {
+        slotPath: "systems.systems_of_record",
+        value: { systems: ["NetSuite"] },
+        status: "filled",
+        confidence: 0.85,
+        evidenceIds: ["00000000-0000-0000-0000-000000000302"],
+        candidates: [],
+        changeKind: "addition",
+      },
+    );
+
+    expect(result.write).toBe("upsert");
+    expect(result.value).toEqual({ systems: ["Salesforce"] });
+    expect(result.decision.action).toBe("enrich");
+    expect(result.candidates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          value: { systems: ["NetSuite"] },
+          reason: "claim_layer_value_summary",
+        }),
+      ]),
+    );
   });
 });

@@ -53,16 +53,35 @@ export async function phraseDirectorTurnDetailed(input: {
   onTextDelta?: (delta: string, textSoFar: string) => void | Promise<void>;
 }): Promise<PhrasedDirectorTurn> {
   const started = Date.now();
+  const targetPhraseRequired = mustSpeakDeterministicTargetPhrase(
+    input.plan,
+    input.focusProcessName,
+  );
   // When verbatim escalation is active, the deterministic fallback is the
-  // canonical probe phrasing itself.
+  // canonical probe phrasing itself. Concrete focus targets are stricter than
+  // generic verbatim probes: if the controller selected a named process, the
+  // spoken phrase must name that process.
   const verbatimAnchor =
-    input.steering?.verbatimRequired && input.steering.anchorPhrasings[0]
+    !targetPhraseRequired &&
+    input.steering?.verbatimRequired &&
+    input.steering.anchorPhrasings[0]
       ? input.steering.anchorPhrasings[0]
       : undefined;
   const fallback = limitToSingleQuestion(
-    verbatimAnchor ?? deterministicPhrase(input.plan, input.focusProcessName),
+    targetPhraseRequired
+      ? deterministicPhrase(input.plan, input.focusProcessName)
+      : verbatimAnchor ?? deterministicPhrase(input.plan, input.focusProcessName),
   );
   const env = getServerEnv();
+  if (targetPhraseRequired) {
+    await input.onTextDelta?.(fallback, fallback);
+    return {
+      utterance: fallback,
+      metadata: deterministicVoiceMetadata(started, input, fallback, {
+        reason: "required_target_phrase",
+      }),
+    };
+  }
   if (verbatimAnchor) {
     // Verbatim escalation exists because the phraser ignored steering; asking
     // the same phraser to comply via prompt would re-trust the failing
@@ -106,7 +125,6 @@ export async function phraseDirectorTurnDetailed(input: {
       }),
     };
   }
-
   try {
     const commonInput = {
       prompt_template_id: "director.voice.phrase-intent",
@@ -149,6 +167,14 @@ export async function phraseDirectorTurnDetailed(input: {
         })
       : await generate(commonInput);
     const utterance = limitToSingleQuestion(result.text.trim() || fallback);
+    if (voicePhraseMissesRequiredTarget(input.plan, utterance, input.focusProcessName)) {
+      return {
+        utterance: fallback,
+        metadata: deterministicVoiceMetadata(started, input, fallback, {
+          reason: "voice_phrase_missed_required_target",
+        }),
+      };
+    }
     return {
       utterance,
       metadata: {
@@ -164,6 +190,38 @@ export async function phraseDirectorTurnDetailed(input: {
       }),
     };
   }
+}
+
+function mustSpeakDeterministicTargetPhrase(
+  plan: DirectorTurnPlan,
+  focusProcessName?: string,
+) {
+  return (
+    plan.chosen_intent.intent === "select_process_to_expand" &&
+    Boolean(plan.chosen_intent.target_process ?? focusProcessName)
+  );
+}
+
+function voicePhraseMissesRequiredTarget(
+  plan: DirectorTurnPlan,
+  utterance: string,
+  focusProcessName?: string,
+) {
+  if (plan.chosen_intent.intent !== "select_process_to_expand") return false;
+  const target = plan.chosen_intent.target_process ?? focusProcessName;
+  if (!target) return false;
+  const targetTokens = normalizedVoiceTokens(target);
+  if (targetTokens.length === 0) return false;
+  const utteranceTokens = new Set(normalizedVoiceTokens(utterance));
+  return !targetTokens.some((token) => utteranceTokens.has(token));
+}
+
+function normalizedVoiceTokens(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(/\s+/)
+    .filter((token) => token.length > 2);
 }
 
 function directorSteeringPromptSections(steering?: DirectorVoiceSteering) {
@@ -299,6 +357,9 @@ export function deterministicPhrase(
     return intentPhrase(plan, target);
   }
   const withEscalation = (phrase: string) => lastAttemptPhrase(plan, phrase);
+  if (plan.chosen_intent.intent === "select_process_to_expand" && target) {
+    return intentPhrase(plan, target);
+  }
   switch (plan.utterance_type) {
     case "greeting":
       return "Hi. I'm going to build a high-level map of the processes you own: outcomes, people, systems, cadence, metrics, and friction. To start, what part of the business do you oversee?";
@@ -371,7 +432,7 @@ function intentPhrase(plan: PhraseableDirectorPlan, target?: string) {
     case "select_process_to_expand":
       return target
         ? `Let's zoom into ${target}. Where does it start?`
-        : "Which of those processes is most important or most painful to zoom into first?";
+        : "Which of those processes is most important or most painful to zoom into next?";
     case "define_process_boundary":
       return target
         ? `For ${target}, where does the process begin and end?`
@@ -424,7 +485,7 @@ function phaseFallback(phase: DirectorInterviewPhase) {
     case "inventory":
       return "What are the main recurring processes your team owns?";
     case "expand":
-      return "Which process should we zoom into first?";
+      return "Which process should we zoom into next?";
     case "enrich":
       return "Where does that process connect to other teams, systems, or metrics?";
     case "closeout":

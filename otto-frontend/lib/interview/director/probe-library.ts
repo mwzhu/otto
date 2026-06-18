@@ -87,7 +87,7 @@ const defaultProbeSeeds: ProbeSeed[] = [
     probeId: "scope-boundaries",
     targetSlot: "scope.boundaries",
     intent: "define_process_boundary",
-    phrasing: "Which process should we focus on first?",
+    phrasing: "Which process should we focus on next?",
     score: 100,
     reason: "A named process with boundaries anchors the inventory.",
     cooldownSeconds: 75,

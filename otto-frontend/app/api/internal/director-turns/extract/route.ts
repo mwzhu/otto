@@ -101,6 +101,7 @@ export async function POST(request: Request) {
       transcriptSegmentIds: requestBody.transcript_segment_ids,
       evidenceIds: requestBody.evidence_ids,
       turnIndex: requestBody.turn_index,
+      extractionWindowId: requestBody.extraction_window_id,
     };
     const planned = await extractDirectorTurn(turnInput);
     const extractionLatencyMs = Math.max(0, Date.now() - extractionStarted);

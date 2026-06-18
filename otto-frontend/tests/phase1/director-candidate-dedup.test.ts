@@ -344,6 +344,44 @@ describe("Task 9 — slot downgrade guard", () => {
 });
 
 describe("Director continuous slot reconciliation", () => {
+  test("candidate-backed process inventory promotes coverage instead of conflicting", () => {
+    const processes = [
+      "order intake",
+      "vendor invoice processing",
+      "inventory cycle counts",
+      "purchasing and replenishment",
+      "new customer onboarding and credit setup",
+      "returns and credit memos",
+    ];
+
+    const result = reconcileSlotUpdate(
+      {
+        slotPath: "process.inventory",
+        value: null,
+        status: "empty",
+        confidence: 0,
+        evidenceIds: [],
+        candidates: [],
+      },
+      {
+        slotPath: "process.inventory",
+        value: { count: processes.length, processes },
+        status: "partial",
+        confidence: 0.82,
+        evidenceIds: ["00000000-0000-0000-0000-000000000301"],
+        candidates: [],
+      },
+    );
+
+    expect(result.write).toBe("upsert");
+    expect(result.status).toBe("filled");
+    expect(result.value).toEqual({ count: processes.length, processes });
+    expect(result.decision.action).toBe("create");
+    expect(result.decision.backing).toBe("candidate");
+    expect(result.decision.rationale).toMatch(/candidate_processes/);
+    expect(result.candidates).toEqual([]);
+  });
+
   test("slot-state-backed lists merge unique values and evidence", () => {
     const result = reconcileSlotUpdate(
       {

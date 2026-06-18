@@ -371,6 +371,27 @@ export function reconcileSlotUpdate(
     };
   }
 
+  if (policy.backing === "candidate") {
+    const value = existingHasValue ? existing.value : incoming.value;
+    const confidence = Math.max(existing.confidence, incoming.confidence);
+    return {
+      write: "upsert",
+      value,
+      status: candidateBackedSlotStatus(existing.status, incoming.status, value),
+      confidence,
+      evidenceIds: mergedEvidenceIds,
+      candidates: mergeSlotCandidates(existingCandidates, incomingCandidates),
+      decision: {
+        ...baseDecision,
+        action: existingHasValue ? "enrich" : "create",
+        value,
+        confidence,
+        rationale:
+          "Candidate-backed slot is a coverage summary; durable truth lives in candidate_processes.",
+      },
+    };
+  }
+
   if (
     existingHasValue &&
     !explicitCorrection &&
@@ -566,6 +587,20 @@ function strongerSlotStatus(
   incoming: DirectorSlotStatus,
 ): DirectorSlotStatus {
   return statusRank(incoming) > statusRank(existing) ? incoming : existing;
+}
+
+function candidateBackedSlotStatus(
+  existing: DirectorSlotStatus,
+  incoming: DirectorSlotStatus,
+  value: unknown,
+): DirectorSlotStatus {
+  if (isNonAnswerSlotExtraction(value)) {
+    return strongerSlotStatus(existing, incoming);
+  }
+  if (value !== undefined && value !== null && incoming !== "asked_unknown") {
+    return "filled";
+  }
+  return strongerSlotStatus(existing, incoming);
 }
 
 function statusRank(status: DirectorSlotStatus): number {
